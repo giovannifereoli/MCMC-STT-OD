@@ -6,6 +6,7 @@ from itertools import product
 from scipy.stats import norm
 from MCMC import MCMCModel
 
+# NOTE for Jay:
 # Increasing order of STT increase precision! OMG!!!
 
 
@@ -202,31 +203,34 @@ if __name__ == "__main__":
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_ref = np.array([7000, 0, 0, 0, 7.5, 1.0])
     order = 3
-    t_obs = np.linspace(0, 2 * 3600, 4)  # observations at 0, 1, 2, 3 hours
+    t_obs = np.linspace(0, 2 * 3600, 5)
 
     # Simulate true deviation from nominal initial state
-    true_dev = np.array([10, -5, 7, 0.01, -0.005, 0.008])  # km / km/s
+    true_dev = np.array([10, -5, 1, 0.1, -0.5, 0.8])  # km / km/s
     sol_ref, stts_ref = propagate(x0_ref, mu, order, t_obs, rtol=1e-12, atol=1e-14)
     _, x_true = propagate_deviation(sol_ref, stts_ref, true_dev, order=order)
 
     # Generate observations (range + range-rate) with noise
     sigma_range = 1e-3  # 1 mm
     sigma_rangerate = 1e-6  # 1 mm/s
-    y_obs = np.hstack(
-        [
-            x_true[:, :3] + np.random.normal(0, sigma_range, size=(len(t_obs), 3)),
-            x_true[:, 3:] + np.random.normal(0, sigma_rangerate, size=(len(t_obs), 3)),
-        ]
-    ).flatten()
+    range_obs = np.linalg.norm(x_true[:, :3], axis=1) + np.random.normal(
+        0, sigma_range, size=len(t_obs)
+    )
+    rangerate_obs = np.linalg.norm(x_true[:, 3:], axis=1) + np.random.normal(
+        0, sigma_rangerate, size=len(t_obs)
+    )
+    y_obs = np.hstack([range_obs, rangerate_obs])
 
     # Residual function for MCMC
     def residuals(delta_x0):
         _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
-        y_model = np.hstack([x_est[:, :3], x_est[:, 3:]]).flatten()
+        range_model = np.linalg.norm(x_est[:, :3], axis=1)
+        rangerate_model = np.linalg.norm(x_est[:, 3:], axis=1)
+        y_model = np.hstack([range_model, rangerate_model])
         weights = np.hstack(
             [
-                np.full(3 * len(t_obs), sigma_range),
-                np.full(3 * len(t_obs), sigma_rangerate),
+                np.full(len(t_obs), sigma_range),
+                np.full(len(t_obs), sigma_rangerate),
             ]
         )
         return (y_obs - y_model) / weights
@@ -236,13 +240,15 @@ if __name__ == "__main__":
     initial_guess = np.zeros(6)
 
     # Run MCMC
+    # NOTE: We recommend using hundreds of walkers, collecting at least 10× the
+    # autocorrelation time in samples, and allocating a burn‑in period of 10–25% of the chain.
     model = MCMCModel(
         residuals_func=residuals,
         initial_params=initial_guess,
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=3000, n_walkers=32, burn_in=500)
+    model.run(n_samples=3000, n_walkers=128, burn_in=500)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_log_likelihood()

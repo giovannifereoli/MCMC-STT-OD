@@ -97,6 +97,10 @@ class MCMCModel:
             print("Run MCMC first.")
             return
 
+        # print("MCMC summary:")
+        # tau = self.sampler.get_autocorr_time()
+        # print(f"Autocorr time per parameter: {tau}")
+
         print("Parameter estimates:")
         for i in range(self.ndim):
             mcmc = np.percentile(self.samples[:, i], [16, 50, 84])
