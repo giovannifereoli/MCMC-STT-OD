@@ -201,7 +201,8 @@ def propagate_deviation(sol, stts, delta_x0, order):
 if __name__ == "__main__":
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
-    x0_ref = np.array([7000, 0, 0, 0, 7.5, 1.0])
+    x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
+    # x0_ref = np.array([7000, 0, 0, 0, 7.5, 1.0])
     order = 3
     t_obs = np.linspace(0, 2 * 3600, 5)
 
