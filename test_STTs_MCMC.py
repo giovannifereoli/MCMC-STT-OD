@@ -248,9 +248,9 @@ if __name__ == "__main__":
     initial_guess = np.zeros(6)
     priors = [
         (
-            norm(loc=initial_guess[i], scale=10)
+            norm(loc=initial_guess[i], scale=1)
             if i < 3
-            else norm(loc=initial_guess[i], scale=1)
+            else norm(loc=initial_guess[i], scale=0.1)
         )
         for i in range(6)
     ]
@@ -264,14 +264,7 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    # model.run(n_samples=3000, n_walkers=128, burn_in=500)
-    model.run_hmc(
-        n_samples=2000,
-        burn_in=500,
-        step_size=1e-6,  # ← try smaller values
-        num_integration_steps=1,  # ← start with shorter paths
-        print_every=50,
-    )
+    model.run(n_samples=3000, n_walkers=128, burn_in=500)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_log_likelihood()

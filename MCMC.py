@@ -224,14 +224,23 @@ class MCMCModel:
             q = np.diff(mcmc)
             print(f"$\\theta_{{{i}}}$: {mcmc[1]:.4f} (+{q[1]:.4f}/-{q[0]:.4f})")
 
+        truths_median = np.median(self.samples, axis=0)
+        truths_mean = np.mean(self.samples, axis=0)
+
         fig = corner.corner(
             self.samples,
             labels=[f"$\\theta_{{{i}}}$" for i in range(self.ndim)],
-            truths=np.median(self.samples, axis=0),
+            truths=truths_median,
             show_titles=True,
             title_fmt=".4f",
             title_kwargs={"fontsize": 12},
+            # levels=(0.68, 0.95),
         )
+
+        # Overlay mean manually
+        # axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
+        # for i in range(self.ndim):
+        #    axes[i, i].axvline(truths_mean[i], color="r", linestyle="--", label="mean")
         fig.set_size_inches(8, 8)  # or whatever size you want
         plt.tight_layout()
         plt.show()
