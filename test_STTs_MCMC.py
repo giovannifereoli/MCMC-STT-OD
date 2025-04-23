@@ -202,12 +202,11 @@ if __name__ == "__main__":
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
-    # x0_ref = np.array([7000, 0, 0, 0, 7.5, 1.0])
     order = 3
     t_obs = np.linspace(0, 2 * 3600, 5)
 
     # Simulate true deviation from nominal initial state
-    true_dev = np.array([10, -5, 1, 0.1, -0.5, 0.8])  # km / km/s
+    true_dev = np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s
     sol_ref, stts_ref = propagate(x0_ref, mu, order, t_obs, rtol=1e-12, atol=1e-14)
     _, x_true = propagate_deviation(sol_ref, stts_ref, true_dev, order=order)
 
@@ -237,8 +236,16 @@ if __name__ == "__main__":
         return (y_obs - y_model) / weights
 
     # Priors and initial guess
-    priors = [norm(loc=0, scale=5) for _ in range(6)]
+    # NOTE: The initial guess should be included in the prior!
     initial_guess = np.zeros(6)
+    priors = [
+        (
+            norm(loc=initial_guess[i], scale=10)
+            if i < 3
+            else norm(loc=initial_guess[i], scale=1)
+        )
+        for i in range(6)
+    ]
 
     # Run MCMC
     # NOTE: We recommend using hundreds of walkers, collecting at least 10× the

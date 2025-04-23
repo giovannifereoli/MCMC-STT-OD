@@ -2,9 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import corner
 import emcee
-import jax
-import jax.numpy as jnp
-import blackjax
+import multiprocessing
 
 plt.rcParams.update(
     {
@@ -48,13 +46,37 @@ class MCMCModel:
             return -np.inf
         return lp + self.log_likelihood(theta)
 
-    def run(self, n_samples=5000, n_walkers=50, burn_in=500):
-        def log_prob(theta):
-            return self.log_posterior(theta)
+    def log_prob(self, theta):
+        return self.log_posterior(theta)
 
-        pos = self.initial_params + 1e-4 * np.random.randn(n_walkers, self.ndim)
-        self.sampler = emcee.EnsembleSampler(n_walkers, self.ndim, log_prob)
-        self.sampler.run_mcmc(pos, n_samples, progress=True)
+    def initialize_walkers_from_prior(self, n_walkers, sigma_multiplier=1.0):
+        pos = np.zeros((n_walkers, self.ndim))
+
+        for i, prior in enumerate(self.param_priors):
+            try:
+                pos[:, i] = prior.rvs(size=n_walkers)
+            except AttributeError:
+                mu = prior.mean()
+                sigma = prior.std()
+                pos[:, i] = mu + sigma_multiplier * sigma * np.random.randn(n_walkers)
+
+        return pos
+
+    def run(self, n_samples=5000, n_walkers=50, burn_in=500, init_pos=None):
+        # Initialize walkers
+        if init_pos is None:
+            pos = self.initialize_walkers_from_prior(n_walkers)
+        else:
+            pos = init_pos
+
+        # Run MCMC using emcee
+        with multiprocessing.get_context("fork").Pool() as pool:
+            self.sampler = emcee.EnsembleSampler(
+                n_walkers, self.ndim, self.log_prob, pool=pool
+            )
+            self.sampler.run_mcmc(pos, n_samples, progress=True)
+
+        # Discard burn-in samples and flatten the chain
         self.samples = self.sampler.get_chain(discard=burn_in, flat=True)
         self.log_probs = self.sampler.get_log_prob(discard=burn_in, flat=True)
 
@@ -158,7 +180,7 @@ class MCMCModel:
         plt.figure(figsize=(8, 4))
         plt.plot(self.log_probs, alpha=0.6)
         plt.xlabel("Sample Index")
-        plt.ylabel("$\\log \\mathcal{P}(\\theta \mid y)$")
+        plt.ylabel(r"$\log \mathcal{P}(\theta \mid y)$")
         plt.grid(True)
         plt.tight_layout()
         plt.show()

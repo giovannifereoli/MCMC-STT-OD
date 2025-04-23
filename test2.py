@@ -32,7 +32,7 @@ def residuals(x0_est):
 
 
 # === Prior: wide Gaussian on x0 ===
-priors = [norm(loc=0.0, scale=3.0) for _ in range(n_state)]
+priors = [norm(loc=0.0, scale=1.0) for _ in range(n_state)]
 
 # === Initial guess for x0 ===
 initial_guess = np.zeros(n_state)
@@ -46,9 +46,9 @@ model = MCMCModel(
 )
 
 
-# model.run(n_samples=5000, n_walkers=40, burn_in=1000)
-model.run_hmc(n_samples=3000)
-# model.plot_convergence()
-# model.plot_postfit_residuals()
-# model.plot_log_likelihood()
+model.run(n_samples=5000, n_walkers=40, burn_in=1000)
+# model.run_hmc(n_samples=3000)
+model.plot_convergence()
+model.plot_postfit_residuals()
+model.plot_log_likelihood()
 model.summary()
