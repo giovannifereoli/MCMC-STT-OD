@@ -4,6 +4,7 @@ from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 import math
 from itertools import product
+from math import factorial
 
 
 def generate_stt_functions(mu, order):
@@ -179,7 +180,43 @@ def propagate_deviation(sol, stts, delta_x0, order):
     return delta, x_nom + delta
 
 
-# === Compute orbital energy for nominal and perturbed trajectories ===
+def compute_radius_from_stts(stts, order):
+    """
+    Estimate the radius of convergence R_c at each time step from STT tensors using the root test.
+
+    Parameters
+    ----------
+    stts : dict
+        Multi-index State-Transition Tensors: stts[k][t].shape = (6,)*k+1
+    order : int
+        Maximum STT order used in the expansion
+
+    Returns
+    -------
+    Rcs : ndarray, shape (n_steps,)
+        Estimated radius of convergence at each time step.
+    """
+    n_steps = stts[1].shape[0]
+    Rcs = np.zeros(n_steps)
+
+    for t in range(n_steps):
+        roots = []
+        for k in range(1, order + 1):
+            Tk = stts[k][t]
+            norm_k = np.linalg.norm(Tk.flatten(), ord=2)  # Frobenius norm
+            if norm_k > 0:
+                roots.append(norm_k ** (1.0 / k))
+        if roots:
+            roots = np.array(roots)
+            Rcs[t] = (
+                1.0 / np.max(roots[-3:]) if len(roots) >= 3 else 1.0 / np.max(roots)
+            )
+        else:
+            Rcs[t] = np.nan
+
+    return Rcs
+
+
 def specific_energy(x, mu):
     r_vec = x[:, :3]
     v_vec = x[:, 3:]
@@ -191,7 +228,7 @@ def specific_energy(x, mu):
 if __name__ == "__main__":
     μ = 398600.4418  # km^3/s^2
     x0 = np.array([7000, 0, 0, 0, 7.5, 1.0])
-    order = 2
+    order = 1
     t_eval = np.linspace(0, 2 * 3600, 1000)
 
     sol, stts = propagate(x0, μ, order, t_eval, rtol=1e-12, atol=1e-14, method="RK45")
@@ -222,6 +259,19 @@ if __name__ == "__main__":
     plt.ylabel("x (km)")
     plt.title(f"Propagated vs STT-Propagated orbit ({order}th-order STT)")
     plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # Compute radius of convergence over time
+    Rcs = compute_radius_from_stts(stts, order)
+
+    # Plot R_c(t)
+    plt.figure()
+    plt.semilogy(sol.t, Rcs)
+    plt.xlabel("Time (s)")
+    plt.ylabel("Estimated $R_c$ (∥δx₀∥ radius)")
+    plt.title(f"STT Series Radius of Convergence (order={order})")
     plt.grid(True)
     plt.tight_layout()
     plt.show()

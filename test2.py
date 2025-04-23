@@ -45,8 +45,10 @@ model = MCMCModel(
     observed_data=y_obs,
 )
 
-model.run(n_samples=5000, n_walkers=40, burn_in=1000)
-model.plot_convergence()
-model.plot_postfit_residuals()
-model.plot_log_likelihood()
+
+# model.run(n_samples=5000, n_walkers=40, burn_in=1000)
+model.run_hmc(n_samples=3000)
+# model.plot_convergence()
+# model.plot_postfit_residuals()
+# model.plot_log_likelihood()
 model.summary()

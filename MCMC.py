@@ -2,6 +2,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import corner
 import emcee
+import jax
+import jax.numpy as jnp
+import blackjax
 
 plt.rcParams.update(
     {
@@ -54,6 +57,88 @@ class MCMCModel:
         self.sampler.run_mcmc(pos, n_samples, progress=True)
         self.samples = self.sampler.get_chain(discard=burn_in, flat=True)
         self.log_probs = self.sampler.get_log_prob(discard=burn_in, flat=True)
+
+    def run_hmc(
+        self,
+        n_samples=3000,
+        burn_in=500,
+        step_size=1e-3,
+        num_integration_steps=20,
+        print_every=500,
+    ):
+        """
+        Run Hamiltonian Monte Carlo from scratch using NumPy, with status prints.
+        """
+
+        def U(theta):
+            lp = self.log_prior(theta)
+            if not np.isfinite(lp):
+                return np.inf
+            return -lp - self.log_likelihood(theta)
+
+        def grad_U(theta):
+            eps = 1e-6
+            grad = np.zeros_like(theta)
+            for i in range(len(theta)):
+                d = np.zeros_like(theta)
+                d[i] = eps
+                grad[i] = (U(theta + d) - U(theta - d)) / (2 * eps)
+            return grad
+
+        def leapfrog(theta, p, step_size, num_steps):
+            theta_new = theta.copy()
+            p_new = p - 0.5 * step_size * grad_U(theta_new)
+
+            for _ in range(num_steps - 1):
+                theta_new += step_size * p_new
+                p_new -= step_size * grad_U(theta_new)
+
+            theta_new += step_size * p_new
+            p_new -= 0.5 * step_size * grad_U(theta_new)
+            return theta_new, -p_new
+
+        theta_current = np.array(self.initial_params)
+        samples = []
+        logps = []
+        accepted = 0
+
+        total_steps = n_samples + burn_in
+        print("Starting HMC sampling...")
+        for i in range(total_steps):
+            p_current = np.random.randn(self.ndim)
+            theta_proposed, p_proposed = leapfrog(
+                theta_current, p_current, step_size, num_integration_steps
+            )
+
+            U_current = U(theta_current)
+            U_proposed = U(theta_proposed)
+            K_current = 0.5 * np.sum(p_current**2)
+            K_proposed = 0.5 * np.sum(p_proposed**2)
+
+            log_accept_prob = U_current + K_current - U_proposed - K_proposed
+            accepted_flag = False
+
+            if np.log(np.random.rand()) < log_accept_prob:
+                theta_current = theta_proposed
+                accepted_flag = True
+                accepted += 1
+
+            if i >= burn_in:
+                samples.append(theta_current.copy())
+                logps.append(-U(theta_current))
+
+            if i % print_every == 0 or i == total_steps - 1:
+                phase = "Burn-in" if i < burn_in else "Sampling"
+                print(
+                    f"[{i}/{total_steps}] {phase} | "
+                    f"Accepted so far: {accepted}/{i+1} ({(accepted/(i+1))*100:.1f}%)"
+                )
+
+        self.samples = np.array(samples)
+        self.log_probs = np.array(logps)
+
+        print("HMC sampling completed.")
+        print(f"Final acceptance rate: {(accepted / total_steps):.2%}")
 
     def plot_convergence(self):
         fig, axes = plt.subplots(self.ndim, figsize=(10, 7), sharex=True)
