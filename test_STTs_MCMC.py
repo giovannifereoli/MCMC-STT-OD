@@ -203,7 +203,7 @@ if __name__ == "__main__":
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
     order = 3
-    t_obs = np.linspace(0, 2 * 3600, 5)
+    t_obs = np.linspace(0, 180, 5)
 
     # Simulate true deviation from nominal initial state
     true_dev = np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s

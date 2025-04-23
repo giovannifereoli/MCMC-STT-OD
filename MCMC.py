@@ -174,15 +174,25 @@ class MCMCModel:
         plt.show()
 
     def plot_log_likelihood(self):
-        if self.log_probs is None:
+        if self.sampler is None:
             print("Run MCMC first.")
             return
-        plt.figure(figsize=(8, 4))
-        plt.plot(self.log_probs, alpha=0.6)
-        plt.xlabel("Sample Index")
-        plt.ylabel(r"$\log \mathcal{P}(\theta \mid y)$")
-        plt.grid(True)
+
+        log_probs_all = self.sampler.get_log_prob()  # shape: (n_steps, n_walkers)
+        n_steps, n_walkers = log_probs_all.shape
+
+        plt.figure(figsize=(10, 5))
+        plt.yscale("log")
+        for i in range(n_walkers):
+            plt.plot(-log_probs_all[:, i], alpha=0.6, label=f"Walker {i}", linewidth=1)
+
+        plt.xlabel("Step Number")
+        plt.ylabel(r"$-\log \mathcal{P}(\theta \mid y)$")
+        plt.title("Log-Likelihood Traces per Walker")
+        plt.grid(True, linestyle=":")
         plt.tight_layout()
+        # Uncomment below to see legend (can be cluttered with many walkers)
+        # plt.legend(fontsize=8, ncol=4)
         plt.show()
 
     def plot_postfit_residuals(self):
