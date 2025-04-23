@@ -10,20 +10,28 @@ from MCMC import MCMCModel
 # Increasing order of STT increase precision! OMG!!!
 
 
-def generate_stt_functions(mu, order):
+def generate_stt_functions(mu, order, beta=1e-5):
     """
-    Symbolically generate f, A and B_k up to arbitrary 'order'.
+    Symbolically generate f, A and B_k up to arbitrary 'order',
+    including a drag term modeled as a = -beta * |v| * v.
     """
-    # 1) state symbols
+    # 1) State symbols
     x_syms = sp.symbols("x y z vx vy vz")
     x, y, z, vx, vy, vz = x_syms
     mu_sym = sp.Float(mu)
-    r = sp.sqrt(x**2 + y**2 + z**2)
+    beta_sym = sp.Float(beta)
 
-    # 2) two‑body dynamics
-    f_sym = sp.Matrix(
-        [vx, vy, vz, -mu_sym * x / r**3, -mu_sym * y / r**3, -mu_sym * z / r**3]
-    )
+    # 2) Define position and velocity magnitude
+    r = sp.sqrt(x**2 + y**2 + z**2)
+    v = sp.sqrt(vx**2 + vy**2 + vz**2)
+
+    # 3) Two-body + drag dynamics
+    a_grav = -mu_sym * sp.Matrix([x, y, z]) / r**3
+    a_drag = -beta_sym * v * sp.Matrix([vx, vy, vz])
+    a_total = a_grav + a_drag
+
+    # 4) Full f vector
+    f_sym = sp.Matrix([vx, vy, vz, *a_total])
 
     # 3) STM generator
     X = sp.Matrix(x_syms)
@@ -256,7 +264,14 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=3000, n_walkers=128, burn_in=500)
+    # model.run(n_samples=3000, n_walkers=128, burn_in=500)
+    model.run_hmc(
+        n_samples=2000,
+        burn_in=500,
+        step_size=1e-6,  # ← try smaller values
+        num_integration_steps=1,  # ← start with shorter paths
+        print_every=50,
+    )
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_log_likelihood()

@@ -86,7 +86,7 @@ class MCMCModel:
         burn_in=500,
         step_size=1e-3,
         num_integration_steps=20,
-        print_every=500,
+        print_every=10,
     ):
         """
         Run Hamiltonian Monte Carlo from scratch using NumPy, with status prints.
@@ -224,7 +224,7 @@ class MCMCModel:
             q = np.diff(mcmc)
             print(f"$\\theta_{{{i}}}$: {mcmc[1]:.4f} (+{q[1]:.4f}/-{q[0]:.4f})")
 
-        corner.corner(
+        fig = corner.corner(
             self.samples,
             labels=[f"$\\theta_{{{i}}}$" for i in range(self.ndim)],
             truths=np.median(self.samples, axis=0),
@@ -232,4 +232,6 @@ class MCMCModel:
             title_fmt=".4f",
             title_kwargs={"fontsize": 12},
         )
+        fig.set_size_inches(8, 8)  # or whatever size you want
+        plt.tight_layout()
         plt.show()
