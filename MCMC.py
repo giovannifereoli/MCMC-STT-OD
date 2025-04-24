@@ -49,17 +49,16 @@ class MCMCModel:
     def log_prob(self, theta):
         return self.log_posterior(theta)
 
-    def initialize_walkers_from_prior(self, n_walkers, sigma_multiplier=1.0):
+    def initialize_walkers_from_prior(self, n_walkers):
         pos = np.zeros((n_walkers, self.ndim))
-
         for i, prior in enumerate(self.param_priors):
-            try:
+            if hasattr(prior, "rvs"):
                 pos[:, i] = prior.rvs(size=n_walkers)
-            except AttributeError:
+            else:
+                # Fallback if prior is given as a mean/std tuple
                 mu = prior.mean()
                 sigma = prior.std()
-                pos[:, i] = mu + sigma_multiplier * sigma * np.random.randn(n_walkers)
-
+                pos[:, i] = np.random.normal(mu, sigma, size=n_walkers)
         return pos
 
     def run(self, n_samples=5000, n_walkers=50, burn_in=500, init_pos=None):

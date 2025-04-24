@@ -5,12 +5,15 @@ import math
 from itertools import product
 from scipy.stats import norm
 from MCMC import MCMCModel
+from scipy.constants import pi
+from scipy.spatial.transform import Rotation as R
+from astropy.time import Time
 
 # NOTE for Jay:
 # Increasing order of STT increase precision! OMG!!!
 
 
-def generate_stt_functions(mu, order, beta=1e-5):
+def generate_stt_functions(mu, order, beta=0.0):
     """
     Symbolically generate f, A and B_k up to arbitrary 'order',
     including a drag term modeled as a = -beta * |v| * v.
@@ -206,6 +209,40 @@ def propagate_deviation(sol, stts, delta_x0, order):
     return delta, x_nom + delta
 
 
+def geodetic_to_ecef(lat, lon, alt):
+    # WGS-84 ellipsoid constants
+    a = 6378.137  # Equatorial radius [km]
+    e2 = 6.69437999014e-3  # Square of eccentricity
+
+    lat = np.radians(lat)
+    lon = np.radians(lon)
+
+    N = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
+    x = (N + alt) * np.cos(lat) * np.cos(lon)
+    y = (N + alt) * np.cos(lat) * np.sin(lon)
+    z = (N * (1 - e2) + alt) * np.sin(lat)
+    return np.array([x, y, z])
+
+
+def ecef_to_eci(ecef_pos, t_obs):
+    omega_earth = 7.2921150e-5  # rad/s
+
+    station_eci_t = []
+    station_vel_eci_t = []
+
+    for t in t_obs:
+        theta = omega_earth * t  # rotation angle from JD0 (in radians)
+        Rz = R.from_euler("z", theta).as_matrix()
+
+        r_eci = Rz @ ecef_pos
+        v_eci = np.cross([0, 0, omega_earth], r_eci)
+
+        station_eci_t.append(r_eci)
+        station_vel_eci_t.append(v_eci)
+
+    return np.array(station_eci_t), np.array(station_vel_eci_t)
+
+
 if __name__ == "__main__":
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
@@ -218,22 +255,29 @@ if __name__ == "__main__":
     sol_ref, stts_ref = propagate(x0_ref, mu, order, t_obs, rtol=1e-12, atol=1e-14)
     _, x_true = propagate_deviation(sol_ref, stts_ref, true_dev, order=order)
 
-    # Generate observations (range + range-rate) with noise
-    sigma_range = 1e-3  # 1 mm
+    # Initialize observations (range + range-rate) with noise
+    JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
+    sigma_range = 1e-3  # 1 m
     sigma_rangerate = 1e-6  # 1 mm/s
-    range_obs = np.linalg.norm(x_true[:, :3], axis=1) + np.random.normal(
-        0, sigma_range, size=len(t_obs)
-    )
-    rangerate_obs = np.linalg.norm(x_true[:, 3:], axis=1) + np.random.normal(
-        0, sigma_rangerate, size=len(t_obs)
-    )
+
+    # Ground station at Goldstone DSN
+    station_ecef = geodetic_to_ecef(35.2472, -116.7933, 1.0)
+    station_eci_t, station_vel_eci_t = ecef_to_eci(station_ecef, t_obs)
+
+    # Simulate observations
+    los_vec = x_true[:, :3] - station_eci_t
+    range_obs = np.linalg.norm(los_vec, axis=1)
+    los_vel = x_true[:, 3:] - station_vel_eci_t
+    rangerate_obs = np.sum(los_vec * los_vel, axis=1) / range_obs
     y_obs = np.hstack([range_obs, rangerate_obs])
 
     # Residual function for MCMC
     def residuals(delta_x0):
         _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
-        range_model = np.linalg.norm(x_est[:, :3], axis=1)
-        rangerate_model = np.linalg.norm(x_est[:, 3:], axis=1)
+        los_vec_model = x_est[:, :3] - station_eci_t
+        range_model = np.linalg.norm(los_vec_model, axis=1)
+        los_vel_model = x_est[:, 3:] - station_vel_eci_t
+        rangerate_model = np.sum(los_vec_model * los_vel_model, axis=1) / range_model
         y_model = np.hstack([range_model, rangerate_model])
         weights = np.hstack(
             [
@@ -248,9 +292,9 @@ if __name__ == "__main__":
     initial_guess = np.zeros(6)
     priors = [
         (
-            norm(loc=initial_guess[i], scale=1)
+            norm(loc=initial_guess[i], scale=0.5)
             if i < 3
-            else norm(loc=initial_guess[i], scale=0.1)
+            else norm(loc=initial_guess[i], scale=0.01)
         )
         for i in range(6)
     ]
@@ -264,7 +308,8 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=3000, n_walkers=128, burn_in=500)
+    model.run(n_samples=3000, n_walkers=128, burn_in=1000)
+    # model.run(n_samples=10000, n_walkers=256, burn_in=2000)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_log_likelihood()
