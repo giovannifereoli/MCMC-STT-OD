@@ -209,6 +209,61 @@ def propagate_deviation(sol, stts, delta_x0, order):
     return delta, x_nom + delta
 
 
+def propagate_deviation_unrolled(sol, stts, delta_x0, order):
+    """
+    Fast unrolled version for 6-state systems, up to arbitrary order (up to 4th).
+    """
+    n_steps = sol.y.shape[1]
+    delta = np.zeros((n_steps, 6))
+    x_nom = sol.y[:6, :].T  # shape (n_steps,6)
+
+    for t in range(n_steps):
+        d = stts[1][t] @ delta_x0
+
+        if order >= 2:
+            T2 = stts[2][t]
+            d += 0.5 * np.einsum("ijk,j,k", T2, delta_x0, delta_x0)
+
+        if order >= 3:
+            T3 = stts[3][t]
+            d += (1 / 6) * np.einsum("ijkl,j,k,l", T3, delta_x0, delta_x0, delta_x0)
+
+        if order >= 4:
+            T4 = stts[4][t]
+            d += (1 / 24) * np.einsum(
+                "ijklm,j,k,l,m", T4, delta_x0, delta_x0, delta_x0, delta_x0
+            )
+
+        delta[t] = d
+
+    return delta, x_nom + delta
+
+
+def propagate_deviation_vectorized(sol, stts, delta_x0, order):
+    """
+    Fully vectorized propagation without for-loop over time.
+    """
+    x_nom = sol.y[:6, :].T  # (n_steps,6)
+
+    # Start with first order: Φ @ δx0
+    delta = np.einsum("tij,j->ti", stts[1], delta_x0)
+
+    if order >= 2:
+        delta += 0.5 * np.einsum("tijk,j,k->ti", stts[2], delta_x0, delta_x0)
+
+    if order >= 3:
+        delta += (1 / 6) * np.einsum(
+            "tijkl,j,k,l->ti", stts[3], delta_x0, delta_x0, delta_x0
+        )
+
+    if order >= 4:
+        delta += (1 / 24) * np.einsum(
+            "tijklm,j,k,l,m->ti", stts[4], delta_x0, delta_x0, delta_x0, delta_x0
+        )
+
+    return delta, x_nom + delta
+
+
 def geodetic_to_ecef(lat, lon, alt):
     # WGS-84 ellipsoid constants
     a = 6378.137  # Equatorial radius [km]
@@ -244,11 +299,55 @@ def ecef_to_eci(ecef_pos, t_obs):
 
 
 if __name__ == "__main__":
+
+    # Dummy setup
+    n_steps = 1000
+    state_size = 6
+    order = 4
+
+    # Create random dummy sol and stts for testing
+    sol = type("", (), {})()  # make a dummy empty object
+    sol.y = np.random.randn(state_size + 6**2 + 6**3 + 6**4 + 6**5, n_steps)
+
+    # Fake x_nom
+    x_nom = np.random.randn(state_size, n_steps)
+    sol.y[:6, :] = x_nom
+
+    # Generate random STTs
+    stts = {
+        1: np.random.randn(n_steps, 6, 6),
+        2: np.random.randn(n_steps, 6, 6, 6),
+        3: np.random.randn(n_steps, 6, 6, 6, 6),
+        4: np.random.randn(n_steps, 6, 6, 6, 6, 6),
+    }
+
+    # Random small delta_x0
+    delta_x0 = np.random.randn(6) * 1e-2
+
+    # --- Run all methods ---
+    delta1, _ = propagate_deviation(sol, stts, delta_x0, order)
+    delta2, _ = propagate_deviation_unrolled(sol, stts, delta_x0, order)
+    delta3, _ = propagate_deviation_vectorized(sol, stts, delta_x0, order)
+
+    # --- Compare ---
+    print(
+        "Max difference between propagate_deviation and propagate_deviation_unrolled:",
+        np.max(np.abs(delta1 - delta2)),
+    )
+    print(
+        "Max difference between propagate_deviation and propagate_deviation_vectorized:",
+        np.max(np.abs(delta1 - delta3)),
+    )
+    print(
+        "Max difference between propagate_deviation_unrolled and propagate_deviation_vectorized:",
+        np.max(np.abs(delta2 - delta3)),
+    )
+
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
     order = 3
-    t_obs = np.linspace(0, 180, 5)
+    t_obs = np.linspace(0, 24 * 3600, 100)
 
     # Simulate true deviation from nominal initial state
     true_dev = np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s
@@ -273,7 +372,9 @@ if __name__ == "__main__":
 
     # Residual function for MCMC
     def residuals(delta_x0):
-        _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
+        _, x_est = propagate_deviation_vectorized(
+            sol_ref, stts_ref, delta_x0, order=order
+        )
         los_vec_model = x_est[:, :3] - station_eci_t
         range_model = np.linalg.norm(los_vec_model, axis=1)
         los_vel_model = x_est[:, 3:] - station_vel_eci_t
@@ -292,9 +393,9 @@ if __name__ == "__main__":
     initial_guess = np.zeros(6)
     priors = [
         (
-            norm(loc=initial_guess[i], scale=0.5)
+            norm(loc=initial_guess[i], scale=1e-2)
             if i < 3
-            else norm(loc=initial_guess[i], scale=0.01)
+            else norm(loc=initial_guess[i], scale=1e-4)
         )
         for i in range(6)
     ]
@@ -308,7 +409,7 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=3000, n_walkers=128, burn_in=1000)
+    model.run(n_samples=5000, n_walkers=128, burn_in=2000)
     # model.run(n_samples=10000, n_walkers=256, burn_in=2000)
     model.plot_convergence()
     model.plot_postfit_residuals()
