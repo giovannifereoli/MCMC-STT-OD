@@ -8,6 +8,7 @@ from MCMC import MCMCModel
 from scipy.constants import pi
 from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
+import matplotlib.pyplot as plt
 
 # NOTE for Jay:
 # Increasing order of STT increase precision! OMG!!!
@@ -238,56 +239,135 @@ def ecef_to_eci(ecef_pos, t_obs):
     return np.array(station_eci_t), np.array(station_vel_eci_t)
 
 
+def is_visible(station_pos_eci, sc_pos_eci):
+    rho = sc_pos_eci - station_pos_eci
+    rho_norm = np.linalg.norm(rho, axis=1)
+    station_norm = np.linalg.norm(station_pos_eci, axis=1)
+    dot_product = np.sum(rho * station_pos_eci, axis=1)
+    elevation = np.arcsin(dot_product / (rho_norm * station_norm))  # in radians
+    return elevation > np.deg2rad(10)  # visibility if elevation > 10 deg
+
+
 if __name__ == "__main__":
+    from astropy.time import Time
+    import numpy as np
+    from scipy.stats import norm
+
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
-    x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
+    x0_true = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
     order = 3
-    t_obs = np.linspace(0, 24 * 3600, 100)
+    t_obs = np.linspace(0, 24 * 3600, int((24 * 3600) / 10))
 
-    # Simulate true deviation from nominal initial state
-    true_dev = 1e-3 * np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s
-    sol_ref, stts_ref = propagate(x0_ref, mu, order, t_obs, rtol=1e-12, atol=1e-14)
-    _, x_true = propagate_deviation(sol_ref, stts_ref, true_dev, order=order)
+    # Simulate true deviation
+    sol_true, stts_true = propagate(x0_true, mu, order, t_obs, rtol=1e-10, atol=1e-12)
+    x_true = sol_true.y[:6, :].T  # shape (n_steps, 6)
 
-    # Initialize observations (range + range-rate) with noise
+    # Measurement noise
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
-    sigma_range = 1e-3  # 1 m
+    sigma_range = 1e-3  # 1 meter
     sigma_rangerate = 1e-6  # 1 mm/s
 
-    # Ground station at Goldstone DSN
-    station_ecef = geodetic_to_ecef(35.2472, -116.7933, 1.0)
-    station_eci_t, station_vel_eci_t = ecef_to_eci(station_ecef, t_obs)
+    # DSN stations ECEF
+    stations = {
+        "Goldstone": geodetic_to_ecef(35.2472, -116.7933, 1.0),  # Goldstone
+        "Canberra": geodetic_to_ecef(-35.3981, 148.9819, 1.0),  # Canberra
+        "Madrid": geodetic_to_ecef(40.4314, -4.2486, 1.0),  # Madrid
+    }
 
-    # Simulate observations
-    los_vec = x_true[:, :3] - station_eci_t
-    range_obs = np.linalg.norm(los_vec, axis=1)
-    los_vel = x_true[:, 3:] - station_vel_eci_t
-    rangerate_obs = np.sum(los_vec * los_vel, axis=1) / range_obs
-    y_obs = np.hstack([range_obs, rangerate_obs])
+    # Convert all stations to ECI at each time
+    station_eci = {}
+    station_vel_eci = {}
+    for name, pos in stations.items():
+        r_eci, v_eci = ecef_to_eci(pos, t_obs)
+        station_eci[name] = r_eci
+        station_vel_eci[name] = v_eci
+
+    # Build measurements
+    t_obs_used = []
+    y_obs = []
+    station_eci_used = []
+    station_vel_eci_used = []
+
+    for i in range(len(t_obs)):
+        visible_stations = []
+        for name in stations:
+            if is_visible(station_eci[name], x_true[:, :3])[i]:
+                visible_stations.append(name)
+
+        if visible_stations:
+            # Choose first visible station (could improve by picking best elevation)
+            station = visible_stations[0]
+
+            sc_pos = x_true[i, :3]
+            sc_vel = x_true[i, 3:]
+            st_pos = station_eci[station][i]
+            st_vel = station_vel_eci[station][i]
+
+            los_vec = sc_pos - st_pos
+            los_vel = sc_vel - st_vel
+            range_meas = np.linalg.norm(los_vec) + np.random.normal(0, sigma_range)
+            rangerate_meas = (
+                np.dot(los_vec, los_vel) / np.linalg.norm(los_vec)
+            ) + np.random.normal(0, sigma_rangerate)
+
+            y_obs.append([range_meas, rangerate_meas])
+            t_obs_used.append(t_obs[i])
+            station_eci_used.append(st_pos)
+            station_vel_eci_used.append(st_vel)
+
+    y_obs = np.array(
+        y_obs
+    ).flatten()  # stack as [range1, rangerate1, range2, rangerate2, ...]
+    t_obs_used = np.array(t_obs_used)
+    station_eci_used = np.array(station_eci_used)
+    station_vel_eci_used = np.array(station_vel_eci_used)
+
+    print(f"Total measurements collected: {len(t_obs_used)}")
+
+    # for name in stations:
+    #    elevations = np.arcsin(
+    #        np.sum((x_true[:, :3] - station_eci[name]) * station_eci[name], axis=1)
+    #        / (
+    #            np.linalg.norm(x_true[:, :3] - station_eci[name], axis=1)
+    #            * np.linalg.norm(station_eci[name], axis=1)
+    #        )
+    #    )
+    #    plt.plot(t_obs / 3600, np.degrees(elevations), label=name)
+    # plt.axhline(10, color="k", linestyle="--", label="10 deg limit")
+    # plt.xlabel("Time (hours)")
+    # plt.ylabel("Elevation (deg)")
+    # plt.legend()
+    # plt.grid()
+    # plt.show()
+
+    # Recompute sol_ref and stts_ref for only the used times
+    ref_dev = 1e-3 * np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s
+    sol_ref, stts_ref = propagate(
+        x0_true - ref_dev, mu, order, t_obs_used, rtol=1e-12, atol=1e-14
+    )
 
     # Residual function for MCMC
     def residuals(delta_x0):
         _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
-        los_vec_model = x_est[:, :3] - station_eci_t
+        los_vec_model = x_est[:, :3] - station_eci_used
         range_model = np.linalg.norm(los_vec_model, axis=1)
-        los_vel_model = x_est[:, 3:] - station_vel_eci_t
+        los_vel_model = x_est[:, 3:] - station_vel_eci_used
         rangerate_model = np.sum(los_vec_model * los_vel_model, axis=1) / range_model
         y_model = np.hstack([range_model, rangerate_model])
         weights = np.hstack(
             [
-                np.full(len(t_obs), sigma_range),
-                np.full(len(t_obs), sigma_rangerate),
+                np.full(len(t_obs_used), sigma_range),
+                np.full(len(t_obs_used), sigma_rangerate),
             ]
         )
         return (y_obs - y_model) / weights
 
-    # Priors and initial guess
-    # NOTE: The initial guess should be included in the prior!
+    # Priors
     initial_guess = np.zeros(6)
     priors = [
         (
-            norm(loc=initial_guess[i], scale=1e-2)
+            norm(loc=initial_guess[i], scale=1e-4)
             if i < 3
             else norm(loc=initial_guess[i], scale=1e-4)
         )
@@ -295,16 +375,13 @@ if __name__ == "__main__":
     ]
 
     # Run MCMC
-    # NOTE: We recommend using hundreds of walkers, collecting at least 10× the
-    # autocorrelation time in samples, and allocating a burn‑in period of 10–25% of the chain.
     model = MCMCModel(
         residuals_func=residuals,
         initial_params=initial_guess,
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=5000, n_walkers=128, burn_in=2000)
-    # model.run(n_samples=10000, n_walkers=256, burn_in=2000)
+    model.run(n_samples=5000, n_walkers=128, burn_in=1000)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_log_likelihood()
