@@ -183,66 +183,6 @@ def propagate_deviation(sol, stts, delta_x0, order):
       delta      : ndarray (n_steps,6) of propagated deviations
       x_nom+dev  : ndarray (n_steps,6) of perturbed trajectory
     """
-    n_steps = sol.y.shape[1]
-    delta = np.zeros((n_steps, 6))
-    x_nom = sol.y[:6, :].T  # shape (n_steps,6)
-
-    # for each time step
-    for t in range(n_steps):
-        d = np.zeros(6)
-
-        # k = 1 term: Φ • δx0
-        Phi = stts[1][t]  # (6,6)
-        d += Phi.dot(delta_x0)
-
-        # higher orders
-        for k in range(2, order + 1):
-            Tk = stts[k][t]  # shape (6,6,...,6) with k+1 dims
-            # contract Tk with δx0 repeated k times
-            term = Tk
-            for _ in range(k):
-                term = np.tensordot(term, delta_x0, axes=(1, 0))
-            d += term / math.factorial(k)
-
-        delta[t] = d
-
-    return delta, x_nom + delta
-
-
-def propagate_deviation_unrolled(sol, stts, delta_x0, order):
-    """
-    Fast unrolled version for 6-state systems, up to arbitrary order (up to 4th).
-    """
-    n_steps = sol.y.shape[1]
-    delta = np.zeros((n_steps, 6))
-    x_nom = sol.y[:6, :].T  # shape (n_steps,6)
-
-    for t in range(n_steps):
-        d = stts[1][t] @ delta_x0
-
-        if order >= 2:
-            T2 = stts[2][t]
-            d += 0.5 * np.einsum("ijk,j,k", T2, delta_x0, delta_x0)
-
-        if order >= 3:
-            T3 = stts[3][t]
-            d += (1 / 6) * np.einsum("ijkl,j,k,l", T3, delta_x0, delta_x0, delta_x0)
-
-        if order >= 4:
-            T4 = stts[4][t]
-            d += (1 / 24) * np.einsum(
-                "ijklm,j,k,l,m", T4, delta_x0, delta_x0, delta_x0, delta_x0
-            )
-
-        delta[t] = d
-
-    return delta, x_nom + delta
-
-
-def propagate_deviation_vectorized(sol, stts, delta_x0, order):
-    """
-    Fully vectorized propagation without for-loop over time.
-    """
     x_nom = sol.y[:6, :].T  # (n_steps,6)
 
     # Start with first order: Φ @ δx0
@@ -328,9 +268,7 @@ if __name__ == "__main__":
 
     # Residual function for MCMC
     def residuals(delta_x0):
-        _, x_est = propagate_deviation_vectorized(
-            sol_ref, stts_ref, delta_x0, order=order
-        )
+        _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
         los_vec_model = x_est[:, :3] - station_eci_t
         range_model = np.linalg.norm(los_vec_model, axis=1)
         los_vel_model = x_est[:, 3:] - station_vel_eci_t
