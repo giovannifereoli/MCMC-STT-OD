@@ -299,50 +299,6 @@ def ecef_to_eci(ecef_pos, t_obs):
 
 
 if __name__ == "__main__":
-
-    # Dummy setup
-    n_steps = 1000
-    state_size = 6
-    order = 4
-
-    # Create random dummy sol and stts for testing
-    sol = type("", (), {})()  # make a dummy empty object
-    sol.y = np.random.randn(state_size + 6**2 + 6**3 + 6**4 + 6**5, n_steps)
-
-    # Fake x_nom
-    x_nom = np.random.randn(state_size, n_steps)
-    sol.y[:6, :] = x_nom
-
-    # Generate random STTs
-    stts = {
-        1: np.random.randn(n_steps, 6, 6),
-        2: np.random.randn(n_steps, 6, 6, 6),
-        3: np.random.randn(n_steps, 6, 6, 6, 6),
-        4: np.random.randn(n_steps, 6, 6, 6, 6, 6),
-    }
-
-    # Random small delta_x0
-    delta_x0 = np.random.randn(6) * 1e-2
-
-    # --- Run all methods ---
-    delta1, _ = propagate_deviation(sol, stts, delta_x0, order)
-    delta2, _ = propagate_deviation_unrolled(sol, stts, delta_x0, order)
-    delta3, _ = propagate_deviation_vectorized(sol, stts, delta_x0, order)
-
-    # --- Compare ---
-    print(
-        "Max difference between propagate_deviation and propagate_deviation_unrolled:",
-        np.max(np.abs(delta1 - delta2)),
-    )
-    print(
-        "Max difference between propagate_deviation and propagate_deviation_vectorized:",
-        np.max(np.abs(delta1 - delta3)),
-    )
-    print(
-        "Max difference between propagate_deviation_unrolled and propagate_deviation_vectorized:",
-        np.max(np.abs(delta2 - delta3)),
-    )
-
     # Constants
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_ref = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
