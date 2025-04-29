@@ -61,10 +61,17 @@ class MCMCModel:
                 pos[:, i] = np.random.normal(mu, sigma, size=n_walkers)
         return pos
 
+    # def initialize_walkers_from_sphere(self, n_walkers, percentage=0.1):
+    #    pos = self.initial_params + (
+    #        percentage * self.initial_params
+    #    ) * np.random.randn(n_walkers, self.ndim)
+    #    return pos
+
     def run(self, n_samples=5000, n_walkers=50, burn_in=500, init_pos=None):
         # Initialize walkers
         if init_pos is None:
             pos = self.initialize_walkers_from_prior(n_walkers)
+            # pos = self.initialize_walkers_from_sphere(n_walkers)
         else:
             pos = init_pos
 
@@ -86,10 +93,16 @@ class MCMCModel:
         step_size=1e-3,
         num_integration_steps=20,
         print_every=10,
+        mass_matrix=None,  # Pass a full-rank positive-definite matrix or None for identity
     ):
         """
-        Run Hamiltonian Monte Carlo from scratch using NumPy, with status prints.
+        Run Hamiltonian Monte Carlo using NumPy with general mass matrix and momentum resampling.
         """
+
+        # Default mass matrix = identity
+        M = np.eye(self.ndim) if mass_matrix is None else np.array(mass_matrix)
+        M_inv = np.linalg.inv(M)
+        L = np.linalg.cholesky(M)
 
         def U(theta):
             lp = self.log_prior(theta)
@@ -111,10 +124,10 @@ class MCMCModel:
             p_new = p - 0.5 * step_size * grad_U(theta_new)
 
             for _ in range(num_steps - 1):
-                theta_new += step_size * p_new
+                theta_new += step_size * M_inv @ p_new
                 p_new -= step_size * grad_U(theta_new)
 
-            theta_new += step_size * p_new
+            theta_new += step_size * M_inv @ p_new
             p_new -= 0.5 * step_size * grad_U(theta_new)
             return theta_new, -p_new
 
@@ -122,27 +135,28 @@ class MCMCModel:
         samples = []
         logps = []
         accepted = 0
-
         total_steps = n_samples + burn_in
+
         print("Starting HMC sampling...")
         for i in range(total_steps):
-            p_current = np.random.randn(self.ndim)
+            z = np.random.randn(self.ndim)
+            p_current = L @ z  # Now p ~ N(0, M)
             theta_proposed, p_proposed = leapfrog(
                 theta_current, p_current, step_size, num_integration_steps
             )
 
             U_current = U(theta_current)
             U_proposed = U(theta_proposed)
-            K_current = 0.5 * np.sum(p_current**2)
-            K_proposed = 0.5 * np.sum(p_proposed**2)
 
+            K_current = 0.5 * p_current.T @ M_inv @ p_current
+            K_proposed = 0.5 * p_proposed.T @ M_inv @ p_proposed
             log_accept_prob = U_current + K_current - U_proposed - K_proposed
-            accepted_flag = False
 
+            accepted_flag = False
             if np.log(np.random.rand()) < log_accept_prob:
                 theta_current = theta_proposed
-                accepted_flag = True
                 accepted += 1
+                accepted_flag = True
 
             if i >= burn_in:
                 samples.append(theta_current.copy())
@@ -152,7 +166,7 @@ class MCMCModel:
                 phase = "Burn-in" if i < burn_in else "Sampling"
                 print(
                     f"[{i}/{total_steps}] {phase} | "
-                    f"Accepted so far: {accepted}/{i+1} ({(accepted/(i+1))*100:.1f}%)"
+                    f"Accepted: {accepted}/{i+1} ({(accepted/(i+1))*100:.1f}%)"
                 )
 
         self.samples = np.array(samples)

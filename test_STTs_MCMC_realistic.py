@@ -10,8 +10,13 @@ from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
 import matplotlib.pyplot as plt
 
-# NOTE for Jay:
-# Increasing order of STT increase precision! OMG!!!
+# TODO: fix sphere initialization. For 0 init params just do 1e-4 * randn. Detach from pror. Just use init_params
+# TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
+# TODO: look autocorr time, fix steps (10*tau) and burn-in (3-5*tau)
+# TODO: look acceptance fraction to asses initialization (i.e., should be 0.2-0.5)
+# TODO: try PTSampler
+# TODO: check correctness log prior
+# TODO: make HMC work
 
 
 def generate_stt_functions(mu, order, beta=0.0):
@@ -257,7 +262,7 @@ if __name__ == "__main__":
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_true = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
     order = 3
-    t_obs = np.linspace(0, 24 * 3600, int((24 * 3600) / 10))
+    t_obs = np.linspace(0, 24 * 3600, int((24 * 3600) / 20))
 
     # Simulate true deviation
     sol_true, stts_true = propagate(x0_true, mu, order, t_obs, rtol=1e-10, atol=1e-12)
@@ -322,8 +327,8 @@ if __name__ == "__main__":
     t_obs_used = np.array(t_obs_used)
     station_eci_used = np.array(station_eci_used)
     station_vel_eci_used = np.array(station_vel_eci_used)
-
-    print(f"Total measurements collected: {len(t_obs_used)}")
+    print(f"\n")
+    print(f"\nTotal measurements collected: {len(t_obs_used)}")
 
     # for name in stations:
     #    elevations = np.arcsin(
@@ -342,7 +347,10 @@ if __name__ == "__main__":
     # plt.show()
 
     # Recompute sol_ref and stts_ref for only the used times
-    ref_dev = 1e-3 * np.array([2, -3, 1, 0.1, -0.5, 0.8])  # km / km/s
+    ref_dev = np.array(
+        [2 * 1e-3, -3 * 1e-3, 1 * 1e-3, 0.1 * 1e-6, -0.5 * 1e-6, 0.8 * 1e-6]
+    )  # km / km/s
+    print(f"\n")
     sol_ref, stts_ref = propagate(
         x0_true - ref_dev, mu, order, t_obs_used, rtol=1e-12, atol=1e-14
     )
@@ -367,9 +375,9 @@ if __name__ == "__main__":
     initial_guess = np.zeros(6)
     priors = [
         (
-            norm(loc=initial_guess[i], scale=1e-4)
+            norm(loc=initial_guess[i], scale=1e10)
             if i < 3
-            else norm(loc=initial_guess[i], scale=1e-4)
+            else norm(loc=initial_guess[i], scale=1e10)
         )
         for i in range(6)
     ]
