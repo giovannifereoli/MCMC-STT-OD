@@ -16,7 +16,9 @@ import matplotlib.pyplot as plt
 # TODO: look acceptance fraction to asses initialization (i.e., should be 0.2-0.5)
 # TODO: try PTSampler
 # TODO: check correctness log prior
-# TODO: make HMC work
+# TODO: make HMC work, p sampled?
+# TODO: HMC with M as g(x) Jacobian?
+# TODO: can I whiten state in MCMC/HMC? I dont' know about MCMC, however in HMC equivalent is to put M=P0
 
 
 def generate_stt_functions(mu, order, beta=0.0):
