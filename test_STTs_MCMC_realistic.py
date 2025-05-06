@@ -18,7 +18,12 @@ import matplotlib.pyplot as plt
 # TODO: check correctness log prior
 # TODO: make HMC work, p sampled?
 # TODO: HMC with M as g(x) Jacobian?
-# TODO: can I whiten state in MCMC/HMC? I dont' know about MCMC, however in HMC equivalent is to put M=P0
+# TODO: can I whiten state in MCMC/HMC? In MCMC do x = L*z, however in HMC equivalent is to put M=P0
+# TODO: run optimizer (like ab tahc before helps!) for initialization
+
+# After sampler.run_mcmc(...)
+# acceptance_fraction = sampler.acceptance_fraction
+# print("Mean acceptance rate:", np.mean(acceptance_fraction))
 
 
 def generate_stt_functions(mu, order, beta=0.0):
