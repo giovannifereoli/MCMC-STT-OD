@@ -10,20 +10,20 @@ from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
 import matplotlib.pyplot as plt
 
-# TODO: fix sphere initialization. For 0 init params just do 1e-4 * randn. Detach from pror. Just use init_params
-# TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
-# TODO: look autocorr time, fix steps (10*tau) and burn-in (3-5*tau)
-# TODO: look acceptance fraction to asses initialization (i.e., should be 0.2-0.5)
-# TODO: try PTSampler
-# TODO: check correctness log prior
-# TODO: make HMC work, p sampled?
-# TODO: HMC with M as g(x) Jacobian?
-# TODO: can I whiten state in MCMC/HMC? In MCMC do x = L*z, however in HMC equivalent is to put M=P0
-# TODO: run optimizer (like ab tahc before helps!) for initialization
 
-# After sampler.run_mcmc(...)
-# acceptance_fraction = sampler.acceptance_fraction
-# print("Mean acceptance rate:", np.mean(acceptance_fraction))
+# PRESENT TODOs:
+# TODO: check line by line waht's happening.
+# TODO: fix warnings like nelder mead iterations
+# NOTE problems: check residual, check integration times, improve this pipeline. check tau computation
+# TODO: how to optimize hyperparameters matlab-like?
+# TODO: fix plots etc
+# TODO: test whiten
+# TODO: test thin
+# TODO: test etc
+
+# FUTURE TODOs:
+# TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
+# TODO: try PTSampler https://github.com/willvousden/ptemcee
 
 
 def generate_stt_functions(mu, order, beta=0.0):
@@ -76,8 +76,8 @@ def generate_stt_functions(mu, order, beta=0.0):
 
 
 def stt_ode(t, Y, mu, order, f_func, A_func, B_funcs):
-    x = Y[:6]
     # 1) dynamics + STM
+    x = Y[:6]  # unpack state
     dx = np.array(f_func(*x), float).reshape(6)
     offset = 6
     Phi = Y[offset : offset + 36].reshape(6, 6)
@@ -128,9 +128,10 @@ def stt_ode(t, Y, mu, order, f_func, A_func, B_funcs):
 
 
 def propagate(x0, mu, order, t_eval, show_progress=True, **options):
+    # 1) Generate f, A and B_k functions
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
 
-    # initial augmented state
+    # 2) Initial
     Y0 = list(x0)
     Y0 += list(np.eye(6).flatten())
     for k in range(2, order + 1):
@@ -152,6 +153,7 @@ def propagate(x0, mu, order, t_eval, show_progress=True, **options):
                 last_print = progress
         return stt_ode(t, y, mu, order, f_func, A_func, B_funcs)
 
+    # 3) Integrate
     sol = solve_ivp(
         fun=wrapped_rhs,
         t_span=(t_eval[0], t_eval[-1]),
@@ -160,6 +162,7 @@ def propagate(x0, mu, order, t_eval, show_progress=True, **options):
         **options,
     )
 
+    # 4) Decode the solution
     n_steps = sol.y.shape[1]
     stts = {}
     offset = 6
@@ -186,21 +189,13 @@ def propagate(x0, mu, order, t_eval, show_progress=True, **options):
 
 
 def propagate_deviation(sol, stts, delta_x0, order):
-    """
-    Given:
-      sol       : ODE solution from propagate(…)
-      stts      : dict of STTs from propagate(…)  stts[k].shape = (n_steps,6,6,...,6)
-      delta_x0  : initial deviation, shape (6,)
-      order     : max STT order to include
-    Returns:
-      delta      : ndarray (n_steps,6) of propagated deviations
-      x_nom+dev  : ndarray (n_steps,6) of perturbed trajectory
-    """
+    # 1) unpack the solution
     x_nom = sol.y[:6, :].T  # (n_steps,6)
 
-    # Start with first order: Φ @ δx0
+    # 2) Start with first order: Phi @ δx0
     delta = np.einsum("tij,j->ti", stts[1], delta_x0)
 
+    # 3) Add higher orders
     if order >= 2:
         delta += 0.5 * np.einsum("tijk,j,k->ti", stts[2], delta_x0, delta_x0)
 
@@ -217,14 +212,18 @@ def propagate_deviation(sol, stts, delta_x0, order):
     return delta, x_nom + delta
 
 
-def geodetic_to_ecef(lat, lon, alt):
+def geodetic_to_ecef(lat, lon, alt, a=None, e2=None):
     # WGS-84 ellipsoid constants
-    a = 6378.137  # Equatorial radius [km]
-    e2 = 6.69437999014e-3  # Square of eccentricity
+    if a is None:
+        a = 6378.137  # Equatorial radius [km]
+    if e2 is None:
+        e2 = 6.69437999014e-3  # Square of eccentricity
 
+    # Convert latitude and longitude from degrees to radians
     lat = np.radians(lat)
     lon = np.radians(lon)
 
+    # Calculate ECEF coordinates
     N = a / np.sqrt(1 - e2 * np.sin(lat) ** 2)
     x = (N + alt) * np.cos(lat) * np.cos(lon)
     y = (N + alt) * np.cos(lat) * np.sin(lon)
@@ -232,12 +231,15 @@ def geodetic_to_ecef(lat, lon, alt):
     return np.array([x, y, z])
 
 
-def ecef_to_eci(ecef_pos, t_obs):
-    omega_earth = 7.2921150e-5  # rad/s
+def ecef_to_eci(ecef_pos, t_obs, omega_earth=None):
+    # Initialize
+    if omega_earth is None:
+        omega_earth = 7.2921150e-5  # rad/s
 
     station_eci_t = []
     station_vel_eci_t = []
 
+    # Convert ECEF to ECI for each time step
     for t in t_obs:
         theta = omega_earth * t  # rotation angle from JD0 (in radians)
         Rz = R.from_euler("z", theta).as_matrix()
@@ -251,27 +253,74 @@ def ecef_to_eci(ecef_pos, t_obs):
     return np.array(station_eci_t), np.array(station_vel_eci_t)
 
 
-def is_visible(station_pos_eci, sc_pos_eci):
+def is_visible(station_pos_eci, sc_pos_eci, threshold=10):
+    # Calculate the elevation angle
     rho = sc_pos_eci - station_pos_eci
     rho_norm = np.linalg.norm(rho, axis=1)
     station_norm = np.linalg.norm(station_pos_eci, axis=1)
     dot_product = np.sum(rho * station_pos_eci, axis=1)
     elevation = np.arcsin(dot_product / (rho_norm * station_norm))  # in radians
-    return elevation > np.deg2rad(10)  # visibility if elevation > 10 deg
+
+    # Return visibility if elevation > threshold deg
+    return elevation > np.deg2rad(threshold)
+
+
+def build_measurements(
+    t_obs, x_true, station_eci, station_vel_eci, stations, sigma_range, sigma_rangerate
+):
+    print(f"\nBuilding measurements:")
+    t_obs_used = []
+    y_obs = []
+    station_eci_used = []
+    station_vel_eci_used = []
+
+    for i in range(len(t_obs)):
+        visible_stations = [
+            name for name in stations if is_visible(station_eci[name], x_true[:, :3])[i]
+        ]
+
+        if visible_stations:
+            # Choose the first visible station
+            station = visible_stations[0]
+            sc_pos = x_true[i, :3]
+            sc_vel = x_true[i, 3:]
+            st_pos = station_eci[station][i]
+            st_vel = station_vel_eci[station][i]
+
+            los_vec = sc_pos - st_pos
+            los_vel = sc_vel - st_vel
+
+            range_meas = np.linalg.norm(los_vec) + np.random.normal(0, sigma_range)
+            rangerate_meas = (
+                np.dot(los_vec, los_vel) / np.linalg.norm(los_vec)
+            ) + np.random.normal(0, sigma_rangerate)
+
+            y_obs.append([range_meas, rangerate_meas])
+            t_obs_used.append(t_obs[i])
+            station_eci_used.append(st_pos)
+            station_vel_eci_used.append(st_vel)
+
+    y_obs = np.array(y_obs).flatten()
+    t_obs_used = np.array(t_obs_used)
+    station_eci_used = np.array(station_eci_used)
+    station_vel_eci_used = np.array(station_vel_eci_used)
+
+    print(f"Total measurements collected: {len(t_obs_used)}")
+
+    return y_obs, t_obs_used, station_eci_used, station_vel_eci_used
 
 
 if __name__ == "__main__":
-    from astropy.time import Time
-    import numpy as np
-    from scipy.stats import norm
-
-    # Constants
+    # Initialize parameters
     mu = 398600.4418  # Earth's gravitational parameter [km^3/s^2]
     x0_true = np.array([757.7, 5222.607, 4851.5, 2.21321, 4.67834, -5.3713])
     order = 3
-    t_obs = np.linspace(0, 24 * 3600, int((24 * 3600) / 20))
+    JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
+    JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
+    t_obs = JD0_seconds + np.linspace(0, 6 * 3600, int((6 * 3600) / 20))
 
     # Simulate true deviation
+    print(f"\n Propagating true trajectory:")
     sol_true, stts_true = propagate(x0_true, mu, order, t_obs, rtol=1e-10, atol=1e-12)
     x_true = sol_true.y[:6, :].T  # shape (n_steps, 6)
 
@@ -280,7 +329,7 @@ if __name__ == "__main__":
     sigma_range = 1e-3  # 1 meter
     sigma_rangerate = 1e-6  # 1 mm/s
 
-    # DSN stations ECEF
+    # Define DSN stations ECEF
     stations = {
         "Goldstone": geodetic_to_ecef(35.2472, -116.7933, 1.0),  # Goldstone
         "Canberra": geodetic_to_ecef(-35.3981, 148.9819, 1.0),  # Canberra
@@ -296,108 +345,108 @@ if __name__ == "__main__":
         station_vel_eci[name] = v_eci
 
     # Build measurements
-    t_obs_used = []
-    y_obs = []
-    station_eci_used = []
-    station_vel_eci_used = []
+    y_obs, t_obs_used, station_eci_used, station_vel_eci_used = build_measurements(
+        t_obs,
+        x_true,
+        station_eci,
+        station_vel_eci,
+        stations,
+        sigma_range=sigma_range,
+        sigma_rangerate=sigma_rangerate,
+    )
 
-    for i in range(len(t_obs)):
-        visible_stations = []
-        for name in stations:
-            if is_visible(station_eci[name], x_true[:, :3])[i]:
-                visible_stations.append(name)
+    # Propagate reference trajectory
+    print("\nPropagating reference trajectory:")
 
-        if visible_stations:
-            # Choose first visible station (could improve by picking best elevation)
-            station = visible_stations[0]
+    # Define small deviation from truth (in km and km/s), and add it to the truth at t_obs_used[0]
+    ref_dev = np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])
+    idx0 = np.searchsorted(t_obs, t_obs_used[0])
+    x0_ref = sol_true.y[:6, idx0] - ref_dev
 
-            sc_pos = x_true[i, :3]
-            sc_vel = x_true[i, 3:]
-            st_pos = station_eci[station][i]
-            st_vel = station_vel_eci[station][i]
-
-            los_vec = sc_pos - st_pos
-            los_vel = sc_vel - st_vel
-            range_meas = np.linalg.norm(los_vec) + np.random.normal(0, sigma_range)
-            rangerate_meas = (
-                np.dot(los_vec, los_vel) / np.linalg.norm(los_vec)
-            ) + np.random.normal(0, sigma_rangerate)
-
-            y_obs.append([range_meas, rangerate_meas])
-            t_obs_used.append(t_obs[i])
-            station_eci_used.append(st_pos)
-            station_vel_eci_used.append(st_vel)
-
-    y_obs = np.array(
-        y_obs
-    ).flatten()  # stack as [range1, rangerate1, range2, rangerate2, ...]
-    t_obs_used = np.array(t_obs_used)
-    station_eci_used = np.array(station_eci_used)
-    station_vel_eci_used = np.array(station_vel_eci_used)
-    print(f"\n")
-    print(f"\nTotal measurements collected: {len(t_obs_used)}")
-
-    # for name in stations:
-    #    elevations = np.arcsin(
-    #        np.sum((x_true[:, :3] - station_eci[name]) * station_eci[name], axis=1)
-    #        / (
-    #            np.linalg.norm(x_true[:, :3] - station_eci[name], axis=1)
-    #            * np.linalg.norm(station_eci[name], axis=1)
-    #        )
-    #    )
-    #    plt.plot(t_obs / 3600, np.degrees(elevations), label=name)
-    # plt.axhline(10, color="k", linestyle="--", label="10 deg limit")
-    # plt.xlabel("Time (hours)")
-    # plt.ylabel("Elevation (deg)")
-    # plt.legend()
-    # plt.grid()
-    # plt.show()
-
-    # Recompute sol_ref and stts_ref for only the used times
-    ref_dev = np.array(
-        [2 * 1e-3, -3 * 1e-3, 1 * 1e-3, 0.1 * 1e-6, -0.5 * 1e-6, 0.8 * 1e-6]
-    )  # km / km/s
-    print(f"\n")
+    # Propagate reference trajectory at used observation times
     sol_ref, stts_ref = propagate(
-        x0_true - ref_dev, mu, order, t_obs_used, rtol=1e-12, atol=1e-14
+        x0=x0_ref,
+        mu=mu,
+        order=order,
+        t_eval=t_obs_used,
+        rtol=1e-12,
+        atol=1e-14,
     )
 
     # Residual function for MCMC
-    def residuals(delta_x0):
+    def residuals_normalized(delta_x0):
+        # Propagate the reference trajectory with the deviation
         _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
+
+        # Calculate the model range and range-rate
         los_vec_model = x_est[:, :3] - station_eci_used
+        los_vel_model = x_est[:, 3:6] - station_vel_eci_used
+
         range_model = np.linalg.norm(los_vec_model, axis=1)
-        los_vel_model = x_est[:, 3:] - station_vel_eci_used
         rangerate_model = np.sum(los_vec_model * los_vel_model, axis=1) / range_model
-        y_model = np.hstack([range_model, rangerate_model])
-        weights = np.hstack(
-            [
-                np.full(len(t_obs_used), sigma_range),
-                np.full(len(t_obs_used), sigma_rangerate),
-            ]
-        )
-        return (y_obs - y_model) / weights
+
+        # Interleave range and range-rate to match y_obs structure
+        y_model = np.empty_like(y_obs)
+        y_model[0::2] = range_model
+        y_model[1::2] = rangerate_model
+
+        # Define residuals
+        residuals = y_obs - y_model
+
+        # Square-root information form: divide by sigma (standard deviation)
+        weights = np.empty_like(y_obs)
+        weights[0::2] = sigma_range
+        weights[1::2] = sigma_rangerate
+
+        return residuals / weights
+
+    # Assign weights to the residuals
+    weights = np.hstack(
+        [
+            np.full(len(t_obs_used), sigma_range),
+            np.full(len(t_obs_used), sigma_rangerate),
+        ]
+    )
 
     # Priors
     initial_guess = np.zeros(6)
-    priors = [
-        (
-            norm(loc=initial_guess[i], scale=1e10)
-            if i < 3
-            else norm(loc=initial_guess[i], scale=1e10)
-        )
-        for i in range(6)
+    priors = [norm(loc=0.0, scale=1.0) for _ in range(3)] + [  # position in km
+        norm(loc=0.0, scale=1e-3) for _ in range(3)  # velocity in km/s
     ]
 
     # Run MCMC
     model = MCMCModel(
-        residuals_func=residuals,
+        residuals_func=residuals_normalized,
         initial_params=initial_guess,
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=5000, n_walkers=128, burn_in=1000)
+    model.run(n_samples=5000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()
+    model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
     model.plot_log_likelihood()
+    model.plot_corner()
     model.summary()
+
+
+# EXTRA CODE:
+#
+# 1) Plot the elevation angles of the stations
+# for name in stations:
+#    elevations = np.arcsin(
+#        np.sum((x_true[:, :3] - station_eci[name]) * station_eci[name], axis=1)
+#        / (
+#            np.linalg.norm(x_true[:, :3] - station_eci[name], axis=1)
+#            * np.linalg.norm(station_eci[name], axis=1)
+#        )
+#    )
+#    plt.plot(t_obs / 3600, np.degrees(elevations), label=name)
+# plt.axhline(10, color="k", linestyle="--", label="10 deg limit")
+# plt.xlabel("Time (hours)")
+# plt.ylabel("Elevation (deg)")
+# plt.legend()
+# plt.grid()
+# plt.show()
+#
+# 2) ...
