@@ -12,14 +12,12 @@ import matplotlib.pyplot as plt
 
 
 # PRESENT TODOs:
-# TODO: check line by line waht's happening.
-# TODO: fix warnings like nelder mead iterations
-# NOTE problems: check residual, check integration times, improve this pipeline. check tau computation
+# TODO: Fix warnings nelder mead iterations
+# TODO: check integration times, improve propagation in this pipeline
 # TODO: how to optimize hyperparameters matlab-like?
-# TODO: fix plots etc
-# TODO: test whiten
-# TODO: test thin
-# TODO: test etc
+# TODO: fix plots etc (units, histograms, etc)
+# TODO: put stats like reduced chi2
+# TODO: test whitening
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
