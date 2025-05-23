@@ -15,11 +15,15 @@ import matplotlib.pyplot as plt
 
 # PRESENT TODOs:
 # TODO: Fix warnings nelder mead iterations
+# TODO: play with 1e-4 for aceptance ratio, should be lower
+# TODO: try state normalizing
+# TODO: try changing chain loop to be step by step printing out
 # TODO: check integration times, improve propagation in this pipeline
 # TODO: how to optimize hyperparameters matlab-like?
 # TODO: fix plots etc (units, histograms, etc)
 # TODO: put stats like reduced chi2
 # TODO: test whitening
+# TODO: test Jeff prior
 # TODO: increase fidelity of the dynamics
 
 # FUTURE TODOs:
@@ -415,7 +419,7 @@ if __name__ == "__main__":
     print("\nPropagating reference trajectory:")
 
     # Define small deviation from truth (in km and km/s), and add it to the truth at t_obs_used[0]
-    ref_dev = np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])
+    ref_dev = 10 * np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])
     idx0 = np.searchsorted(t_obs, t_obs_used[0])
     x0_ref = sol_true.y[:6, idx0] - ref_dev
 
@@ -504,7 +508,7 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.run(n_samples=5000, n_walkers=128, burn_in=500, thin=1)
+    model.run(n_samples=50000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
