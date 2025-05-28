@@ -25,6 +25,9 @@ import matplotlib.pyplot as plt
 # TODO: test whitening
 # TODO: test Jeff prior
 # TODO: increase fidelity of the dynamics
+# TODO: check multiprocessing stuff if works
+# TODO: how to handle always not realiable autocorrelation estimate, always increasing
+# TODO: why more samples always smaller covariance when it's not the case
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases

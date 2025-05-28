@@ -11,19 +11,6 @@ from astropy.time import Time
 import matplotlib.pyplot as plt
 
 
-# PRESENT TODOs:
-# TODO: Fix warnings nelder mead iterations
-# TODO: check integration times, improve propagation in this pipeline
-# TODO: how to optimize hyperparameters matlab-like?
-# TODO: fix plots etc (units, histograms, etc)
-# TODO: put stats like reduced chi2
-# TODO: test whitening
-
-# FUTURE TODOs:
-# TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
-# TODO: try PTSampler https://github.com/willvousden/ptemcee
-
-
 def generate_stt_functions(mu, order, beta=0.0):
     """
     Symbolically generate f, A and B_k up to arbitrary 'order',
