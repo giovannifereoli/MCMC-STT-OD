@@ -413,6 +413,7 @@ if __name__ == "__main__":
     model.plot_log_likelihood()
     model.plot_corner()
     model.summary()
+    model.print_regression_diagnostics()
 
 
 # EXTRA CODE:

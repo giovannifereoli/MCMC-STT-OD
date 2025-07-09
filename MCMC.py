@@ -73,8 +73,6 @@ class MCMCModel:
 
         return result.x
 
-    # TODO: you can run .sample() to proceed with the MCMC sampling checking stationarity
-    # and convergence of the chain!
     def run(
         self,
         n_samples=5000,
@@ -89,12 +87,17 @@ class MCMCModel:
         optimized_guess = self.optimize_initial_guess()
         pos = optimized_guess + spherical_spread * np.random.randn(n_walkers, self.ndim)
 
-        # log_prob_func = self.log_prob_whitened if self.is_whitened else self.log_prob
+        # Determine if we need to use whitened log_prob
+        log_prob_func = (
+            self.log_prob_whitened
+            if getattr(self, "is_whitened", False)
+            else self.log_prob
+        )
 
         # Run MCMC using emcee
         with multiprocessing.get_context("fork").Pool() as pool:
             self.sampler = emcee.EnsembleSampler(
-                n_walkers, self.ndim, self.log_prob, pool=pool
+                n_walkers, self.ndim, log_prob_func, pool=pool
             )
             self.sampler.run_mcmc(pos, n_samples, progress=True)
 
@@ -149,6 +152,12 @@ class MCMCModel:
         self.log_probs = self.sampler.get_log_prob(
             discard=burn_in, thin=thin, flat=True
         )
+
+        # If whitening was used, transform samples back to original space
+        if getattr(self, "is_whitened", False):
+            self.samples = (
+                self.whiten_L @ self.samples.T + self.whiten_mean[:, None]
+            ).T  # shape (N, ndim)
 
     def plot_convergence(self):
         if self.samples is None:
@@ -221,6 +230,10 @@ class MCMCModel:
         # 3) Create subplots
         fig, (ax_r, ax_rr) = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
 
+        # Disable scientific notation on x-axis for both subplots
+        for ax in (ax_r, ax_rr):
+            ax.ticklabel_format(axis="x", style="plain", useOffset=False)
+
         # 4) Plot range residuals
         ax_r.plot(t_obs_used / 3600, residuals_matrix[0], "o", markersize=4)
         ax_r.axhline(0, color="k", linestyle="--")
@@ -272,7 +285,7 @@ class MCMCModel:
             print("Run MCMC first.")
             return
 
-        print("MCMC summary:")
+        print("\n=== MCMC Summary ===")
         try:
             # First try default autocorr calculation (faster)
             tau = self.sampler.get_autocorr_time()
@@ -297,7 +310,7 @@ class MCMCModel:
         mean_acceptance = np.mean(acceptance_fraction)
         print("Mean acceptance rate:", mean_acceptance)
 
-        # TODO: look acceptance fraction to assess initialization (i.e., should be 0.2–0.5)
+        # Warn if acceptance rate is outside optimal range
         if mean_acceptance < 0.2 or mean_acceptance > 0.5:
             print(
                 "Acceptance rate outside optimal range (0.2-0.5). Consider tuning initialization or step size."
@@ -308,6 +321,62 @@ class MCMCModel:
             mcmc = np.percentile(self.samples[:, i], [16, 50, 84])
             q = np.diff(mcmc)
             print(f"$\\theta_{{{i}}}$: {mcmc[1]:.4f} (+{q[1]:.4f}/-{q[0]:.4f})")
+
+    def print_regression_diagnostics(self):
+        if self.samples is None:
+            print("Run MCMC first.")
+            return
+
+        theta_best = np.median(self.samples, axis=0)
+        residuals = self.residuals_func(theta_best)
+
+        chi2 = np.sum(residuals**2)
+        n_data = len(residuals)
+        n_params = self.ndim
+        dof = n_data - n_params
+        chi2_red = chi2 / dof if dof > 0 else float("nan")
+        logL = -0.5 * chi2
+        AIC = 2 * n_params - 2 * logL
+        BIC = n_params * np.log(n_data) - 2 * logL
+        RMS = np.sqrt(np.mean(residuals**2))
+        param_uncertainties = np.std(self.samples, axis=0)
+
+        print("\n=== Regression Diagnostics ===")
+        print(f"Number of data points: {n_data}")
+        print(f"Number of parameters: {n_params}")
+        print(f"Degrees of freedom: {dof}")
+        print(f"Chi-squared: {chi2:.3f}")
+        print(f"Reduced Chi-squared: {chi2_red:.3f}")
+        print(f"Log-likelihood: {logL:.3f}")
+        print(f"AIC: {AIC:.3f}")
+        print(f"BIC: {BIC:.3f}")
+        print(f"RMS of residuals: {RMS:.3f}")
+        print("Parameter uncertainties (1σ):")
+        for i, std in enumerate(param_uncertainties):
+            print(f"  θ_{i}: ±{std:.14f}")
+
+    def get_unwhitened_samples(self):
+        if not getattr(self, "is_whitened", False):
+            return self.samples
+        return (self.whiten_L @ self.samples.T + self.whiten_mean[:, None]).T
+
+    def setup_whitening_from_priors(self):
+        stds = []
+        for i, prior in enumerate(self.param_priors):
+            try:
+                std = prior.std()
+            except Exception:
+                raise ValueError(
+                    f"Prior {i} does not support .std(). Cannot use for whitening."
+                )
+            if not np.isfinite(std) or std <= 0:
+                raise ValueError(
+                    f"Prior {i} returned non-finite or non-positive std: {std}"
+                )
+            stds.append(std)
+
+        cov = np.diag(np.square(stds))  # Build diagonal covariance
+        self.setup_whitening(cov=cov)
 
     def setup_whitening(self, cov=None):
         self.whiten_mean = np.array(self.initial_params)
