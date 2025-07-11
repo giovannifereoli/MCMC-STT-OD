@@ -406,7 +406,7 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    model.setup_whitening_from_priors()
+    # model.setup_whitening_from_priors()
     model.run(n_samples=5000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()

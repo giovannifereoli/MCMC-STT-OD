@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import corner
 import emcee
 import multiprocessing
-from scipy.optimize import minimize
+from scipy.optimize import minimize, basinhopping
 import warnings
 
 plt.rcParams.update(
@@ -54,17 +54,35 @@ class MCMCModel:
     def log_prob(self, theta):
         return self.log_posterior(theta)
 
-    def optimize_initial_guess(self, method="Nelder-Mead", disp=True):
+    def optimize_initial_guess(self, method="Powell", disp=True, n_iter=100):
         def objective_logpost(theta):
-            lp = self.log_posterior(theta)
-            return -lp
+            return -self.log_posterior(theta)  # minimize negative log-posterior
 
-        # Start near zero or near user-supplied `initial_params`
         x0 = self.initial_params.copy()
 
-        # Use minimize for optimization
-        print(f"\n[Optimization] Starting optimization with method: {method}")
-        result = minimize(objective_logpost, x0, method=method, options={"disp": disp})
+        print("")
+        print(f"\n[Optimization] Starting optimization using method: {method}")
+
+        if method.lower() == "basinhopping":
+            # Use Powell as default local method under basinhopping
+            local_method = "Powell"
+            minimizer_kwargs = {"method": local_method, "options": {"disp": disp}}
+            result = basinhopping(
+                objective_logpost,
+                x0,
+                minimizer_kwargs=minimizer_kwargs,
+                niter=n_iter,
+                disp=disp,
+            )
+        else:
+            # Local optimization
+            result = minimize(
+                objective_logpost,
+                x0,
+                method=method,
+                options={"disp": disp},
+            )
+
         if result.success:
             print(f"[Optimization] Success: {result.message}")
         else:
@@ -82,16 +100,25 @@ class MCMCModel:
         burn_in_frac=2.0,
         thin_frac=0.5,
         spherical_spread=1e-4,
+        method_optimize="Powell",
     ):
         # Use optimization for better initial guess
-        optimized_guess = self.optimize_initial_guess()
+        optimized_guess = self.optimize_initial_guess(method=method_optimize)
+
         if getattr(self, "is_whitened", False):
-            # Transform optimized guess to whitened space
+            # Whiten the optimized guess
             x0_white = self.whiten_Linv @ (optimized_guess - self.whiten_mean)
+
+            # Sample walkers in whitened space (identity covariance, scaled)
             pos = x0_white + spherical_spread * np.random.randn(n_walkers, self.ndim)
         else:
-            pos = optimized_guess + spherical_spread * np.random.randn(
-                n_walkers, self.ndim
+            # Build realistic covariance from priors
+            stds = np.array([p.std() for p in self.param_priors])
+            init_cov = np.diag(stds**2)
+
+            # Sample directly in parameter space using inflated prior covariance
+            pos = np.random.multivariate_normal(
+                mean=optimized_guess, cov=spherical_spread**2 * init_cov, size=n_walkers
             )
 
         # Determine if we need to use whitened log_prob
@@ -109,15 +136,19 @@ class MCMCModel:
             self.sampler.run_mcmc(pos, n_samples, progress=True)
 
         # Try to estimate autocorrelation time
+        print("")
+        print("[Run] Estimating autocorrelation time...")
         try:
             tau = self.sampler.get_autocorr_time()
         except emcee.autocorr.AutocorrError:
             try:
                 tau = self.sampler.get_autocorr_time(tol=0)
-                print("Autocorrelation recovered with tol=0.")
+                print("[Run] Autocorrelation recovered with tol=0.")
             except emcee.autocorr.AutocorrError:
                 tau = None
-                print("Warning: Autocorrelation time could not be reliably estimated.")
+                print(
+                    "[Run] Warning: Autocorrelation time could not be reliably estimated."
+                )
 
         if tau is not None:
             max_tau = np.max(tau)
@@ -126,7 +157,7 @@ class MCMCModel:
             # Warn if total steps are insufficient for autocorrelation convergence
             if n_samples < 100 * max_tau:
                 warnings.warn(
-                    f"n_samples = {n_samples} may be too small. "
+                    f"[Run] n_samples = {n_samples} may be too small. "
                     f"Recommended: at least 100 x max(tau) = {100 * max_tau:.1f} steps "
                     f"for reliable sampling.",
                     UserWarning,
@@ -136,23 +167,23 @@ class MCMCModel:
             if burn_in is None:
                 burn_in = int(burn_in_frac * max_tau)
                 print(
-                    f"Auto-selected burn-in: {burn_in} steps ({burn_in_frac} x max(tau))"
+                    f"[Run] Auto-selected burn-in: {burn_in} steps ({burn_in_frac} x max(tau))"
                 )
 
             if thin is None:
                 thin = int(thin_frac * min_tau)
                 thin = max(thin, 1)
                 print(
-                    f"Auto-selected thinning: every {thin} steps ({thin_frac} x min(tau))"
+                    f"[Run] Auto-selected thinning: every {thin} steps ({thin_frac} x min(tau))"
                 )
         else:
             # Fallbacks if tau unavailable
             if burn_in is None:
                 burn_in = 500
-                print("Fallback burn-in: 500")
+                print("[Run] Fallback burn-in: 500")
             if thin is None:
                 thin = 1
-                print("Fallback thinning: 1")
+                print("[Run] Fallback thinning: 1")
 
         # Discard burn-in samples and flatten the chain
         self.samples = self.sampler.get_chain(discard=burn_in, thin=thin, flat=True)
@@ -292,6 +323,7 @@ class MCMCModel:
             print("Run MCMC first.")
             return
 
+        print("")
         print("\n=== MCMC Summary ===")
         try:
             # First try default autocorr calculation (faster)
@@ -348,6 +380,7 @@ class MCMCModel:
         RMS = np.sqrt(np.mean(residuals**2))
         param_uncertainties = np.std(self.samples, axis=0)
 
+        print("")
         print("\n=== Regression Diagnostics ===")
         print(f"Number of data points: {n_data}")
         print(f"Number of parameters: {n_params}")
