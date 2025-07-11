@@ -85,7 +85,14 @@ class MCMCModel:
     ):
         # Use optimization for better initial guess
         optimized_guess = self.optimize_initial_guess()
-        pos = optimized_guess + spherical_spread * np.random.randn(n_walkers, self.ndim)
+        if getattr(self, "is_whitened", False):
+            # Transform optimized guess to whitened space
+            x0_white = self.whiten_Linv @ (optimized_guess - self.whiten_mean)
+            pos = x0_white + spherical_spread * np.random.randn(n_walkers, self.ndim)
+        else:
+            pos = optimized_guess + spherical_spread * np.random.randn(
+                n_walkers, self.ndim
+            )
 
         # Determine if we need to use whitened log_prob
         log_prob_func = (

@@ -18,17 +18,14 @@ import matplotlib.pyplot as plt
 # TODO: Fix warnings nelder mead iterations
 # TODO: play with 1e-4 for aceptance ratio, should be lower
 # TODO: try state normalizing / whitening
-# TODO: try changing chain loop to be step by step printing out
+# TODO: try changing chain loop to be step by step printing out, use .sample() to also stop when stationarity is reached
 # TODO: check integration times, improve propagation in this pipeline
 # TODO: how to optimize hyperparameters matlab-like?
 # TODO: fix plots etc (units, histograms, etc)
-# TODO: put stats like reduced chi2
 # TODO: test Jeff prior
 # TODO: increase fidelity of the dynamics
-# TODO: check multiprocessing stuff if works
 # TODO: how to handle always not realiable autocorrelation estimate, always increasing
 # TODO: why more samples always smaller covariance when it's not the case
-# TODO: you can run .sample() to proceed with the MCMC sampling checking stationarity and convergence of the chain!
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
