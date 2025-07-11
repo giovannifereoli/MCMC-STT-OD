@@ -14,18 +14,11 @@ import matplotlib.pyplot as plt
 # 1) It's true that for IOD not having i.c. means bad STTs...
 
 # PRESENT TODOs:
-# TODO: implement nominal case, and edge case comparison w/ Batch
-# TODO: Fix warnings nelder mead iterations
-# TODO: play with 1e-4 for aceptance ratio, should be lower
-# TODO: try state normalizing / whitening
+# TODO: implement nominal case, and edge case comparison w/ Batch. More realistic dynamics also.
 # TODO: try changing chain loop to be step by step printing out, use .sample() to also stop when stationarity is reached
-# TODO: check integration times, improve propagation in this pipeline
 # TODO: how to optimize hyperparameters matlab-like?
 # TODO: fix plots etc (units, histograms, etc)
-# TODO: test Jeff prior
-# TODO: increase fidelity of the dynamics
 # TODO: how to handle always not realiable autocorrelation estimate, always increasing
-# TODO: why more samples always smaller covariance when it's not the case
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases

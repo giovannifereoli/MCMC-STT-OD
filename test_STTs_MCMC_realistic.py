@@ -3,7 +3,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 import math
 from itertools import product
-from scipy.stats import norm
+from scipy.stats import norm, uniform
 from MCMC import MCMCModel
 from scipy.constants import pi
 from scipy.spatial.transform import Rotation as R
@@ -395,9 +395,14 @@ if __name__ == "__main__":
 
     # Priors
     initial_guess = np.zeros(6)
-    priors = [norm(loc=0.0, scale=1.0) for _ in range(3)] + [  # position in km
-        norm(loc=0.0, scale=1e-3) for _ in range(3)  # velocity in km/s
+    pos_lower, pos_upper = -1000.0, 1000.0  # Position in km
+    vel_lower, vel_upper = -1e0, 1e0  # Velocity in km/s
+    priors = [norm(loc=0.0, scale=pos_upper) for _ in range(3)] + [  # position in km
+        norm(loc=0.0, scale=vel_upper) for _ in range(3)  # velocity in km/s
     ]
+    # priors = [uniform(loc=pos_lower, scale=pos_upper - pos_lower) for _ in range(3)] + [
+    #    uniform(loc=vel_lower, scale=vel_upper - vel_lower) for _ in range(3)
+    # ]
 
     # Run MCMC
     model = MCMCModel(
@@ -406,8 +411,8 @@ if __name__ == "__main__":
         param_priors=priors,
         observed_data=y_obs,
     )
-    # model.setup_whitening_from_priors()
-    model.run(n_samples=5000, n_walkers=128, burn_in=500, thin=1)
+    model.setup_whitening_from_priors()
+    model.run(n_samples=20000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
