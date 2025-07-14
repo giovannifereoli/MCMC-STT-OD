@@ -356,12 +356,13 @@ class MCMCModel:
             color="blue",
         )
 
+        # Overlay batch mean and 1-sigma ellipses
         if batch_mean is not None and batch_cov is not None:
             axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
             for i in range(self.ndim):
                 for j in range(i):
                     ax = axes[i, j]
-                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]
+                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]  # 2x2 sub-covariance
                     mean_sub = [batch_mean[j], batch_mean[i]]
 
                     # Red dot for mean
@@ -369,14 +370,16 @@ class MCMCModel:
                         mean_sub[0],
                         mean_sub[1],
                         "ro",
-                        label="Batch Mean" if (i == self.ndim - 1 and j == 0) else "",
+                        label="Batch Mean" if (i == 1 and j == 0) else "",
                     )
 
-                    # Ellipse for 1-sigma uncertainty
+                    # Eigen-decompose 2x2 covariance for ellipse
                     vals, vecs = np.linalg.eigh(cov_sub)
                     order = vals.argsort()[::-1]
                     vals, vecs = vals[order], vecs[:, order]
                     angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
+
+                    # Width and height are 2*sqrt(eigenvalues) for 1-sigma ellipse
                     width, height = 2 * np.sqrt(vals)
                     ellipse = Ellipse(
                         xy=mean_sub,
@@ -386,24 +389,14 @@ class MCMCModel:
                         edgecolor="red",
                         facecolor="none",
                         lw=1.5,
-                        label=(
-                            r"Batch $1\sigma$ Ellipse"
-                            if (i == self.ndim - 1 and j == 0)
-                            else ""
-                        ),
+                        label=r"Batch $1\sigma$ Ellipse" if (i == 1 and j == 0) else "",
                     )
                     ax.add_patch(ellipse)
 
-            # External legend outside lower-left plot
-            legend_ax = axes[self.ndim - 1, 0]
-            legend_ax.legend(
-                loc="upper left",
-                bbox_to_anchor=(1.05, 1.0),
-                borderaxespad=0.0,
-                fontsize=10,
-            )
+            # Add legend only once
+            axes[1, 0].legend(loc="upper right", fontsize=10)
 
-        fig.set_size_inches(13.5, 12)
+        fig.set_size_inches(12, 12)
         plt.tight_layout()
         plt.show()
 

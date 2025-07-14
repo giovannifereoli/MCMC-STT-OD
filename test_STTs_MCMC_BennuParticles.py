@@ -17,7 +17,7 @@ from scipy.optimize import least_squares
 # TODO: Validate nominal propagation: does the trajectory make physical sense?
 # TODO: Implement visibility constraints if needed (line-of-sight to Sun or observer)
 # TODO: Fix plots, especially post-fits residuals
-# TODO: add batch using optimize MAP point and covariance?
+# TODO: why batch sigmas are this big? Are they correct?
 
 
 def generate_stt_functions(
@@ -119,10 +119,10 @@ def generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec):
 
 
 def compute_STT_batch_solution(residuals_func, x0, sigma):
-    # Define raw (non-normalized) residual function for LS
+    # Define raw (normalized) residual function for LS
     def raw_residuals(delta_x0):
         res = residuals_func(delta_x0)
-        return res * sigma  # un-normalize residuals
+        return res
 
     # Run nonlinear least-squares (trust-region or LM)
     result = least_squares(
