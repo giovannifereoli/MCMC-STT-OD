@@ -1,57 +1,91 @@
 import sympy as sp
 import numpy as np
-from scipy.integrate import solve_ivp
-import math
 from itertools import product
-from scipy.stats import norm, uniform
+from scipy.stats import norm
 from MCMC import MCMCModel
-from scipy.constants import pi
-from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
 import matplotlib.pyplot as plt
 from STTPropagation import STTPropagator
+import trimesh
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+# TODOs for this script:
+# TODO: Verify consistency of gravitational parameters and SRP constants with Bennu's physical model
+# TODO: Check correctness of gravity, J2, and SRP
+# TODO: Ensure unit consistency across all forces
+# TODO: Validate nominal propagation: does the trajectory make physical sense?
+# TODO: Implement visibility constraints if needed (line-of-sight to Sun or observer)
+# TODO: Fix plots, especially post-fits residuals
 
 
-def generate_stt_functions(mu, order, beta=0.0):
+def generate_stt_functions(
+    mu, order, R_eq=0.246, J2=8.64e-5, Cr=1.0, A_m=1.0, P0=4.56e-6
+):
     """
-    Symbolically generate f, A and B_k up to arbitrary 'order',
-    including a drag term modeled as a = -beta * |v| * v.
+    Generate f, A, and B_k symbolically for STT propagation including:
+    - Point-mass gravity
+    - J2 perturbation (central body assumed aligned with z-axis)
+    - Solar radiation pressure (SRP) in inertial frame
+
+    Parameters:
+    - mu: gravitational parameter [km^3/s^2]
+    - order: max STT order
+    - R_eq: reference radius of the body [km]
+    - J2: J2 coefficient
+    - Cr: radiation pressure coefficient
+    - A_m: area-to-mass ratio [m^2/kg]
+    - P0: solar radiation pressure at 1 AU [N/m^2] in km units
     """
-    # 1) State symbols
     x_syms = sp.symbols("x y z vx vy vz")
     x, y, z, vx, vy, vz = x_syms
-    mu_sym = sp.Float(mu)
-    beta_sym = sp.Float(beta)
-
-    # 2) Define position and velocity magnitude
+    r_vec = sp.Matrix([x, y, z])
+    v_vec = sp.Matrix([vx, vy, vz])
     r = sp.sqrt(x**2 + y**2 + z**2)
-    v = sp.sqrt(vx**2 + vy**2 + vz**2)
+    r2 = x**2 + y**2 + z**2
+    r5 = r2 ** (5 / 2)
+    z2 = z**2
 
-    # 3) Two-body + drag dynamics
-    a_grav = -mu_sym * sp.Matrix([x, y, z]) / r**3
-    a_drag = -beta_sym * v * sp.Matrix([vx, vy, vz])
-    a_total = a_grav + a_drag
+    # Gravity: point-mass + J2
+    a_pm = -mu * r_vec / r**3
+    a_j2 = (
+        (3 / 2)
+        * J2
+        * mu
+        * R_eq**2
+        / r**5
+        * sp.Matrix(
+            [x * (5 * z2 / r2 - 1), y * (5 * z2 / r2 - 1), z * (5 * z2 / r2 - 3)]
+        )
+    )
+    a_grav = a_pm + a_j2
 
-    # 4) Full f vector
+    # SRP: from Sun at fixed direction (here assume along +x), scaled in km/s²
+    # 1 N/kg = 1e-3 km/s² (since 1 m/s² = 1e-3 km/s²)
+    P_srp = P0 * 1e-3  # convert to km/s²
+    sun_dir = sp.Matrix([1, 0, 0])
+    a_srp = Cr * A_m * P_srp * sun_dir
+
+    # Total acceleration
+    a_total = a_grav + a_srp
+
+    # Full symbolic dynamics
     f_sym = sp.Matrix([vx, vy, vz, *a_total])
 
-    # 3) STM generator
+    # First-order STM
     X = sp.Matrix(x_syms)
     B_syms = {1: f_sym.jacobian(X)}
 
-    # 4) build B_syms[2..order]
+    # Higher-order tensors
     for k in range(2, order + 1):
         shape = (6,) * (k + 1)
         Bk = sp.MutableDenseNDimArray.zeros(*shape)
-
-        for idx in product(range(6), repeat=k + 1):  # (i, j1, ..., jk)
+        for idx in product(range(6), repeat=k + 1):
             i, *js = idx
             deriv = sp.diff(f_sym[i], *[x_syms[j] for j in js])
             Bk[idx] = deriv
-
         B_syms[k] = Bk
 
-    # 5) lambdify: convert each B_syms[k] → nested lists
+    # Lambdify everything
     f_func = sp.lambdify(x_syms, f_sym, "numpy")
     A_func = sp.lambdify(x_syms, B_syms[1], "numpy")
     B_funcs = {
@@ -83,20 +117,57 @@ def generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec):
 
 
 if __name__ == "__main__":
-    # Initialization
-    mu = 4.892e-9  # Bennu's gravitational parameter [km^3/s^2]
-    order = 3  # STT order
+    # Constants for Bennu
+    R_bennu = 0.246  # [km] approximate mean radius
+    mu = 4.892e-9  # [km^3/s^2] Bennu GM
+    order = 3
 
-    # Initial state of particle (detaching from Bennu surface)
-    x0_true = np.array(
-        [0.3, 0.0, 0.0, 0.0, 0.02, 0.01]  # position [km]  # velocity [km/s]
-    )
+    # Load Bennu mesh
+    mesh_path = "ObjFiles/BennuRadar.obj"  # Update with correct path if needed
+    bennu_mesh = trimesh.load(mesh_path, force="mesh")
+    vertices = bennu_mesh.vertices  # shape (N, 3)
+    faces = bennu_mesh.faces  # shape (M, 3)
+
+    # Convert (lat, lon) to target position
+    lat_desired = np.deg2rad(45.0)  # latitude in radians
+    lon_desired = np.deg2rad(0.0)  # longitude in radians
+
+    x_des = R_bennu * np.cos(lat_desired) * np.cos(lon_desired)
+    y_des = R_bennu * np.cos(lat_desired) * np.sin(lon_desired)
+    z_des = R_bennu * np.sin(lat_desired)
+    pos_target = np.array([x_des, y_des, z_des])
+
+    # Find closest vertex on mesh
+    dists = np.linalg.norm(vertices - pos_target, axis=1)
+    closest_idx = np.argmin(dists)
+    pos_detach = vertices[closest_idx]
+
+    # Get surface normal at that point
+    normal = bennu_mesh.vertex_normals[closest_idx]
+    normal = normal / np.linalg.norm(normal)
+
+    # Initial velocity parameters
+    v_mag = 2 * 1e-4  # [km/s], small detachment velocity
+
+    # Generate random unit vector
+    rand_vec = np.random.randn(3)
+    rand_vec /= np.linalg.norm(rand_vec)
+
+    # Ensure it lies in the positive hemisphere relative to the normal
+    if np.dot(rand_vec, normal) < 0:
+        rand_vec = -rand_vec  # Flip to ensure outward direction
+
+    # Apply magnitude
+    v_detach = v_mag * rand_vec
+
+    # Construct state vector
+    x0_true = np.hstack((pos_detach, v_detach))
 
     # Time setup
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
     JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
     t_obs = JD0_seconds + np.linspace(
-        0, 6 * 3600, int((6 * 3600) / 20)
+        0, 1 * 3600, int((1 * 3600) / 20)
     )  # 20-sec cadence
 
     # Generate symbolic dynamics functions externally
@@ -117,7 +188,7 @@ if __name__ == "__main__":
     sigma_dec = np.deg2rad(0.005)
 
     sc_pos = np.array(
-        [0.0, 0.0, -2.0]
+        [0.0, 0.0, 2.0]
     )  # Fixed observer in Bennu-centered inertial frame
 
     y_obs = generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec)
@@ -126,7 +197,13 @@ if __name__ == "__main__":
     # Propagate reference trajectory
     print("\nPropagating reference trajectory:")
 
-    ref_dev = np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])  # Initial deviation
+    # Define relative deviation fractions (e.g., 1% for position, 0.5% for velocity)
+    pos_dev_frac = 0.01  # 1% of position
+    vel_dev_frac = 0.005  # 0.5% of velocity
+
+    # Compute component-wise deviation
+    ref_dev = np.hstack([pos_dev_frac * x0_true[:3], vel_dev_frac * x0_true[3:]])
+    print(f"Reference deviation: {ref_dev}")
     idx0 = np.searchsorted(t_obs, t_obs_used[0])
     x0_ref = sol_true.y[:6, idx0] - ref_dev
 
@@ -141,13 +218,35 @@ if __name__ == "__main__":
     fig = plt.figure(figsize=(10, 6))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Plot particle trajectory
-    ax.plot(x_true[:, 0], x_true[:, 1], x_true[:, 2], label="True Particle Trajectory")
+    # Facecolor (e.g., light brown or gray)
+    face_color = "#b88b4a"
 
-    # Plot spacecraft position
+    # Plot asteroid mesh
+    mesh = Poly3DCollection(
+        vertices[faces],
+        alpha=0.3,
+        edgecolor="k",
+        linewidths=0.2,
+        facecolor=face_color,
+    )
+    ax.add_collection3d(mesh)
+
+    # Particle Trajectory
+    ax.plot(
+        x_true[:, 0],
+        x_true[:, 1],
+        x_true[:, 2],
+        label="Particle Trajectory",
+        color="blue",
+    )
+
+    # Detachment Point
+    ax.scatter(*pos_detach, color="green", label="Detachment Point", s=30)
+
+    # Spacecraft Position
     ax.scatter(*sc_pos, color="red", label="Spacecraft", s=50)
 
-    # Plot line-of-sight vectors every N steps
+    # Line-of-Sight Vectors
     N_skip = 30
     for i in range(0, len(x_true), N_skip):
         ax.plot(
@@ -158,12 +257,42 @@ if __name__ == "__main__":
             alpha=0.3,
         )
 
+    # Plot Labels and Appearance
     ax.set_xlabel("X [km]")
     ax.set_ylabel("Y [km]")
     ax.set_zlabel("Z [km]")
-    ax.set_title("Particle Motion and OpNav Line-of-Sight from Fixed Observer")
-    ax.legend()
+    ax.set_title("Bennu Mesh, Particle Trajectory, and LOS Vectors")
+    ax.legend(loc="upper left")
     ax.grid(True)
+    plt.tight_layout()
+    ax.set_aspect("equal")
+    plt.show()
+
+    # Plot RA and DEC over time
+    ra_vals = y_obs[0::2]  # Extract RA measurements
+    dec_vals = y_obs[1::2]  # Extract DEC measurements
+
+    # Convert observation times to minutes since start
+    time_minutes = (t_obs_used - t_obs_used[0]) / 60.0
+
+    fig2, ax2 = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+
+    # RA scatter
+    ax2[0].scatter(time_minutes, np.rad2deg(ra_vals), color="purple", s=10, label="RA")
+    ax2[0].set_ylabel("RA [deg]")
+    ax2[0].grid(True)
+    ax2[0].legend()
+
+    # DEC scatter
+    ax2[1].scatter(
+        time_minutes, np.rad2deg(dec_vals), color="darkorange", s=10, label="DEC"
+    )
+    ax2[1].set_xlabel("Time [min]")
+    ax2[1].set_ylabel("DEC [deg]")
+    ax2[1].grid(True)
+    ax2[1].legend()
+
+    fig2.suptitle("Simulated OpNav Angular Measurements (Scatter)")
     plt.tight_layout()
     plt.show()
 
@@ -224,7 +353,7 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
-    model.run(n_samples=1000, n_walkers=128, burn_in=500, thin=1)
+    model.run(n_samples=10000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
