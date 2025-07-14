@@ -9,6 +9,7 @@ from scipy.constants import pi
 from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
 import matplotlib.pyplot as plt
+from STTPropagation import STTPropagator
 
 
 def generate_stt_functions(mu, order, beta=0.0):
@@ -82,70 +83,94 @@ def generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec):
 
 
 if __name__ == "__main__":
-    # Initialize parameters
-    mu = 4.892e-9  # [km^3/s^2] — Bennu's GM (from OSIRIS-REx SPICE kernels)
+    # Initialization
+    mu = 4.892e-9  # Bennu's gravitational parameter [km^3/s^2]
     order = 3  # STT order
 
     # Initial state of particle (detaching from Bennu surface)
     x0_true = np.array(
-        [
-            0.3,
-            0.0,
-            0.0,  # position [km] (near surface)
-            0.0,
-            0.02,
-            0.01,  # velocity [km/s]
-        ]
+        [0.3, 0.0, 0.0, 0.0, 0.02, 0.01]  # position [km]  # velocity [km/s]
     )
 
-    # Epoch definition
+    # Time setup
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
     JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
+    t_obs = JD0_seconds + np.linspace(
+        0, 6 * 3600, int((6 * 3600) / 20)
+    )  # 20-sec cadence
 
-    # Observation times (e.g., every 20 seconds for 6 hours)
-    t_obs = JD0_seconds + np.linspace(0, 6 * 3600, int((6 * 3600) / 20))
+    # Generate symbolic dynamics functions externally
+    f_func, A_func, B_funcs = generate_stt_functions(mu, order)
 
-    # Propagate true trajectory
+    # Instantiate STT propagator with provided symbolic functions
+    propagator = STTPropagator(
+        order=order, f_func=f_func, A_func=A_func, B_funcs=B_funcs
+    )
+
+    # Propagate truth
     print(f"\nPropagating true trajectory:")
-    sol_true, stts_true = propagate(x0_true, mu, order, t_obs, rtol=1e-10, atol=1e-12)
+    sol_true, stts_true = propagator.propagate(x0_true, t_obs, rtol=1e-10, atol=1e-12)
     x_true = sol_true.y[:6, :].T  # shape (n_steps, 6)
 
-    # Measurement noise
-    JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
+    # Measurement model (OpNav angles)
     sigma_ra = np.deg2rad(0.005)  # ~18 arcsec
-    sigma_dec = np.deg2rad(0.005)  # same
+    sigma_dec = np.deg2rad(0.005)
 
-    # Define fixed spacecraft position in ECI (e.g., 2 km above Bennu surface)
-    sc_pos = np.array([0.0, 0.0, -2.0])  # [km], Bennu-centered inertial frame
+    sc_pos = np.array(
+        [0.0, 0.0, -2.0]
+    )  # Fixed observer in Bennu-centered inertial frame
 
-    # Generate synthetic angular observations
     y_obs = generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec)
-
-    # Use all times (no visibility check here)
-    t_obs_used = t_obs
+    t_obs_used = t_obs  # all times used in this simplified case
 
     # Propagate reference trajectory
     print("\nPropagating reference trajectory:")
 
-    # Define small deviation from truth (in km and km/s), and add it to the truth at t_obs_used[0]
-    ref_dev = np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])
+    ref_dev = np.array([2, -3, 1, 0.1e-3, -0.5e-3, 0.8e-3])  # Initial deviation
     idx0 = np.searchsorted(t_obs, t_obs_used[0])
     x0_ref = sol_true.y[:6, idx0] - ref_dev
 
-    # Propagate reference trajectory at used observation times
-    sol_ref, stts_ref = propagate(
+    sol_ref, stts_ref = propagator.propagate(
         x0=x0_ref,
-        mu=mu,
-        order=order,
         t_eval=t_obs_used,
         rtol=1e-12,
         atol=1e-14,
     )
 
+    # Plot: 3D trajectory and observer LOS vectors
+    fig = plt.figure(figsize=(10, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Plot particle trajectory
+    ax.plot(x_true[:, 0], x_true[:, 1], x_true[:, 2], label="True Particle Trajectory")
+
+    # Plot spacecraft position
+    ax.scatter(*sc_pos, color="red", label="Spacecraft", s=50)
+
+    # Plot line-of-sight vectors every N steps
+    N_skip = 30
+    for i in range(0, len(x_true), N_skip):
+        ax.plot(
+            [sc_pos[0], x_true[i, 0]],
+            [sc_pos[1], x_true[i, 1]],
+            [sc_pos[2], x_true[i, 2]],
+            color="gray",
+            alpha=0.3,
+        )
+
+    ax.set_xlabel("X [km]")
+    ax.set_ylabel("Y [km]")
+    ax.set_zlabel("Z [km]")
+    ax.set_title("Particle Motion and OpNav Line-of-Sight from Fixed Observer")
+    ax.legend()
+    ax.grid(True)
+    plt.tight_layout()
+    plt.show()
+
     # Residual function for MCMC — OpNav angular case
     def residuals_normalized(delta_x0):
         # 1. Propagate the perturbed trajectory
-        _, x_est = propagate_deviation(sol_ref, stts_ref, delta_x0, order=order)
+        _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta_x0)
 
         # 2. Line-of-sight vector: target - observer
         los_vec = x_est[:, :3] - sc_pos  # shape (N, 3)
@@ -207,25 +232,3 @@ if __name__ == "__main__":
     model.plot_corner()
     model.summary()
     model.print_regression_diagnostics()
-
-
-# EXTRA CODE:
-#
-# 1) Plot the elevation angles of the stations
-# for name in stations:
-#    elevations = np.arcsin(
-#        np.sum((x_true[:, :3] - station_eci[name]) * station_eci[name], axis=1)
-#        / (
-#            np.linalg.norm(x_true[:, :3] - station_eci[name], axis=1)
-#            * np.linalg.norm(station_eci[name], axis=1)
-#        )
-#    )
-#    plt.plot(t_obs / 3600, np.degrees(elevations), label=name)
-# plt.axhline(10, color="k", linestyle="--", label="10 deg limit")
-# plt.xlabel("Time (hours)")
-# plt.ylabel("Elevation (deg)")
-# plt.legend()
-# plt.grid()
-# plt.show()
-#
-# 2) ...

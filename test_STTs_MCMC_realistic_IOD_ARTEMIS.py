@@ -13,12 +13,10 @@ import matplotlib.pyplot as plt
 # NOTE:
 # 1) It's true that for IOD not having i.c. means bad STTs...
 
-# PRESENT TODOs:
-# TODO: implement nominal case, and edge case comparison w/ Batch. More realistic dynamics also.
-# TODO: try changing chain loop to be step by step printing out, use .sample() to also stop when stationarity is reached
-# TODO: how to optimize hyperparameters matlab-like?
-# TODO: fix plots etc (units, histograms, etc)
-# TODO: how to handle always not realiable autocorrelation estimate, always increasing
+# CURRENT TODOs:
+# TODO: Implement nominal and edge-case comparisons with batch estimation; incorporate more realistic dynamics in the simulation.
+# TODO: Refactor MCMC sampling loop to use step-by-step calls via .sample(), allowing for real-time monitoring and early stopping upon stationarity.
+# TODO: Improve plotting routines: fix units, label histograms clearly, and ensure consistent formatting.
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
