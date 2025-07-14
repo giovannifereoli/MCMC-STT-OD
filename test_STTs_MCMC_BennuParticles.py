@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from STTPropagation import STTPropagator
 import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.optimize import least_squares
 
 # TODOs for this script:
 # TODO: Verify consistency of gravitational parameters and SRP constants with Bennu's physical model
@@ -16,6 +17,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 # TODO: Validate nominal propagation: does the trajectory make physical sense?
 # TODO: Implement visibility constraints if needed (line-of-sight to Sun or observer)
 # TODO: Fix plots, especially post-fits residuals
+# TODO: add batch using optimize MAP point and covariance?
 
 
 def generate_stt_functions(
@@ -116,6 +118,56 @@ def generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec):
     return y_obs
 
 
+def compute_STT_batch_solution(residuals_func, x0, sigma):
+    # Define raw (non-normalized) residual function for LS
+    def raw_residuals(delta_x0):
+        res = residuals_func(delta_x0)
+        return res * sigma  # un-normalize residuals
+
+    # Run nonlinear least-squares (trust-region or LM)
+    result = least_squares(
+        fun=raw_residuals, x0=x0, method="trf", jac="2-point", verbose=2
+    )
+
+    # Estimate covariance from inverse JTJ
+    J = result.jac  # shape (m, n)
+    JTJ = J.T @ J
+    cov = np.linalg.inv(JTJ)
+
+    return result, cov
+
+
+def plot_normalized_residuals_vs_time(
+    residuals_func, delta_x0_list, labels, colors, t_obs_used
+):
+    assert len(delta_x0_list) == len(labels) == len(colors), "Mismatched input lengths."
+
+    time_hr = (t_obs_used - t_obs_used[0]) / 3600.0
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+    for delta_x0, label, color in zip(delta_x0_list, labels, colors):
+        res = residuals_func(delta_x0)
+        ra_res = res[0::2]
+        dec_res = res[1::2]
+
+        ax1.plot(time_hr, ra_res, "o", markersize=4, color=color, label=f"RA {label}")
+        ax2.plot(time_hr, dec_res, "o", markersize=4, color=color, label=f"DEC {label}")
+
+    for ax in (ax1, ax2):
+        ax.axhline(0, color="black", linestyle="--")
+        ax.axhline(3, color="red", linestyle=":")
+        ax.axhline(-3, color="red", linestyle=":")
+        ax.grid(True)
+        ax.legend(loc="upper right")
+
+    ax1.set_ylabel("RA Residual [$\\sigma$]")
+    ax2.set_ylabel("DEC Residual [$\\sigma$]")
+    ax2.set_xlabel("Time [hours since epoch]")
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
     # Constants for Bennu
     R_bennu = 0.246  # [km] approximate mean radius
@@ -130,7 +182,7 @@ if __name__ == "__main__":
 
     # Convert (lat, lon) to target position
     lat_desired = np.deg2rad(45.0)  # latitude in radians
-    lon_desired = np.deg2rad(0.0)  # longitude in radians
+    lon_desired = np.deg2rad(80.0)  # longitude in radians
 
     x_des = R_bennu * np.cos(lat_desired) * np.cos(lon_desired)
     y_des = R_bennu * np.cos(lat_desired) * np.sin(lon_desired)
@@ -150,6 +202,7 @@ if __name__ == "__main__":
     v_mag = 2 * 1e-4  # [km/s], small detachment velocity
 
     # Generate random unit vector
+    np.random.seed(24)  # For reproducibility
     rand_vec = np.random.randn(3)
     rand_vec /= np.linalg.norm(rand_vec)
 
@@ -166,9 +219,10 @@ if __name__ == "__main__":
     # Time setup
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
     JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
-    t_obs = JD0_seconds + np.linspace(
-        0, 1 * 3600, int((1 * 3600) / 20)
-    )  # 20-sec cadence
+    # t_obs = JD0_seconds + np.linspace(
+    #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
+    # )  # 20-sec cadence
+    t_obs = JD0_seconds + np.linspace(0, 0.05 * 3600, num=100)
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
@@ -179,6 +233,7 @@ if __name__ == "__main__":
     )
 
     # Propagate truth
+    print("")
     print(f"\nPropagating true trajectory:")
     sol_true, stts_true = propagator.propagate(x0_true, t_obs, rtol=1e-10, atol=1e-12)
     x_true = sol_true.y[:6, :].T  # shape (n_steps, 6)
@@ -195,6 +250,7 @@ if __name__ == "__main__":
     t_obs_used = t_obs  # all times used in this simplified case
 
     # Propagate reference trajectory
+    print("")
     print("\nPropagating reference trajectory:")
 
     # Define relative deviation fractions (e.g., 1% for position, 0.5% for velocity)
@@ -261,7 +317,6 @@ if __name__ == "__main__":
     ax.set_xlabel("X [km]")
     ax.set_ylabel("Y [km]")
     ax.set_zlabel("Z [km]")
-    ax.set_title("Bennu Mesh, Particle Trajectory, and LOS Vectors")
     ax.legend(loc="upper left")
     ax.grid(True)
     plt.tight_layout()
@@ -337,6 +392,36 @@ if __name__ == "__main__":
         ]
     )
 
+    # Evaluate residuals at delta_x0 = 0 (prefit)
+    delta_prefit = np.zeros(6)
+
+    # Run Batch Estimation
+    print("")
+    print("\nRunning STT batch least-squares estimation...")
+    batch_result, batch_cov = compute_STT_batch_solution(
+        residuals_func=residuals_normalized, x0=delta_prefit, sigma=weights
+    )
+    batch_estimate = batch_result.x
+
+    # Call the unified plot function
+    plot_normalized_residuals_vs_time(
+        residuals_func=residuals_normalized,
+        delta_x0_list=[delta_prefit, batch_estimate],
+        labels=["Prefit", "Batch"],
+        colors=["blue", "green"],
+        t_obs_used=t_obs_used,
+    )
+    plt.show()
+
+    # Print batch solution summary
+    print("\n=== Batch Least-Squares Estimate ===")
+    param_names = ["Δx", "Δy", "Δz", "Δvx", "Δvy", "Δvz"]
+    batch_std = np.sqrt(np.diag(batch_cov))
+    for i, name in enumerate(param_names):
+        estimate = batch_estimate[i]
+        sigma = batch_std[i]
+        print(f"{name:>5}: {estimate:+.6e} ± {sigma:.2e} [σ]")
+
     # Priors
     initial_guess = np.zeros(6)
     pos_lower, pos_upper = -1e-1, 1e-1  # Position in km
@@ -353,11 +438,10 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
-    model.run(n_samples=10000, n_walkers=128, burn_in=500, thin=1)
+    model.run(n_samples=1000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
-    model.plot_postfit_residuals()
-    model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
+    model.plot_postfit_residuals_time(t_obs_used=t_obs_used, opnav_data=True)
     model.plot_log_likelihood()
-    model.plot_corner()
+    model.plot_corner_with_batch(batch_mean=batch_estimate, batch_cov=batch_cov)
     model.summary()
     model.print_regression_diagnostics()

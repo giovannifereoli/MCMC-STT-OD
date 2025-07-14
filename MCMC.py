@@ -5,6 +5,7 @@ import emcee
 import multiprocessing
 from scipy.optimize import minimize, basinhopping
 import warnings
+from matplotlib.patches import Ellipse
 
 plt.rcParams.update(
     {
@@ -256,40 +257,56 @@ class MCMCModel:
         plt.tight_layout()
         plt.show()
 
-    def plot_postfit_residuals_time(self, t_obs_used):
+    def plot_postfit_residuals_time(self, t_obs_used, opnav_data=False):
         # 1) Compute median parameters and post-fit residuals
         best_params = np.median(self.samples, axis=0)
         postfit = self.residuals_func(best_params)
 
-        # 2) Reshape into two rows: [range; range_rate]
-        #    Original layout: [r0, rr0, r1, rr1, ..., rN-1, rrN-1]
+        # 2) Reshape: [r0, rr0, r1, rr1, ...] → (2, N)
         residuals_matrix = postfit.reshape(-1, 2).T  # shape = (2, N)
 
         # 3) Create subplots
-        fig, (ax_r, ax_rr) = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
 
-        # Disable scientific notation on x-axis for both subplots
-        for ax in (ax_r, ax_rr):
-            ax.ticklabel_format(axis="x", style="plain", useOffset=False)
+        time_hr = t_obs_used / 3600.0
+        ylabels = (
+            [r"RA Residual [$\sigma$]", r"DEC Residual [$\sigma$]"]
+            if opnav_data
+            else [r"Range Residual [$\sigma$]", r"Range-Rate Residual [$\sigma$]"]
+        )
 
-        # 4) Plot range residuals
-        ax_r.plot(t_obs_used / 3600, residuals_matrix[0], "o", markersize=4)
-        ax_r.axhline(0, color="k", linestyle="--")
-        ax_r.axhline(3, color="r", linestyle=":")
-        ax_r.axhline(-3, color="r", linestyle=":")
-        ax_r.set_ylabel("Normalized Range\nResidual")
-        ax_r.set_title("Post-fit Range Residuals")
-        ax_r.grid(True)
+        # 4) Top residual
+        ax0.plot(
+            time_hr,
+            residuals_matrix[0],
+            "o",
+            color="blue",
+            markersize=4,
+            label="Residual",
+        )
+        ax0.axhline(0, color="black", linestyle="--")
+        ax0.axhline(3, color="red", linestyle=":")
+        ax0.axhline(-3, color="red", linestyle=":")
+        ax0.set_ylabel(ylabels[0])
+        ax0.grid(True)
+        ax0.legend(loc="upper right")
 
-        # 5) Plot range-rate residuals
-        ax_rr.plot(t_obs_used / 3600, residuals_matrix[1], "o", markersize=4)
-        ax_rr.axhline(0, color="k", linestyle="--")
-        ax_rr.axhline(3, color="r", linestyle=":")
-        ax_rr.axhline(-3, color="r", linestyle=":")
-        ax_rr.set_ylabel("Normalized Range-Rate\nResidual")
-        ax_rr.set_xlabel("Time (hr since epoch)")
-        ax_rr.set_title("Post-fit Range-Rate Residuals")
-        ax_rr.grid(True)
+        # 5) Bottom residual
+        ax1.plot(
+            time_hr,
+            residuals_matrix[1],
+            "o",
+            color="purple",
+            markersize=4,
+            label="Residual",
+        )
+        ax1.axhline(0, color="black", linestyle="--")
+        ax1.axhline(3, color="red", linestyle=":")
+        ax1.axhline(-3, color="red", linestyle=":")
+        ax1.set_ylabel(ylabels[1])
+        ax1.set_xlabel("Time [hours since epoch]")
+        ax1.grid(True)
+        ax1.legend(loc="upper right")
 
         plt.tight_layout()
         plt.show()
@@ -310,11 +327,83 @@ class MCMCModel:
             labels=[f"$\\theta_{{{i}}}$" for i in range(self.ndim)],
             truths=truths,
             show_titles=True,
-            title_fmt=".4f",
+            title_fmt=".10f",
             title_kwargs={"fontsize": 12},
         )
 
-        fig.set_size_inches(8, 8)
+        fig.set_size_inches(12, 12)
+        plt.tight_layout()
+        plt.show()
+
+    def plot_corner_with_batch(
+        self, batch_mean=None, batch_cov=None, use_median_as_truth=True
+    ):
+        if self.samples is None:
+            print("Run MCMC first.")
+            return
+
+        truths = np.median(self.samples, axis=0) if use_median_as_truth else None
+        labels = [f"$\\theta_{{{i}}}$" for i in range(self.ndim)]
+
+        # Plot MCMC corner
+        fig = corner.corner(
+            self.samples,
+            labels=labels,
+            truths=truths,
+            show_titles=True,
+            title_fmt=".6f",
+            title_kwargs={"fontsize": 12},
+            color="blue",
+        )
+
+        if batch_mean is not None and batch_cov is not None:
+            axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
+            for i in range(self.ndim):
+                for j in range(i):
+                    ax = axes[i, j]
+                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]
+                    mean_sub = [batch_mean[j], batch_mean[i]]
+
+                    # Red dot for mean
+                    ax.plot(
+                        mean_sub[0],
+                        mean_sub[1],
+                        "ro",
+                        label="Batch Mean" if (i == self.ndim - 1 and j == 0) else "",
+                    )
+
+                    # Ellipse for 1-sigma uncertainty
+                    vals, vecs = np.linalg.eigh(cov_sub)
+                    order = vals.argsort()[::-1]
+                    vals, vecs = vals[order], vecs[:, order]
+                    angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
+                    width, height = 2 * np.sqrt(vals)
+                    ellipse = Ellipse(
+                        xy=mean_sub,
+                        width=width,
+                        height=height,
+                        angle=angle,
+                        edgecolor="red",
+                        facecolor="none",
+                        lw=1.5,
+                        label=(
+                            r"Batch $1\sigma$ Ellipse"
+                            if (i == self.ndim - 1 and j == 0)
+                            else ""
+                        ),
+                    )
+                    ax.add_patch(ellipse)
+
+            # External legend outside lower-left plot
+            legend_ax = axes[self.ndim - 1, 0]
+            legend_ax.legend(
+                loc="upper left",
+                bbox_to_anchor=(1.05, 1.0),
+                borderaxespad=0.0,
+                fontsize=10,
+            )
+
+        fig.set_size_inches(13.5, 12)
         plt.tight_layout()
         plt.show()
 
@@ -358,8 +447,9 @@ class MCMCModel:
         print("Parameter estimates:")
         for i in range(self.ndim):
             mcmc = np.percentile(self.samples[:, i], [16, 50, 84])
-            q = np.diff(mcmc)
-            print(f"$\\theta_{{{i}}}$: {mcmc[1]:.4f} (+{q[1]:.4f}/-{q[0]:.4f})")
+            q_lower, q_upper = np.diff(mcmc)
+            median = mcmc[1]
+            print(f"θ_{i}: {median:+.10e}  (+{q_upper:.1e} / -{q_lower:.1e})")
 
     def print_regression_diagnostics(self):
         if self.samples is None:
@@ -391,9 +481,9 @@ class MCMCModel:
         print(f"AIC: {AIC:.3f}")
         print(f"BIC: {BIC:.3f}")
         print(f"RMS of residuals: {RMS:.3f}")
-        print("Parameter uncertainties (1σ):")
-        for i, std in enumerate(param_uncertainties):
-            print(f"  θ_{i}: ±{std:.14f}")
+        # print("Parameter uncertainties (1σ):")
+        # for i, std in enumerate(param_uncertainties):
+        #    print(f"  θ_{i}: ±{std:.14f}")
 
     def get_unwhitened_samples(self):
         if not getattr(self, "is_whitened", False):
