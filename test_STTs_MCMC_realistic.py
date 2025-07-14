@@ -412,7 +412,7 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
-    model.run(n_samples=20000, n_walkers=128, burn_in=500, thin=1)
+    model.run(n_samples=30000, n_walkers=128, burn_in=500, thin=1)
     model.plot_convergence()
     model.plot_postfit_residuals()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used)
