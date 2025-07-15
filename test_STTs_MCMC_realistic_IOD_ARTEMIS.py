@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 # FUTURE TODOs:
 # TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
-# TODO: try PTSampler https://github.com/willvousden/ptemcee
+# TODO: PTSampler useless, https://prappleizer.github.io/Tutorials/MCMC/MCMC_Tutorial.html is the proof that emcee is enough!
 
 
 def generate_stt_functions(mu, order, beta=0.0):

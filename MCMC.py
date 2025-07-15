@@ -4,7 +4,6 @@ import corner
 import emcee
 import multiprocessing
 from scipy.optimize import minimize, basinhopping
-import warnings
 from matplotlib.patches import Ellipse
 
 plt.rcParams.update(
@@ -157,11 +156,10 @@ class MCMCModel:
 
             # Warn if total steps are insufficient for autocorrelation convergence
             if n_samples < 100 * max_tau:
-                warnings.warn(
-                    f"[Run] n_samples = {n_samples} may be too small. "
-                    f"Recommended: at least 100 x max(tau) = {100 * max_tau:.1f} steps "
-                    f"for reliable sampling.",
-                    UserWarning,
+                print(
+                    f"[Run] Warning: n_samples = {n_samples} may be too small. "
+                    f"Recommended: at least 100 × max(tau) = {100 * max_tau:.1f} steps "
+                    f"for reliable sampling."
                 )
 
             # Determine burn-in and thinning if not manually specified
