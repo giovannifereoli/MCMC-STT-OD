@@ -11,13 +11,12 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
 # TODOs for this script:
-# TODO: Verify consistency of gravitational parameters and SRP constants with Bennu's physical model
-# TODO: Check correctness of gravity, J2, and SRP
-# TODO: Ensure unit consistency across all forces
+# TODO: Check correctness of gravity, J2, and SRP (formulas, numbers, and units)
 # TODO: Validate nominal propagation: does the trajectory make physical sense?
 # TODO: Implement visibility constraints if needed (line-of-sight to Sun or observer)
 # TODO: Fix plots, especially post-fits residuals
-# TODO: why batch sigmas are this big? Are they correct?
+# TODO: Add SPH
+# TODO: How to make the scenario more realistic/challenging?
 
 
 def generate_stt_functions(
@@ -122,7 +121,7 @@ def compute_STT_batch_solution(residuals_func, x0, sigma):
     # Define raw (normalized) residual function for LS
     def raw_residuals(delta_x0):
         res = residuals_func(delta_x0)
-        return res
+        return res  # normalized residuals
 
     # Run nonlinear least-squares (trust-region or LM)
     result = least_squares(
@@ -438,7 +437,7 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
-    model.run(n_samples=1000, n_walkers=128, burn_in=500, thin=1)
+    model.run(n_samples=1000, n_walkers=128, burn_in=500, thin=1, spherical_spread=1e-1)
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used, opnav_data=True)
     model.plot_log_likelihood()

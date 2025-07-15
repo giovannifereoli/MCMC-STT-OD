@@ -180,39 +180,44 @@ def propagate_deviation(sol, stts, delta_x0, order):
     return delta, x_nom + delta
 
 
+import numpy as np
+
+
 def compute_radius_from_stts(stts, order):
     """
-    Estimate the radius of convergence R_c at each time step from STT tensors using the root test.
+    Estimate the radius of convergence R_c(t) at each time step using the Cauchy–Hadamard formula.
 
     Parameters
     ----------
-    stts : dict
-        Multi-index State-Transition Tensors: stts[k][t].shape = (6,)*k+1
+    stts : dict of {int: ndarray}
+        Dictionary of STT tensors. For each order k, stts[k].shape = (n_steps,) + (6,)*(k+1)
     order : int
-        Maximum STT order used in the expansion
+        Maximum order of STT tensors to consider.
 
     Returns
     -------
     Rcs : ndarray, shape (n_steps,)
         Estimated radius of convergence at each time step.
+        Defined as: R_c(t) = 1 / limsup_k ||T_k(t)||^{1/k}
     """
     n_steps = stts[1].shape[0]
     Rcs = np.zeros(n_steps)
 
     for t in range(n_steps):
-        roots = []
+        root_norms = []
         for k in range(1, order + 1):
-            Tk = stts[k][t]
-            norm_k = np.linalg.norm(Tk.flatten(), ord=2)  # Frobenius norm
+            Tk = stts[k][t]  # shape: (6,)*k+1
+            norm_k = np.linalg.norm(Tk)  # Frobenius norm
             if norm_k > 0:
-                roots.append(norm_k ** (1.0 / k))
-        if roots:
-            roots = np.array(roots)
-            Rcs[t] = (
-                1.0 / np.max(roots[-3:]) if len(roots) >= 3 else 1.0 / np.max(roots)
+                root_norms.append(norm_k ** (1.0 / k))
+        if root_norms:
+            root_norms = np.array(root_norms)
+            limsup = (
+                np.max(root_norms[-3:]) if len(root_norms) >= 3 else np.max(root_norms)
             )
+            Rcs[t] = 1.0 / limsup
         else:
-            Rcs[t] = np.nan
+            Rcs[t] = np.nan  # No valid tensors
 
     return Rcs
 
@@ -228,7 +233,7 @@ def specific_energy(x, mu):
 if __name__ == "__main__":
     μ = 398600.4418  # km^3/s^2
     x0 = np.array([7000, 0, 0, 0, 7.5, 1.0])
-    order = 1
+    order = 3
     t_eval = np.linspace(0, 2 * 3600, 1000)
 
     sol, stts = propagate(x0, μ, order, t_eval, rtol=1e-12, atol=1e-14, method="RK45")
