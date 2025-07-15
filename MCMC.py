@@ -5,6 +5,7 @@ import emcee
 import multiprocessing
 from scipy.optimize import minimize, basinhopping
 from matplotlib.patches import Ellipse
+from statsmodels.tsa.stattools import acf
 
 plt.rcParams.update(
     {
@@ -432,7 +433,7 @@ class MCMCModel:
         # Warn if acceptance rate is outside optimal range
         if mean_acceptance < 0.2 or mean_acceptance > 0.5:
             print(
-                "Acceptance rate outside optimal range (0.2-0.5). Consider tuning initialization or step size."
+                "Acceptance rate outside optimal range (0.2-0.5). Consider tuning initialization step size."
             )
 
         print("Parameter estimates:")
@@ -534,6 +535,116 @@ class MCMCModel:
         self.samples = data["samples"]
         self.log_probs = data["log_probs"]
         print(f"Chain loaded from '{path}'")
+
+    def gelman_rubin_diagnostic(self, split=True, threshold=1.1):
+        if self.samples is None:
+            raise RuntimeError("Run MCMC before computing Gelman-Rubin diagnostic.")
+
+        # Reshape: (n_walkers, n_steps, ndim)
+        chain = self.sampler.get_chain(
+            discard=0, flat=False
+        )  # shape: (walkers, steps, ndim)
+        n_walkers, n_steps, ndim = chain.shape
+
+        if split:
+            # Split chains to double the number of chains
+            chain = chain.reshape((n_walkers * 2, n_steps // 2, ndim))
+            _, n_samples, _ = chain.shape
+        else:
+            _, n_samples = n_walkers, n_steps
+
+        r_hat = np.empty(ndim)
+        for d in range(ndim):
+            samples = chain[:, :, d]
+            chain_means = np.mean(samples, axis=1)
+            chain_vars = np.var(samples, axis=1, ddof=1)
+
+            B = n_samples * np.var(chain_means, ddof=1)
+            W = np.mean(chain_vars)
+            V_hat = (1 - 1 / n_samples) * W + B / n_samples
+            r_hat[d] = np.sqrt(V_hat / W)
+
+        print("\n=== Gelman-Rubin Diagnostic ===")
+        for i, r in enumerate(r_hat):
+            status = "OK" if r < threshold else "NOT CONVERGED"
+            print(f"R_hat[θ_{i}]: {r:.4f}  is  {status}")
+
+        if np.all(r_hat < threshold):
+            print(
+                "\n[Convergence] All parameters have converged (R_hat < {:.2f}).".format(
+                    threshold
+                )
+            )
+        else:
+            print(
+                "\n[Convergence Warning] Some parameters have not yet converged (R_hat ≥ {:.2f}).".format(
+                    threshold
+                )
+            )
+
+        return r_hat
+
+    def effective_sample_size(self, min_ess_threshold=100):
+        """
+        Estimate and print effective sample size (ESS) for each parameter.
+        """
+        if self.samples is None:
+            raise RuntimeError("Run MCMC first.")
+
+        try:
+            tau = self.sampler.get_autocorr_time()
+        except emcee.autocorr.AutocorrError:
+            try:
+                tau = self.sampler.get_autocorr_time(tol=0)
+                print("[Run] Autocorrelation recovered with tol=0.")
+            except emcee.autocorr.AutocorrError:
+                tau = None
+                print(
+                    "[Run] Warning: Autocorrelation time could not be reliably estimated."
+                )
+
+        total_samples = self.sampler.get_chain(discard=0, flat=True).shape[0]
+        ess = total_samples / tau
+
+        print("\n=== Effective Sample Size (ESS) ===")
+        all_good = True
+        for i, e in enumerate(ess):
+            status = "OK" if e >= min_ess_threshold else "LOW"
+            if e < min_ess_threshold:
+                all_good = False
+            print(f"ESS[θ_{i}]: {int(e):>5} samples is {status}")
+
+        if all_good:
+            print(
+                f"\n[Convergence] All parameters have sufficient ESS (≥ {min_ess_threshold})."
+            )
+        else:
+            print(
+                f"\n[Convergence Warning] Some parameters have low ESS (< {min_ess_threshold}). Consider running longer or adjusting sampler settings."
+            )
+
+        return ess
+
+    def plot_autocorrelation(self, max_lag=100):
+        if self.samples is None:
+            print("Run MCMC first.")
+            return
+
+        chain = self.sampler.get_chain(discard=0, flat=True)
+
+        fig, axes = plt.subplots(self.ndim, 1, figsize=(8, 2 * self.ndim))
+        if self.ndim == 1:
+            axes = [axes]
+
+        for i in range(self.ndim):
+            acf_vals = acf(chain[:, i], nlags=max_lag, fft=True)
+            axes[i].stem(range(max_lag + 1), acf_vals, basefmt=" ")
+            axes[i].set_ylabel(r"$\mathrm{{ACF}}[\theta_{{{}}}]$".format(i))
+            axes[i].grid(True)
+
+        plt.xlabel("Lag")
+        plt.tight_layout()
+        plt.show()
 
     '''
         def run_hmc(

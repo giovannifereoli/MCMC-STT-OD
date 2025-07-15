@@ -444,3 +444,6 @@ if __name__ == "__main__":
     model.plot_corner_with_batch(batch_mean=batch_estimate, batch_cov=batch_cov)
     model.summary()
     model.print_regression_diagnostics()
+    model.gelman_rubin_diagnostic()
+    model.effective_sample_size()
+    model.plot_autocorrelation()
