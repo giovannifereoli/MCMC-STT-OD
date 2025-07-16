@@ -335,13 +335,17 @@ class MCMCModel:
         plt.show()
 
     def plot_corner_with_batch(
-        self, batch_mean=None, batch_cov=None, use_median_as_truth=True
+        self,
+        batch_mean=None,
+        batch_cov=None,
+        use_median_as_truth=True,
+        true_theta=None,
     ):
         if self.samples is None:
             print("Run MCMC first.")
             return
 
-        truths = np.median(self.samples, axis=0) if use_median_as_truth else None
+        truths = np.median(self.samples, axis=0) if use_median_as_truth else true_theta
         labels = [f"$\\theta_{{{i}}}$" for i in range(self.ndim)]
 
         # Plot MCMC corner
@@ -355,16 +359,33 @@ class MCMCModel:
             color="blue",
         )
 
-        # Overlay batch mean and 1-sigma ellipses
-        if batch_mean is not None and batch_cov is not None:
-            axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
-            for i in range(self.ndim):
-                for j in range(i):
-                    ax = axes[i, j]
-                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]  # 2x2 sub-covariance
+        axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
+
+        for i in range(self.ndim):
+            for j in range(i):
+                ax = axes[i, j]
+
+                # Ensure batch mean and/or true_theta are visible in range
+                xlim = ax.get_xlim()
+                ylim = ax.get_ylim()
+                x_vals = [xlim[0], xlim[1]]
+                y_vals = [ylim[0], ylim[1]]
+
+                if batch_mean is not None:
+                    x_vals.append(batch_mean[j])
+                    y_vals.append(batch_mean[i])
+                if true_theta is not None:
+                    x_vals.append(true_theta[j])
+                    y_vals.append(true_theta[i])
+
+                ax.set_xlim(min(x_vals), max(x_vals))
+                ax.set_ylim(min(y_vals), max(y_vals))
+
+                # Plot batch mean
+                if batch_mean is not None and batch_cov is not None:
+                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]
                     mean_sub = [batch_mean[j], batch_mean[i]]
 
-                    # Red dot for mean
                     ax.plot(
                         mean_sub[0],
                         mean_sub[1],
@@ -372,14 +393,12 @@ class MCMCModel:
                         label="Batch Mean" if (i == 1 and j == 0) else "",
                     )
 
-                    # Eigen-decompose 2x2 covariance for ellipse
                     vals, vecs = np.linalg.eigh(cov_sub)
                     order = vals.argsort()[::-1]
                     vals, vecs = vals[order], vecs[:, order]
                     angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
+                    width, height = 6 * np.sqrt(vals)
 
-                    # Width and height are 2*sqrt(eigenvalues) for 1-sigma ellipse
-                    width, height = 2 * np.sqrt(vals)
                     ellipse = Ellipse(
                         xy=mean_sub,
                         width=width,
@@ -388,12 +407,21 @@ class MCMCModel:
                         edgecolor="red",
                         facecolor="none",
                         lw=1.5,
-                        label=r"Batch $1\sigma$ Ellipse" if (i == 1 and j == 0) else "",
+                        label=r"Batch $3\sigma$ Ellipse" if (i == 1 and j == 0) else "",
                     )
                     ax.add_patch(ellipse)
 
-            # Add legend only once
-            axes[1, 0].legend(loc="upper right", fontsize=10)
+                # Plot true value
+                if true_theta is not None:
+                    ax.plot(
+                        true_theta[j],
+                        true_theta[i],
+                        "go",
+                        label="True Value" if (i == 1 and j == 0) else "",
+                    )
+
+        # Add single legend
+        axes[1, 0].legend(loc="upper right", fontsize=10)
 
         fig.set_size_inches(12, 12)
         plt.tight_layout()
