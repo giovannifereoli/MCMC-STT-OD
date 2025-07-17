@@ -10,13 +10,15 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
-# TODOs for this script:
-# TODO: Check correctness of gravity, J2, and SRP (formulas, numbers, and units)
-# TODO: Validate nominal propagation: does the trajectory make physical sense?
-# TODO: Implement visibility constraints if needed (line-of-sight to Sun or observer)
-# TODO: Fix plots, especially post-fits residuals
-# TODO: Add SPH
-# TODO: How to make the scenario more realistic/challenging?
+## TODO
+# - Verify implementation and units of gravity model, J2 perturbation, and solar radiation pressure (SRP)
+# - Cross-check nominal trajectory propagation—does it match expected physics? Refer to OREX iOD paper for validation
+# - Optionally add visibility constraints (e.g., line-of-sight to the Sun or observer) if needed
+# - Consider how to increase realism or complexity of the scenario—currently looks good for publication; consult Jay
+# - Improve MCMC convergence when stuck far from the minimum: enhance initialization (e.g., better global optimizer) or sampling strategy
+
+## NOTE
+# - In the manuscript, emphasize that batch solutions are computed using high-order STTs with trust-region enhancements
 
 
 def generate_stt_functions(
@@ -167,6 +169,113 @@ def plot_normalized_residuals_vs_time(
     plt.show()
 
 
+def plot_estimation_error_and_covariance(
+    stts,
+    sol,
+    x_truth,
+    delta_batch,
+    P_batch,
+    delta_mcmc,
+    P_mcmc,
+    propagator,
+    t_obs,
+    labels=["Batch", "MCMC"],
+    colors=["blue", "orange"],
+):
+    # Propagate deviations
+    err_batch, traj_batch = propagator.propagate_deviation(
+        stts=stts, sol=sol, delta_x0=delta_batch
+    )
+    err_mcmc, traj_mcmc = propagator.propagate_deviation(
+        stts=stts, sol=sol, delta_x0=delta_mcmc
+    )
+
+    # Propagate covariances
+    P_batch_t = propagator.propagate_covariance(sol, stts, P_batch)
+    P_mcmc_t = propagator.propagate_covariance(sol, stts, P_mcmc)
+
+    # Compute true error
+    err_batch = traj_batch - x_truth
+    err_mcmc = traj_mcmc - x_truth
+
+    # Time in minutes
+    time_min = (t_obs - t_obs[0]) / 60.0
+
+    fig, axs = plt.subplots(6, 1, figsize=(10, 12), sharex=True)
+    components = ["x", "y", "z"]
+
+    for i in range(3):  # Position components
+        for err, P_t, label, color in zip(
+            [err_batch, err_mcmc],
+            [P_batch_t, P_mcmc_t],
+            labels,
+            colors,
+        ):
+            # Absolute error for semilogy
+            axs[i].semilogy(
+                time_min,
+                np.abs(err[:, i]),
+                label=f"{label} Error",
+                color=color,
+                linewidth=2.0,
+            )
+            axs[i].scatter(
+                time_min,
+                np.abs(err[:, i]),
+                color=color,
+                s=9,
+                alpha=0.3,
+            )
+            axs[i].fill_between(
+                time_min,
+                np.sqrt(P_t[:, i, i]),
+                color=color,
+                alpha=0.2,
+                label=rf"{label} $\pm1\sigma$" if i == 0 else None,
+            )
+
+        axs[i].set_ylabel(rf"$|\Delta {components[i]}|$ [km]")
+        axs[i].grid(True, which="both")
+
+    for i in range(3):  # Velocity components
+        for err, P_t, label, color in zip(
+            [err_batch, err_mcmc],
+            [P_batch_t, P_mcmc_t],
+            labels,
+            colors,
+        ):
+            axs[i + 3].semilogy(
+                time_min,
+                np.abs(err[:, i + 3]),
+                label=f"{label} Error",
+                color=color,
+                linewidth=2.0,
+            )
+            axs[i + 3].scatter(
+                time_min,
+                np.abs(err[:, i + 3]),
+                color=color,
+                s=9,
+                alpha=0.3,
+            )
+            axs[i + 3].fill_between(
+                time_min,
+                np.sqrt(P_t[:, i + 3, i + 3]),
+                color=color,
+                alpha=0.2,
+                label=rf"{label} $\pm1\sigma$" if i == 0 else None,
+            )
+
+        axs[i + 3].set_ylabel(rf"$|\Delta \dot{{{components[i]}}}|$ [km/s]")
+        axs[i + 3].grid(True, which="both")
+
+    axs[-1].set_xlabel("Time [min]")
+    axs[0].legend(loc="upper right", fontsize=10)
+    fig.suptitle(r"Estimation Errors and $\pm1\sigma$ Bounds (Semilogy)", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
     # Constants for Bennu
     R_bennu = 0.246  # [km] approximate mean radius
@@ -198,10 +307,10 @@ if __name__ == "__main__":
     normal = normal / np.linalg.norm(normal)
 
     # Initial velocity parameters
-    v_mag = 2 * 1e-4  # [km/s], small detachment velocity
+    v_mag = 2 * 1e-5  # [km/s], small detachment velocity
 
     # Generate random unit vector
-    np.random.seed(24)  # For reproducibility
+    np.random.seed(69)  # For reproducibility
     rand_vec = np.random.randn(3)
     rand_vec /= np.linalg.norm(rand_vec)
 
@@ -221,7 +330,7 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    t_obs = JD0_seconds + np.linspace(0, 0.05 * 3600, num=100)
+    t_obs = JD0_seconds + np.linspace(0, 3600, num=300)
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
@@ -438,12 +547,31 @@ if __name__ == "__main__":
     )
     model.setup_whitening_from_priors()
     model.run(n_samples=1000, n_walkers=128, burn_in=500, thin=1, spherical_spread=1e-1)
+
+    # Plot MCMC results
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used, opnav_data=True)
     model.plot_log_likelihood()
-    model.plot_corner_with_batch(batch_mean=batch_estimate, batch_cov=batch_cov)
+    model.plot_corner_with_batch(
+        batch_mean=batch_estimate,
+        batch_cov=batch_cov,
+        use_median_as_truth=False,
+        true_theta=ref_dev,
+    )
     model.summary()
     model.print_regression_diagnostics()
     model.gelman_rubin_diagnostic()
-    model.effective_sample_size()
     model.plot_autocorrelation()
+
+    theta_hat, cov = model.get_estimate_and_covariance()
+    plot_estimation_error_and_covariance(
+        stts=stts_ref,
+        sol=sol_ref,
+        x_truth=x_true,
+        delta_batch=batch_estimate,
+        P_batch=batch_cov,
+        delta_mcmc=theta_hat,
+        P_mcmc=cov,
+        propagator=propagator,
+        t_obs=t_obs_used,
+    )

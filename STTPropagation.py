@@ -142,3 +142,34 @@ class STTPropagator:
             )
 
         return delta, x_nom + delta
+
+    def propagate_covariance(self, sol, stts, P0):
+        n_steps = sol.y.shape[1]
+        P_t = np.zeros((n_steps, 6, 6))
+
+        # First order term: Φ P0 Φᵀ
+        for t in range(n_steps):
+            Phi = stts[1][t]
+            P = Phi @ P0 @ Phi.T
+
+            # Second order: sum_i,j T_ijk P0_jl P0_kl
+            if self.order >= 2:
+                T2 = stts[2][t]
+                term2 = 0.5 * np.einsum("ijk,jl,km->im", T2, P0, P0)
+                P += term2 + term2.T  # ensure symmetry
+
+            if self.order >= 3:
+                T3 = stts[3][t]
+                term3 = (1 / 6) * np.einsum("ijkl,jm,kn,lo->io", T3, P0, P0, P0)
+                P += term3 + term3.T
+
+            if self.order >= 4:
+                T4 = stts[4][t]
+                term4 = (1 / 24) * np.einsum(
+                    "ijklm,jn,ko,lp,mq->iq", T4, P0, P0, P0, P0
+                )
+                P += term4 + term4.T
+
+            P_t[t] = 0.5 * (P + P.T)  # final symmetrization
+
+        return P_t

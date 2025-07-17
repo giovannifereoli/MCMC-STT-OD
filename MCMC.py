@@ -6,6 +6,7 @@ import multiprocessing
 from scipy.optimize import minimize, basinhopping
 from matplotlib.patches import Ellipse
 from statsmodels.tsa.stattools import acf
+from scipy.stats import gaussian_kde
 
 plt.rcParams.update(
     {
@@ -340,6 +341,7 @@ class MCMCModel:
         batch_cov=None,
         use_median_as_truth=True,
         true_theta=None,
+        plot_contours_labels=False,
     ):
         if self.samples is None:
             print("Run MCMC first.")
@@ -357,6 +359,8 @@ class MCMCModel:
             title_fmt=".6f",
             title_kwargs={"fontsize": 12},
             color="blue",
+            plot_contours=True,
+            fill_contours=False,
         )
 
         axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
@@ -397,7 +401,7 @@ class MCMCModel:
                     order = vals.argsort()[::-1]
                     vals, vecs = vals[order], vecs[:, order]
                     angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
-                    width, height = 6 * np.sqrt(vals)
+                    width, height = 2 * np.sqrt(vals)
 
                     ellipse = Ellipse(
                         xy=mean_sub,
@@ -407,7 +411,7 @@ class MCMCModel:
                         edgecolor="red",
                         facecolor="none",
                         lw=1.5,
-                        label=r"Batch $3\sigma$ Ellipse" if (i == 1 and j == 0) else "",
+                        label=r"Batch $1\sigma$ Ellipse" if (i == 1 and j == 0) else "",
                     )
                     ax.add_patch(ellipse)
 
@@ -419,6 +423,38 @@ class MCMCModel:
                         "go",
                         label="True Value" if (i == 1 and j == 0) else "",
                     )
+
+                # Plot contour labels
+                if plot_contours_labels:
+                    x = self.samples[:, j]
+                    y = self.samples[:, i]
+                    data = np.vstack([x, y])
+                    kde = gaussian_kde(data)
+                    xi, yi = np.mgrid[
+                        x.min() : x.max() : 100j, y.min() : y.max() : 100j
+                    ]
+                    zi = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
+
+                    # Choose contour levels matching corner.corner defaults
+                    levels = [0.118, 0.393, 0.675, 0.864]  # ≈ 0.5σ, 1σ, 1.5σ, 2σ
+                    # Estimate actual values to pass to contour
+                    sorted_zi = np.sort(zi.ravel())[::-1]
+                    cdf = np.cumsum(sorted_zi)
+                    cdf /= cdf[-1]
+                    value_levels = []
+                    for lv in levels:
+                        idx = np.searchsorted(cdf, lv)
+                        value_levels.append(sorted_zi[idx])
+                    value_levels.sort()
+
+                    contour_set = ax.contour(
+                        xi, yi, zi, levels=value_levels, colors="black", linewidths=1
+                    )
+                    fmt_dict = {
+                        l: f"{int(100 * lv)}\\%"
+                        for l, lv in zip(contour_set.levels, levels)
+                    }
+                    ax.clabel(contour_set, fmt=fmt_dict, inline=True, fontsize=8)
 
         # Add single legend
         axes[1, 0].legend(loc="upper right", fontsize=10)
@@ -673,6 +709,20 @@ class MCMCModel:
         plt.xlabel("Lag")
         plt.tight_layout()
         plt.show()
+
+    def get_estimate_and_covariance(self, method="median"):
+        if self.samples is None:
+            raise RuntimeError("Run MCMC before calling this method.")
+
+        if method == "median":
+            theta_hat = np.median(self.samples, axis=0)
+        elif method == "mean":
+            theta_hat = np.mean(self.samples, axis=0)
+        else:
+            raise ValueError("Method must be 'median' or 'mean'.")
+
+        cov = np.cov(self.samples.T)
+        return theta_hat, cov
 
     '''
         def run_hmc(
