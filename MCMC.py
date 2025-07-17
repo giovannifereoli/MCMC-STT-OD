@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import corner
 import emcee
 import multiprocessing
-from scipy.optimize import minimize, basinhopping
+from scipy.optimize import minimize, basinhopping, dual_annealing
 from matplotlib.patches import Ellipse
 from statsmodels.tsa.stattools import acf
 from scipy.stats import gaussian_kde
@@ -56,42 +56,84 @@ class MCMCModel:
     def log_prob(self, theta):
         return self.log_posterior(theta)
 
-    def optimize_initial_guess(self, method="Powell", disp=True, n_iter=100):
-        def objective_logpost(theta):
-            return -self.log_posterior(theta)  # minimize negative log-posterior
-
-        x0 = self.initial_params.copy()
-
+    def optimize_initial_guess(
+        self,
+        method="Powell",
+        disp=True,
+        n_iter=1000,
+        use_bounds_from_priors=True,
+    ):
         print("")
         print(f"\n[Optimization] Starting optimization using method: {method}")
 
-        if method.lower() == "basinhopping":
-            # Use Powell as default local method under basinhopping
-            local_method = "Powell"
-            minimizer_kwargs = {"method": local_method, "options": {"disp": disp}}
+        # Set log-posterior and whitening flags
+        use_whitened = getattr(self, "is_whitened", False)
+        log_prob_func = self.log_prob_whitened if use_whitened else self.log_prob
+
+        # Prepare starting point
+        x0 = self.initial_params.copy()
+        if use_whitened:
+            x0 = self.whiten_Linv @ (x0 - self.whiten_mean)
+
+        def objective(theta):
+            return -log_prob_func(theta)
+
+        # Build bounds from priors if requested
+        bounds = None
+        if use_bounds_from_priors:
+            bounds = [(p.ppf(1e-6), p.ppf(1 - 1e-6)) for p in self.param_priors]
+            if use_whitened:
+                # Transform bounds to whitened space
+                bounds_array = np.array(bounds).T  # shape (2, ndim)
+                lower, upper = bounds_array[0], bounds_array[1]
+                bounds_white = (
+                    self.whiten_Linv @ (lower - self.whiten_mean),
+                    self.whiten_Linv @ (upper - self.whiten_mean),
+                )
+                bounds = list(zip(bounds_white[0], bounds_white[1]))
+
+        # Choose optimizer
+        if method.lower() == "dual_annealing":
+            print("[Optimization] Using global optimizer: dual_annealing")
+            result = dual_annealing(
+                objective,
+                bounds=bounds,
+                x0=x0,
+                maxiter=n_iter,
+                no_local_search=True,
+                seed=42,
+            )
+        elif method.lower() == "basinhopping":
+            print("[Optimization] Using global+local optimizer: basinhopping")
             result = basinhopping(
-                objective_logpost,
+                objective,
                 x0,
-                minimizer_kwargs=minimizer_kwargs,
+                minimizer_kwargs={"method": "Powell", "options": {"disp": disp}},
                 niter=n_iter,
                 disp=disp,
             )
         else:
-            # Local optimization
+            print(f"[Optimization] Using local optimizer: {method}")
             result = minimize(
-                objective_logpost,
+                objective,
                 x0,
                 method=method,
+                bounds=bounds,
                 options={"disp": disp},
             )
 
-        if result.success:
-            print(f"[Optimization] Success: {result.message}")
-        else:
+        # Check result and return in original space
+        if not result.success:
             print(f"[Optimization] Warning: {result.message}")
-        print(f"[Optimization] Optimal θ: {result.x}")
+        else:
+            print(f"[Optimization] Success: {result.message}")
 
-        return result.x
+        x_opt = result.x
+        if use_whitened:
+            x_opt = self.whiten_L @ x_opt + self.whiten_mean
+
+        print(f"[Optimization] Optimal θ: {x_opt}")
+        return x_opt
 
     def run(
         self,
