@@ -22,7 +22,7 @@ from scipy.optimize import least_squares
 
 
 def generate_stt_functions(
-    mu, order, R_eq=0.246, J2=8.64e-5, Cr=1.0, A_m=1.0, P0=4.56e-6
+    mu, order, R_eq=0.290, J2=1.962e-5, Cr=1.2, A_m=0.1, P0=4.56e-6
 ):
     """
     Generate f, A, and B_k symbolically for STT propagation including:
@@ -278,7 +278,7 @@ def plot_estimation_error_and_covariance(
 
 if __name__ == "__main__":
     # Constants for Bennu
-    R_bennu = 0.246  # [km] approximate mean radius
+    R_bennu = 0.290  # [km] approximate mean radius
     mu = 4.892e-9  # [km^3/s^2] Bennu GM
     order = 3
 
@@ -307,10 +307,10 @@ if __name__ == "__main__":
     normal = normal / np.linalg.norm(normal)
 
     # Initial velocity parameters
-    v_mag = 2 * 1e-5  # [km/s], small detachment velocity
+    v_mag = 2 * 1e-4  # [km/s], small detachment velocity
 
     # Generate random unit vector
-    np.random.seed(69)  # For reproducibility
+    np.random.seed(24)  # For reproducibility
     rand_vec = np.random.randn(3)
     rand_vec /= np.linalg.norm(rand_vec)
 
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    t_obs = JD0_seconds + np.linspace(0, 3600, num=300)
+    t_obs = JD0_seconds + np.linspace(0, 0.25 * 600, num=3)
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
