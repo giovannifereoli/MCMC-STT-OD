@@ -15,7 +15,14 @@ from scipy.optimize import least_squares
 # - Cross-check nominal trajectory propagation—does it match expected physics? Refer to OREX IOD paper for validation
 # - Optionally add visibility constraints (e.g., line-of-sight to the Sun or observer) if needed
 # - Consider how to increase realism or complexity of the scenario—currently looks good for publication; consult Jay
-# - Improve MCMC convergence when stuck far from the minimum: enhance sampling strategy (or initialization w/ better global optimizer)
+# - Improve MCMC convergence when stuck far from the minimum: enhance sampling strategy (or initialization w/ better global optimizer). Maybe STTs fault? Far from true?
+# - Implement s/c moving
+# - Consolidate the 3 scenarios (especially the last one); investigate through initialization and sampling why it fails
+# - Improve TRUE posterior: revisit Armellin's paper; find the YouTube analogy (bee/house). Explore: 1) better global optimizers with multi-sol for multi-chains;
+# 2) domain partitioning or grid for admissible region, then multi-chains
+# - Use a random tail sample to assess behavior of it as a solution (i.e. perfect post-fits)
+
+# WHI THIRD CASE THERE ARE SAMPLES AROUND TRUE BUT CHAIN HAS MORE SAMPLES IN ANOTHER POINT??? IT'S LIKE HAVING TWO CHAINS. I'LL COMMIT AND START FROM HERE
 
 ## NOTE
 # - In the manuscript, emphasize that batch solutions are computed using high-order STTs with trust-region enhancements
@@ -228,10 +235,10 @@ def plot_estimation_error_and_covariance(
             )
             axs[i].fill_between(
                 time_min,
-                np.sqrt(P_t[:, i, i]),
+                3 * np.sqrt(P_t[:, i, i]),
                 color=color,
                 alpha=0.2,
-                label=rf"{label} $\pm1\sigma$" if i == 0 else None,
+                label=rf"{label} $\pm3\sigma$" if i == 0 else None,
             )
 
         axs[i].set_ylabel(rf"$|\Delta {components[i]}|$ [km]")
@@ -260,10 +267,10 @@ def plot_estimation_error_and_covariance(
             )
             axs[i + 3].fill_between(
                 time_min,
-                np.sqrt(P_t[:, i + 3, i + 3]),
+                3 * np.sqrt(P_t[:, i + 3, i + 3]),
                 color=color,
                 alpha=0.2,
-                label=rf"{label} $\pm1\sigma$" if i == 0 else None,
+                label=rf"{label} $\pm3\sigma$" if i == 0 else None,
             )
 
         axs[i + 3].set_ylabel(rf"$|\Delta \dot{{{components[i]}}}|$ [km/s]")
@@ -271,7 +278,6 @@ def plot_estimation_error_and_covariance(
 
     axs[-1].set_xlabel("Time [min]")
     axs[0].legend(loc="upper right", fontsize=10)
-    fig.suptitle(r"Estimation Errors and $\pm1\sigma$ Bounds (Semilogy)", fontsize=14)
     plt.tight_layout()
     plt.show()
 
@@ -307,7 +313,8 @@ if __name__ == "__main__":
     normal = normal / np.linalg.norm(normal)
 
     # Initial velocity parameters
-    v_mag = 2 * 1e-4  # [km/s], small detachment velocity
+    v_mag = 1.9 * 1e-4  # [km/s], small detachment velocity, for case 3
+    # v_mag = 2 * 1e-4 # For case 1 and 2
 
     # Generate random unit vector
     np.random.seed(24)  # For reproducibility
@@ -330,7 +337,11 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    t_obs = JD0_seconds + np.linspace(0, 60, num=3)
+    # t_obs = JD0_seconds + np.linspace(0, 60, num=3). # CASE 2: Batch MAP not good
+    # t_obs = JD0_seconds + np.linspace(0, 3600, num=100) # CASE 1: They both look good
+    t_obs = JD0_seconds + np.linspace(
+        0, 36 * 3600, num=50
+    )  # CASE 3: Long window, sparse measurements, Batch cov not good
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
