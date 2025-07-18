@@ -190,6 +190,10 @@ class MCMCModel:
         )
 
         # Run MCMC using emcee
+        print("")
+        print(
+            f"[Run] Starting MCMC sampling with {n_walkers} walkers for {n_samples} steps..."
+        )
         with multiprocessing.get_context("fork").Pool() as pool:
             self.sampler = emcee.EnsembleSampler(
                 n_walkers, self.ndim, log_prob_func, pool=pool
@@ -197,7 +201,6 @@ class MCMCModel:
             self.sampler.run_mcmc(pos, n_samples, progress=True)
 
         # Try to estimate autocorrelation time
-        print("")
         print("[Run] Estimating autocorrelation time...")
         try:
             tau = self.sampler.get_autocorr_time()

@@ -280,7 +280,7 @@ if __name__ == "__main__":
     # Constants for Bennu
     R_bennu = 0.290  # [km] approximate mean radius
     mu = 4.892e-9  # [km^3/s^2] Bennu GM
-    order = 3
+    order = 1
 
     # Load Bennu mesh
     mesh_path = "ObjFiles/BennuRadar.obj"  # Update with correct path if needed
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    t_obs = JD0_seconds + np.linspace(0, 1 * 3600, num=100)
+    t_obs = JD0_seconds + np.linspace(0, 60, num=3)
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
