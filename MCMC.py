@@ -3,7 +3,12 @@ import matplotlib.pyplot as plt
 import corner
 import emcee
 import multiprocessing
-from scipy.optimize import minimize, basinhopping, dual_annealing
+from scipy.optimize import (
+    minimize,
+    basinhopping,
+    dual_annealing,
+    differential_evolution,
+)
 from matplotlib.patches import Ellipse
 from statsmodels.tsa.stattools import acf
 from scipy.stats import gaussian_kde
@@ -111,6 +116,18 @@ class MCMCModel:
                 minimizer_kwargs={"method": "Powell", "options": {"disp": disp}},
                 niter=n_iter,
                 disp=disp,
+            )
+        elif method.lower() == "differential_evolution":
+            print("[Optimization] Using global optimizer: differential_evolution")
+            result = differential_evolution(
+                objective,
+                bounds=bounds,
+                maxiter=n_iter,
+                polish=True,
+                seed=42,
+                disp=disp,
+                popsize=100,  # larger population helps refine exploration
+                tol=1e-12,  # tighter tolerance for stopping
             )
         else:
             print(f"[Optimization] Using local optimizer: {method}")

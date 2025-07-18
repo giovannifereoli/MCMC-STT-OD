@@ -15,7 +15,7 @@ from scipy.optimize import least_squares
 # - Cross-check nominal trajectory propagation—does it match expected physics? Refer to OREX IOD paper for validation
 # - Optionally add visibility constraints (e.g., line-of-sight to the Sun or observer) if needed
 # - Consider how to increase realism or complexity of the scenario—currently looks good for publication; consult Jay
-# - Improve MCMC convergence when stuck far from the minimum: enhance initialization (e.g., better global optimizer) or sampling strategy
+# - Improve MCMC convergence when stuck far from the minimum: enhance sampling strategy (or initialization w/ better global optimizer)
 
 ## NOTE
 # - In the manuscript, emphasize that batch solutions are computed using high-order STTs with trust-region enhancements
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    t_obs = JD0_seconds + np.linspace(0, 4 * 3600, num=100)
+    t_obs = JD0_seconds + np.linspace(0, 1 * 3600, num=100)
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
@@ -361,9 +361,9 @@ if __name__ == "__main__":
     print("")
     print("\nPropagating reference trajectory:")
 
-    # Define relative deviation fractions (e.g., 10% for position, 5% for velocity)
-    pos_dev_frac = 0.1  # 10% of position
-    vel_dev_frac = 0.05  # 5% of velocity
+    # Define relative deviation fractions (e.g., 1% for position, 0.5% for velocity)
+    pos_dev_frac = 0.01  # 1% of position
+    vel_dev_frac = 0.005  # 0.5% of velocity
 
     # Compute component-wise deviation
     ref_dev = np.hstack([pos_dev_frac * x0_true[:3], vel_dev_frac * x0_true[3:]])
@@ -547,12 +547,12 @@ if __name__ == "__main__":
     )
     model.setup_whitening_from_priors()
     model.run(
-        n_samples=20000,
+        n_samples=1000,
         n_walkers=128,
-        burn_in=500,
+        burn_in=200,
         thin=1,
-        spherical_spread=1e-1,
-        method_optimize="dual_annealing",
+        spherical_spread=1e-3,
+        method_optimize="Powell",
     )
 
     # Plot MCMC results
