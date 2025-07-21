@@ -10,22 +10,43 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
-## TODO
-# - Verify implementation and units of gravity model, J2 perturbation, and solar radiation pressure (SRP)
-# - Cross-check nominal trajectory propagation—does it match expected physics? Refer to OREX IOD paper for validation
-# - Optionally add visibility constraints (e.g., line-of-sight to the Sun or observer) if needed
-# - Consider how to increase realism or complexity of the scenario—currently looks good for publication; consult Jay
-# - Improve MCMC convergence when stuck far from the minimum: enhance sampling strategy (or initialization w/ better global optimizer). Maybe STTs fault? Far from true?
-# - Implement s/c moving
-# - Consolidate the 3 scenarios (especially the last one); investigate through initialization and sampling why it fails
-# - Improve TRUE posterior: revisit Armellin's paper; find the YouTube analogy (bee/house). Explore: 1) better global optimizers with multi-sol for multi-chains;
-# 2) domain partitioning or grid for admissible region, then multi-chains
-# - Use a random tail sample to assess behavior of it as a solution (i.e. perfect post-fits)
+## TODO: Scenario Setup & Physical Model
+# - Verify correctness and units of gravity, J2 perturbation, and SRP models
+# - Cross-check nominal trajectory propagation: does it match expected physics? Refer to OREX IOD paper
+# - Add optional visibility constraints (e.g., line-of-sight to Sun or observer)
+# - Implement spacecraft motion (s/c not stationary); may explain loss of information in last scenario
+# - Assess how to increase realism/complexity—scenario already good for publication; ask Jay for input
+# - Consolidate the 3 scenarios—especially the last one; investigate via initialization and sampling why it fails
 
-# WHI THIRD CASE THERE ARE SAMPLES AROUND TRUE BUT CHAIN HAS MORE SAMPLES IN ANOTHER POINT??? IT'S LIKE HAVING TWO CHAINS. I'LL COMMIT AND START FROM HERE
+## TODO: MCMC Convergence & Posterior Exploration
+# (Not needed for high-confidence cases—use nominal pipeline with small spherical spread)
+#
+# - Improve convergence and posterior quality when far from the optimum or in clearly multimodal cases.
+#   STTs may degrade when too far from the reference, corrupting the posterior and hiding valid solutions.
+#   This ties into the “bee vs. house” analogy (YouTube) and suggests the need for broader exploration strategies:
+#
+#   - Try custom global optimization or other smart methods to detect multiple modes
+#     (not ADS—focus on finding multiple high-likelihood regions).
+#     If STTs are invalid in these regions (chicken-and-egg issue: how would you know?), skip this step and go straight to domain partitioning.
+#
+#   - Apply domain partitioning across the admissible region:
+#     • Use a uniform grid or Adaptive Domain Splitting (ADS) per Armellin et al.
+#     • Generate STTs for each domain.
+#     • From each region, run local optimization and spawn walkers nearby—ensemble samplers make this easy to manage.
+#
+#   - It might just be a matter of increasing the spherical spread and using robust proposals
+#     like DEMove and DESnookerMove to improve exploration.
+#
+# - Check tail samples: do any of them yield valid solutions (i.e., near-zero post-fit residuals)?
+
+# NOTE: In the third case, the true solution has visible points, but the standard pipeline fails to capture them—
+# likely because all walkers are initialized around the MAP. Might need broader spherical_spread and varied proposal moves.
+# Feels like two distinct modes exist, but the MAP-dominated initialization suppresses the secondary one.
 
 ## NOTE
 # - In the manuscript, emphasize that batch solutions are computed using high-order STTs with trust-region enhancements
+# - Might not be perfect, but at least MCMC exposes multi-modality—turns a con into a pro by letting you react
+# - Long windows with sparse measurements are challenging for batch solutions, they caue banana-shaped posteriors
 
 
 def generate_stt_functions(
@@ -313,8 +334,8 @@ if __name__ == "__main__":
     normal = normal / np.linalg.norm(normal)
 
     # Initial velocity parameters
-    v_mag = 1.9 * 1e-4  # [km/s], small detachment velocity, for case 3
-    # v_mag = 2 * 1e-4 # For case 1 and 2
+    # v_mag = 1.9 * 1e-4  # [km/s], small detachment velocity, for case 3
+    v_mag = 2 * 1e-4  # For case 1 and 2
 
     # Generate random unit vector
     np.random.seed(24)  # For reproducibility
@@ -337,11 +358,11 @@ if __name__ == "__main__":
     # t_obs = JD0_seconds + np.linspace(
     #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
     # )  # 20-sec cadence
-    # t_obs = JD0_seconds + np.linspace(0, 60, num=3). # CASE 2: Batch MAP not good
-    # t_obs = JD0_seconds + np.linspace(0, 3600, num=100) # CASE 1: They both look good
-    t_obs = JD0_seconds + np.linspace(
-        0, 36 * 3600, num=50
-    )  # CASE 3: Long window, sparse measurements, Batch cov not good
+    t_obs = JD0_seconds + np.linspace(0, 60, num=3)  # CASE 2: Batch MAP not good
+    # t_obs = JD0_seconds + np.linspace(0, 3600, num=100)  # CASE 1: They both look good
+    # t_obs = JD0_seconds + np.linspace(
+    #    0, 36 * 3600, num=50
+    # )  # CASE 3: Long window, sparse measurements, Batch cov not good
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)

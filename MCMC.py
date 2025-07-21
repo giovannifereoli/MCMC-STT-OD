@@ -162,6 +162,7 @@ class MCMCModel:
         thin_frac=0.5,
         spherical_spread=1e-4,
         method_optimize="Powell",
+        use_demoves=True,
     ):
         # Use optimization for better initial guess
         optimized_guess = self.optimize_initial_guess(method=method_optimize)
@@ -189,6 +190,15 @@ class MCMCModel:
             else self.log_prob
         )
 
+        # Define MCMC moves
+        if use_demoves:
+            moves = [
+                (emcee.moves.DEMove(), 0.8),
+                (emcee.moves.DESnookerMove(), 0.2),
+            ]
+        else:
+            moves = emcee.moves.StretchMove()
+
         # Run MCMC using emcee
         print("")
         print(
@@ -196,7 +206,11 @@ class MCMCModel:
         )
         with multiprocessing.get_context("fork").Pool() as pool:
             self.sampler = emcee.EnsembleSampler(
-                n_walkers, self.ndim, log_prob_func, pool=pool
+                nwalkers=n_walkers,
+                ndim=self.ndim,
+                log_prob_fn=log_prob_func,
+                pool=pool,
+                moves=moves,
             )
             self.sampler.run_mcmc(pos, n_samples, progress=True)
 
@@ -661,6 +675,16 @@ class MCMCModel:
         self.samples = data["samples"]
         self.log_probs = data["log_probs"]
         print(f"Chain loaded from '{path}'")
+
+    def get_map_estimate(self):
+        if self.samples is None or self.log_probs is None:
+            raise RuntimeError("Run MCMC before computing MAP estimate.")
+
+        idx_max = np.argmax(self.log_probs)
+        map_params = self.samples[idx_max]
+        print(f"[MAP] log-posterior = {self.log_probs[idx_max]:.3f}")
+        print(f"[MAP] parameters: {map_params}")
+        return map_params
 
     def gelman_rubin_diagnostic(self, split=True, threshold=1.1):
         if self.samples is None:
