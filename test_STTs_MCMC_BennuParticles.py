@@ -583,7 +583,7 @@ if __name__ == "__main__":
         n_walkers=128,
         burn_in=200,
         thin=1,
-        spherical_spread=1e-3,
+        spherical_spread=1e-3,  # TODO: use =1 for case 3, show jay the difference!
         method_optimize="Powell",
     )
 
