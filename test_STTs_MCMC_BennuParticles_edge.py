@@ -11,7 +11,7 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
 # NOTE: longer arcs more non-linearity, less measurements less observability should help.
-# TODO: fix the 'not working' due to big initial deviation. try global optimization!
+# TODO: fix the 'not working' due to big initial deviation. try global optimization? try what said in notebook!
 # TODO: change sigmas to improve residuals plots
 
 

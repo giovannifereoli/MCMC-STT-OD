@@ -4,6 +4,9 @@ from astropy.coordinates import get_body_barycentric_posvel
 from astropy.time import Time
 from tqdm import tqdm
 
+# TODO: do a class
+# TODO: also here you can run a batch on each single VA and do clustering to optimize use of walkers
+
 # Define observation epoch
 t = Time("2025-08-20")
 
