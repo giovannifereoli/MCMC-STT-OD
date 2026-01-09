@@ -10,7 +10,7 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
-# NOTE: longer arcs more non-linearity, less measurements less observability should help.
+# NOTE: longer arcs more non-linearity, less measurements less observability should help. thIS IS THE third case (?)
 # TODO: fix the 'not working' due to big initial deviation. try global optimization? try what said in notebook!
 # TODO: change sigmas to improve residuals plots
 
@@ -419,8 +419,8 @@ if __name__ == "__main__":
 
     # Priors
     initial_guess = np.zeros(6)
-    pos_lower, pos_upper = -1e-1, 1e-1  # Position in km
-    vel_lower, vel_upper = -1e-3, 1e-3  # Velocity in km/s
+    pos_lower, pos_upper = -1e-2, 1e-2  # Position in km
+    vel_lower, vel_upper = -1e-4, 1e-4  # Velocity in km/s
     priors = [norm(loc=0.0, scale=pos_upper) for _ in range(3)] + [  # position in km
         norm(loc=0.0, scale=vel_upper) for _ in range(3)  # velocity in km/s
     ]
@@ -434,11 +434,12 @@ if __name__ == "__main__":
     )
     model.setup_whitening_from_priors()
     model.run(
-        n_samples=100000,
+        n_samples=50000,
         n_walkers=128,
-        burn_in=200,
+        burn_in=500,
         thin=50,
-        spherical_spread=5 * 1e-3,
+        method_optimize="lsq",
+        spherical_spread=1e-4,
     )
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used, opnav_data=True)

@@ -46,7 +46,7 @@ from scipy.optimize import least_squares
 ## NOTE
 # - In the manuscript, emphasize that batch solutions are computed using high-order STTs with trust-region enhancements
 # - Might not be perfect, but at least MCMC exposes multi-modality—turns a con into a pro by letting you react
-# - Long windows with sparse measurements are challenging for batch solutions, they caue banana-shaped posteriors
+# - Long windows with sparse measurements are challenging for batch solutions, they cause banana-shaped posteriors
 
 
 def generate_stt_functions(

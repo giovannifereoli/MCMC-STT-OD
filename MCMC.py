@@ -12,6 +12,7 @@ from scipy.optimize import (
 from matplotlib.patches import Ellipse
 from statsmodels.tsa.stattools import acf
 from scipy.stats import gaussian_kde
+from scipy.optimize import least_squares
 
 plt.rcParams.update(
     {
@@ -60,6 +61,24 @@ class MCMCModel:
 
     def log_prob(self, theta):
         return self.log_posterior(theta)
+
+    def prior_residuals(self, theta):
+        """
+        Turn priors into pseudo-residuals so least_squares does MAP.
+        Works best for Gaussian-like priors.
+        Fallback: if prior doesn't have mean/var, return empty.
+        """
+        r = []
+        for i, p in enumerate(self.param_priors):
+            # Try Normal-like: use mean and std if available
+            try:
+                mu = p.mean()
+                sig = p.std()
+                if np.isfinite(mu) and np.isfinite(sig) and sig > 0:
+                    r.append((theta[i] - mu) / sig)
+            except Exception:
+                pass
+        return np.array(r, dtype=float)
 
     def optimize_initial_guess(
         self,
@@ -128,6 +147,22 @@ class MCMCModel:
                 disp=disp,
                 popsize=100,  # larger population helps refine exploration
                 tol=1e-12,  # tighter tolerance for stopping
+            )
+        elif method == "lsq":
+            print(f"[Optimization] Using least squares: least_squares(method='trf')")
+
+            def residuals_map(theta_white):
+                theta = self.whiten_L @ theta_white + self.whiten_mean
+                r_meas = self.residuals_func(theta)
+                r_pri = self.prior_residuals(theta)
+                return np.concatenate([r_meas, r_pri])
+
+            result = least_squares(
+                residuals_map,
+                x0,
+                method="trf",
+                jac="2-point",
+                verbose=2 if disp else 0,
             )
         else:
             print(f"[Optimization] Using local optimizer: {method}")
@@ -231,13 +266,20 @@ class MCMCModel:
         if tau is not None:
             max_tau = np.max(tau)
             min_tau = np.min(tau)
+            n_tau = n_samples / max_tau
 
             # Warn if total steps are insufficient for autocorrelation convergence
             if n_samples < 100 * max_tau:
                 print(
-                    f"[Run] Warning: n_samples = {n_samples} may be too small. "
+                    f"[Run] Warning: n_samples = {n_samples} corresponds to "
+                    f"{n_tau:.1f} autocorrelation times. "
                     f"Recommended: at least 100 × max(tau) = {100 * max_tau:.1f} steps "
                     f"for reliable sampling."
+                )
+            else:
+                print(
+                    f"[Run] n_samples = {n_samples} corresponds to {n_tau:.1f} autocorrelation times. "
+                    f"Sampling should be reliable."
                 )
 
             # Determine burn-in and thinning if not manually specified
@@ -263,7 +305,10 @@ class MCMCModel:
                 print("[Run] Fallback thinning: 1")
 
         # Discard burn-in samples and flatten the chain
-        self.samples = self.sampler.get_chain(discard=burn_in, thin=thin, flat=True)
+        self.chain = self.sampler.get_chain(
+            discard=burn_in, thin=thin, flat=False
+        )  # (nwalkers, nsteps, ndim)
+        self.samples = self.chain.reshape(-1, self.ndim)  # flat view for corner
         self.log_probs = self.sampler.get_log_prob(
             discard=burn_in, thin=thin, flat=True
         )
@@ -320,7 +365,7 @@ class MCMCModel:
         plt.show()
 
     def plot_postfit_residuals(self):
-        best_params = np.median(self.samples, axis=0)
+        best_params = self.get_map_estimate()
         postfit = self.residuals_func(best_params)
         plt.figure(figsize=(8, 4))
         plt.scatter(range(len(postfit)), postfit, marker="o")
@@ -334,8 +379,8 @@ class MCMCModel:
         plt.show()
 
     def plot_postfit_residuals_time(self, t_obs_used, opnav_data=False):
-        # 1) Compute median parameters and post-fit residuals
-        best_params = np.median(self.samples, axis=0)
+        # 1) Compute median (more meaningful) or MAP (best residuals) parameters and post-fit residuals
+        best_params = self.get_map_estimate()
         postfit = self.residuals_func(best_params)
 
         # 2) Reshape: [r0, rr0, r1, rr1, ...] → (2, N)
@@ -588,7 +633,7 @@ class MCMCModel:
             print("Run MCMC first.")
             return
 
-        theta_best = np.median(self.samples, axis=0)
+        theta_best = self.get_map_estimate()
         residuals = self.residuals_func(theta_best)
 
         chi2 = np.sum(residuals**2)
@@ -616,11 +661,6 @@ class MCMCModel:
         # print("Parameter uncertainties (1σ):")
         # for i, std in enumerate(param_uncertainties):
         #    print(f"  θ_{i}: ±{std:.14f}")
-
-    def get_unwhitened_samples(self):
-        if not getattr(self, "is_whitened", False):
-            return self.samples
-        return (self.whiten_L @ self.samples.T + self.whiten_mean[:, None]).T
 
     def setup_whitening_from_priors(self):
         stds = []
@@ -691,9 +731,7 @@ class MCMCModel:
             raise RuntimeError("Run MCMC before computing Gelman-Rubin diagnostic.")
 
         # Reshape: (n_walkers, n_steps, ndim)
-        chain = self.sampler.get_chain(
-            discard=0, flat=False
-        )  # shape: (walkers, steps, ndim)
+        chain = self.chain
         n_walkers, n_steps, ndim = chain.shape
 
         if split:
@@ -780,7 +818,7 @@ class MCMCModel:
             print("Run MCMC first.")
             return
 
-        chain = self.sampler.get_chain(discard=0, flat=True)
+        chain = self.samples
 
         fig, axes = plt.subplots(self.ndim, 1, figsize=(8, 2 * self.ndim))
         if self.ndim == 1:
@@ -899,4 +937,140 @@ class MCMCModel:
 
             print("HMC sampling completed.")
             print(f"Final acceptance rate: {(accepted / total_steps):.2%}")
+    '''
+
+    '''
+        def find_candidates_de_one_shot(
+        self,
+        n_keep=30,              # how many candidates to keep from the DE population
+        top_k_optima=8,         # how many unique optima to return after dedup
+        popsize=60,
+        maxiter=250,
+        seed=42,
+        use_bounds_from_priors=True,
+        q_bounds=1e-6,
+        polish_local=True,
+        method_local="Powell",
+        maxiter_local=600,
+        dedup_tol=1e-2,
+        verbose=True,
+    ):
+        """
+        "One-shot" approach:
+        - Run differential evolution once (global search)
+        - Keep best candidates from its final population
+        - Optionally locally polish them
+        - De-duplicate and return top optima
+
+        Returns:
+            optima_theta: (K, ndim) unique optima in ORIGINAL space
+            optima_logp: (K,) log posterior values
+            candidates_theta: (M, ndim) raw kept candidates (ORIGINAL space)
+            candidates_logp: (M,) log posterior values
+        """
+        use_whitened = getattr(self, "is_whitened", False)
+        log_prob_func = self.log_prob_whitened if use_whitened else self.log_prob
+
+        def objective(theta):
+            lp = log_prob_func(theta)
+            if not np.isfinite(lp):
+                return 1e100
+            return -lp
+
+        if use_bounds_from_priors:
+            bounds = self._build_bounds_from_priors(use_whitened=use_whitened, q=q_bounds)
+        else:
+            raise ValueError("Provide bounds or set use_bounds_from_priors=True.")
+
+        # ---- run DE once
+        if verbose:
+            print(f"[OneShot-DE] popsize={popsize}, maxiter={maxiter}, n_keep={n_keep}")
+
+        res = differential_evolution(
+            objective,
+            bounds=bounds,
+            seed=seed,
+            popsize=popsize,
+            maxiter=maxiter,
+            polish=False,          # important: we want the population, we polish ourselves
+            tol=1e-10,
+            updating="deferred",
+            workers=1,             # deterministic
+            disp=False,
+        )
+
+        # ---- extract population (preferred)
+        if hasattr(res, "population") and res.population is not None:
+            pop = np.array(res.population)          # shape (NP, ndim)
+        else:
+            # Fallback for older SciPy: store population via callback
+            raise RuntimeError(
+                "SciPy result has no `.population`. "
+                "Upgrade SciPy or implement a callback-based collector."
+            )
+
+        # Evaluate objective for the whole final population
+        vals = np.array([objective(x) for x in pop])
+        idx = np.argsort(vals)[: min(n_keep, len(pop))]
+        cand = pop[idx]
+        cand_logp = -vals[idx]
+
+        # ---- optional local polishing of candidates
+        refined = []
+        if polish_local:
+            if verbose:
+                print(f"[OneShot-DE] Polishing {len(cand)} candidates with {method_local}...")
+            for i, x0 in enumerate(cand):
+                rloc = minimize(
+                    objective,
+                    x0,
+                    method=method_local,
+                    options={"maxiter": maxiter_local, "disp": False},
+                )
+                if np.isfinite(rloc.fun):
+                    refined.append((rloc.x, -rloc.fun))
+            if len(refined) == 0:
+                refined = [(cand[0], cand_logp[0])]
+        else:
+            refined = list(zip(cand, cand_logp))
+
+        # Sort refined by best logp
+        refined.sort(key=lambda t: -t[1])
+        thetas = np.array([t for (t, _) in refined])
+        logps = np.array([lp for (_, lp) in refined])
+
+        # ---- dedup in meaningful metric
+        if use_whitened:
+            thetas_metric = thetas.copy()
+        else:
+            stds = np.array([p.std() for p in self.param_priors])
+            stds = np.where(stds > 0, stds, 1.0)
+            thetas_metric = thetas / stds[None, :]
+
+        uniq = []
+        uniq_lp = []
+        uniq_metric = []
+        for t, lp, tm in zip(thetas, logps, thetas_metric):
+            if len(uniq) == 0:
+                uniq.append(t); uniq_lp.append(lp); uniq_metric.append(tm); continue
+            d = np.min(np.linalg.norm(np.array(uniq_metric) - tm, axis=1))
+            if d > dedup_tol:
+                uniq.append(t); uniq_lp.append(lp); uniq_metric.append(tm)
+            if len(uniq) >= top_k_optima:
+                break
+
+        optima = np.array(uniq)
+        optima_lp = np.array(uniq_lp)
+
+        # ---- map to original space if whitened
+        if use_whitened:
+            optima = (self.whiten_L @ optima.T + self.whiten_mean[:, None]).T
+            cand  = (self.whiten_L @ cand.T + self.whiten_mean[:, None]).T
+
+        if verbose:
+            print(f"[OneShot-DE] Unique optima: {len(optima)}")
+            for i, (t, lp) in enumerate(zip(optima, optima_lp), 1):
+                print(f"  #{i}: logp={lp:.3f}")
+
+        return optima, optima_lp, cand, cand_logp
     '''
