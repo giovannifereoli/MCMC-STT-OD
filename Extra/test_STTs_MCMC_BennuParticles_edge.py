@@ -10,9 +10,7 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
-# NOTE: longer arcs more non-linearity, less measurements less observability should help. thIS IS THE third case (?)
-# TODO: fix the 'not working' due to big initial deviation. try global optimization? try what said in notebook!
-# TODO: change sigmas to improve residuals plots
+# TODO: Fix the __main__ by inializing with a converged batch solution, and then running MCMC with a small spherical spread.
 
 
 def generate_stt_functions(

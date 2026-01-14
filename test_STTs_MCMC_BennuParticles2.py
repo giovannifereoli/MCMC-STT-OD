@@ -10,6 +10,44 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
+# NOTE: Hypothesis (HP)
+# Spacecraft hovering in Bennu’s body-fixed frame. OpNav measurements are generated from a fixed observer.
+
+# TODO: Scenario Setup & Physical Model
+# - Verify correctness and physical units of: gravity model, J2 perturbation, solar radiation pressure (SRP)
+# - Verify correctness of __main__ setup
+# - Increase realism / complexity of the scenario: visibility constraints, realistic observation geometry, OSIRIS-REx SPKs
+# - Consolidate and clearly separate the three scenarios:
+#     1) Nominal case (well-behaved, working baseline)
+#     2) Banana-shaped posterior case
+#     3) IOD / multimodal / batch OD failing case
+# - Improve plotting routines (labels, spacing, reference handling, etc.)
+
+# NOTE:
+# This MCMC framework is meant to help the OD analyst explore the posterior distribution of the state estimate, especially
+# when different OD solutions obtained under different assumptions are mutually inconsistent.
+
+# Typical usage:
+# - Take the converged OD solution with the highest confidence
+# - Sample the likelihood locally around that reference solution
+
+# Important:
+# - MCMC is a *sampler*, not an optimizer. It can behave like an optimizer in: IOD problems AND ill-posed or strongly multimodal likelihoods.
+# - However, MCMC does NOT naturally funnel toward low-likelihood regions and tends to wander through high-likelihood space.
+#   Results in poorly constrained or strongly multimodal cases. should be interpreted with caution. Chains can look
+#   converged while still hiding valid solutions (“bee vs. house” analogy).
+#
+# In this framework:
+# - Starting from STTs close to a valid OD solution is sufficient and efficient for local posterior sampling
+# - Keeping DEMoves enabled generally improves exploration
+
+# For IOD problems it is recommended to:
+# - Initialize walkers inside admissible regions and leave walkers in the virtual-asteroid space
+# - Alternatively, brute-force a hypercube if the state vector includes more than position and velocity
+# - Genetic algorithms over admissible regions can be tried, but they are not equivalent in rigor to this approach
+# - Walkers stuck in persistently low-likelihood regions should be removed, as they degrade chain statistics
+# - Use uniform grids or Adaptive Domain Splitting (ADS) following Armellin et al. to generate STTs per sub-domain
+
 
 def generate_stt_functions(
     mu, order, R_eq=0.290, J2=1.962e-5, Cr=1.2, A_m=0.1, P0=4.56e-6
@@ -266,11 +304,47 @@ def plot_estimation_error_and_covariance(
     plt.show()
 
 
+# ============================================================
+# NOTE: Concrete recipe to generate a "banana-shaped" posterior
+# ============================================================
+# Goal: induce a curved likelihood ridge (angles-only, short-arc, weak parallax),
+#       so MCMC corner plots show a banana correlation between state components.
+#
+# Recipe (minimal edits):
+#
+# 1) Short arc + fewer observations (range/along-track weakly observed)
+#    t_obs = JD0_seconds + np.linspace(0, 900, num=10)     # 15 min, 10 obs
+#    # or even stronger:
+#    # t_obs = JD0_seconds + np.linspace(0, 600, num=8)    # 10 min, 8 obs
+#
+# 2) Reduce parallax by moving the observer farther (still fixed)
+#    sc_pos = np.array([0.0, 0.0, 10.0])                  # was 2.0 km
+#
+# 3) Make motion mostly tangential to surface (LOS changes slowly)
+#    rng = np.random.default_rng(24)
+#    rand_vec = rng.normal(size=3); rand_vec /= np.linalg.norm(rand_vec)
+#    tang = rand_vec - np.dot(rand_vec, normal) * normal   # remove radial component
+#    tang /= np.linalg.norm(tang)
+#    v_detach = v_mag * tang
+#
+# 4) Increase measurement noise (widens ridge so curvature is visible)
+#    sigma_ra  = np.deg2rad(0.05)                         # 10x baseline
+#    sigma_dec = np.deg2rad(0.05)
+#
+# 5) Loosen priors so likelihood geometry dominates (avoid Gaussianizing)
+#    prior_sigma_pos *= 5.0
+#    prior_sigma_vel *= 5.0
+#
+# Expected outcome:
+# - Short arc + weak parallax + tangential motion -> strong nonlinear coupling
+# - MCMC corner plot shows curved (banana) correlations in position/velocity.
+
+
 if __name__ == "__main__":
     # Constants for Bennu
     R_bennu = 0.290  # [km] approximate mean radius
     mu = 4.892e-9  # [km^3/s^2] Bennu GM
-    order = 1
+    order = 2
 
     # Load Bennu mesh
     mesh_path = "ObjFiles/BennuRadar.obj"  # Update with correct path if needed
@@ -297,8 +371,7 @@ if __name__ == "__main__":
     normal = normal / np.linalg.norm(normal)
 
     # Initial velocity parameters
-    # v_mag = 1.9 * 1e-4  # [km/s], small detachment velocity, for case 3
-    v_mag = 2 * 1e-4  # For case 1 and 2
+    v_mag = 2 * 1e-4  # [km/s]
 
     # Generate random unit vector
     np.random.seed(24)  # For reproducibility
@@ -318,14 +391,7 @@ if __name__ == "__main__":
     # Time setup
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
     JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
-    # t_obs = JD0_seconds + np.linspace(
-    #    0, 0.05 * 3600, int((0.05 * 3600) / 20)
-    # )  # 20-sec cadence
-    # t_obs = JD0_seconds + np.linspace(0, 3600, num=100)  # CASE 1: They both look good
-    # t_obs = JD0_seconds + np.linspace(0, 60, num=3)  # CASE 2: Batch MAP not good
-    t_obs = JD0_seconds + np.linspace(
-        0, 36 * 3600, num=50
-    )  # CASE 3: Long window, sparse measurements, Batch cov not good
+    t_obs = JD0_seconds + np.linspace(0, 6 * 3600, num=6)  # CASE 3
 
     # Generate symbolic dynamics functions externally
     f_func, A_func, B_funcs = generate_stt_functions(mu, order)
@@ -336,131 +402,187 @@ if __name__ == "__main__":
     )
 
     # Propagate truth
-    print("")
-    print(f"\nPropagating true trajectory:")
+    print("\nPropagating true trajectory:")
     sol_true, stts_true = propagator.propagate(x0_true, t_obs, rtol=1e-10, atol=1e-12)
     x_true = sol_true.y[:6, :].T  # shape (n_steps, 6)
 
     # Measurement model (OpNav angles)
-    sigma_ra = np.deg2rad(0.005)  # ~18 arcsec
+    sigma_ra = np.deg2rad(0.005)  # 20 arcsec
     sigma_dec = np.deg2rad(0.005)
 
     sc_pos = np.array(
-        [0.0, 0.0, 2.0]
+        [0.0, 0.0, 5.0]
     )  # Fixed observer in Bennu-centered inertial frame
 
     y_obs = generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec)
     t_obs_used = t_obs  # all times used in this simplified case
 
-    # Propagate reference trajectory
-    print("")
+    # ============================================================
+    # Initial reference trajectory and Priors
+    # ============================================================
     print("\nPropagating reference trajectory:")
 
-    # Define relative deviation fractions (e.g., 1% for position, 0.5% for velocity)
-    pos_dev_frac = 0.01  # 1% of position
-    vel_dev_frac = 0.005  # 0.5% of velocity
+    # Fractional deviation (tunable)
+    pos_dev_frac = 0.01  # 1% position
+    vel_dev_frac = 0.01  # 1% velocity
 
-    # Compute component-wise deviation
-    ref_dev = np.hstack([pos_dev_frac * x0_true[:3], vel_dev_frac * x0_true[3:]])
+    rng = np.random.default_rng(42)
+
+    # Randomized reference deviation (same scale as fractions)
+    ref_dev_pos = pos_dev_frac * x0_true[:3] * rng.normal(size=3)
+    ref_dev_vel = vel_dev_frac * x0_true[3:] * rng.normal(size=3)
+    ref_dev = np.hstack([ref_dev_pos, ref_dev_vel])
+
     print(f"Reference deviation: {ref_dev}")
-    idx0 = np.searchsorted(t_obs, t_obs_used[0])
-    x0_ref = sol_true.y[:6, idx0] - ref_dev
 
-    sol_ref, stts_ref = propagator.propagate(
-        x0=x0_ref,
+    # truth - ref = ref_dev
+    idx0 = np.searchsorted(t_obs, t_obs_used[0])
+    x0_ref0 = sol_true.y[:6, idx0] - ref_dev
+
+    # Propagate reference
+    sol_ref0, stts_ref0 = propagator.propagate(
+        x0=x0_ref0,
         t_eval=t_obs_used,
         rtol=1e-12,
         atol=1e-14,
     )
 
-    # Plot: 3D trajectory and observer LOS vectors
-    fig = plt.figure(figsize=(10, 6))
-    ax = fig.add_subplot(111, projection="3d")
+    # ============================================================
+    # Priors (matched to fractional deviation scale)
+    # ============================================================
+    # Prior std proportional to the same fractional deviation
+    increase_factor = 1.0  # Loosen priors to allow more exploration
+    prior_sigma_pos = increase_factor * pos_dev_frac * np.abs(x0_ref0[:3])
+    prior_sigma_vel = increase_factor * vel_dev_frac * np.abs(x0_ref0[3:])
 
-    # Facecolor (e.g., light brown or gray)
-    face_color = "#b88b4a"
+    # Avoid zero-variance if a component is near zero
+    prior_sigma_pos = np.maximum(prior_sigma_pos, 1e-6)  # km
+    prior_sigma_vel = np.maximum(prior_sigma_vel, 1e-9)  # km/s
 
-    # Plot asteroid mesh
-    mesh = Poly3DCollection(
-        vertices[faces],
-        alpha=0.3,
-        edgecolor="k",
-        linewidths=0.2,
-        facecolor=face_color,
-    )
-    ax.add_collection3d(mesh)
+    priors = [norm(loc=0.0, scale=s) for s in prior_sigma_pos] + [
+        norm(loc=0.0, scale=s) for s in prior_sigma_vel
+    ]
 
-    # Particle Trajectory
-    ax.plot(
-        x_true[:, 0],
-        x_true[:, 1],
-        x_true[:, 2],
-        label="Particle Trajectory",
-        color="blue",
-    )
+    initial_guess = np.zeros(6)
 
-    # Detachment Point
-    ax.scatter(*pos_detach, color="green", label="Detachment Point", s=30)
+    # ============================================================
+    # Helpers (keep your local-function style)
+    # ============================================================
+    def wrap_to_pi(a):
+        return (a + np.pi) % (2 * np.pi) - np.pi
 
-    # Spacecraft Position
-    ax.scatter(*sc_pos, color="red", label="Spacecraft", s=50)
+    # Stage 1 residual: FULL nonlinear (NO STTs)
+    def residuals_full_normalized(delta_x0, x0_ref):
+        sol, _ = propagator.propagate(
+            x0=x0_ref + delta_x0,
+            t_eval=t_obs_used,
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        x_est = sol.y[:6, :].T
 
-    # Line-of-Sight Vectors
-    N_skip = 30
-    for i in range(0, len(x_true), N_skip):
-        ax.plot(
-            [sc_pos[0], x_true[i, 0]],
-            [sc_pos[1], x_true[i, 1]],
-            [sc_pos[2], x_true[i, 2]],
-            color="gray",
-            alpha=0.3,
+        los_vec = x_est[:, :3] - sc_pos
+        los_unit = los_vec / np.linalg.norm(los_vec, axis=1, keepdims=True)
+
+        ra_model = np.mod(np.arctan2(los_unit[:, 1], los_unit[:, 0]), 2 * np.pi)
+        dec_model = np.arcsin(los_unit[:, 2])
+
+        y_model = np.empty_like(y_obs)
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
+
+        residuals = np.empty_like(y_obs)
+        residuals[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        residuals[1::2] = y_obs[1::2] - y_model[1::2]
+
+        weights = np.empty_like(y_obs)
+        weights[0::2] = sigma_ra
+        weights[1::2] = sigma_dec
+
+        return residuals / weights
+
+    def solve_batch_nonlinear_full(
+        x0_ref,
+        x0_delta0,
+        priors=None,  # list of scipy.stats.norm, length 6
+        max_nfev=40000,
+    ):
+        # Build prior mean/sigma from your norm() objects
+        if priors is None:
+            prior_mean = np.zeros_like(x0_delta0)
+            prior_sigma = np.full_like(x0_delta0, np.inf)  # no prior
+        else:
+            prior_mean = np.array([p.mean() for p in priors], dtype=float)
+            prior_sigma = np.array([p.std() for p in priors], dtype=float)
+
+            if np.any(prior_sigma <= 0):
+                raise ValueError("Prior std must be > 0 for all parameters.")
+
+        def fun(d):
+            # measurement residuals (already normalized by sigma_ra/sigma_dec)
+            r_meas = residuals_full_normalized(d, x0_ref)
+
+            # prior residuals (MAP): (d - mu)/sigma
+            r_prior = (d - prior_mean) / prior_sigma
+
+            return np.hstack([r_meas, r_prior])
+
+        result = least_squares(
+            fun=fun,
+            x0=x0_delta0,
+            method="trf",
+            jac="2-point",
+            max_nfev=max_nfev,
+            ftol=1e-12,
+            xtol=1e-12,
+            gtol=1e-12,
+            verbose=2,
         )
 
-    # Plot Labels and Appearance
-    ax.set_xlabel("X [km]")
-    ax.set_ylabel("Y [km]")
-    ax.set_zlabel("Z [km]")
-    ax.legend(loc="upper left")
-    ax.grid(True)
-    plt.tight_layout()
-    ax.set_aspect("equal")
-    plt.show()
+        # Posterior covariance (Gauss-Newton approx around MAP)
+        J = result.jac
+        cov = np.linalg.inv(J.T @ J)
 
-    # Plot RA and DEC over time
-    ra_vals = y_obs[0::2]  # Extract RA measurements
-    dec_vals = y_obs[1::2]  # Extract DEC measurements
+        return result, cov
 
-    # Convert observation times to minutes since start
-    time_minutes = (t_obs_used - t_obs_used[0]) / 60.0
-
-    fig2, ax2 = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
-
-    # RA scatter
-    ax2[0].scatter(time_minutes, np.rad2deg(ra_vals), color="purple", s=10, label="RA")
-    ax2[0].set_ylabel("RA [deg]")
-    ax2[0].grid(True)
-    ax2[0].legend()
-
-    # DEC scatter
-    ax2[1].scatter(
-        time_minutes, np.rad2deg(dec_vals), color="darkorange", s=10, label="DEC"
+    # ============================================================
+    # Stage 1: FULL nonlinear batch to convergence (NO STTs)
+    # ============================================================
+    print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
+    batch1, cov1 = solve_batch_nonlinear_full(
+        x0_ref0, initial_guess, priors=priors, max_nfev=40000
     )
-    ax2[1].set_xlabel("Time [min]")
-    ax2[1].set_ylabel("DEC [deg]")
-    ax2[1].grid(True)
-    ax2[1].legend()
+    delta_hat1 = batch1.x
 
-    fig2.suptitle("Simulated OpNav Angular Measurements (Scatter)")
-    plt.tight_layout()
-    plt.show()
+    chi2_1 = np.sum(residuals_full_normalized(delta_hat1, x0_ref0) ** 2)
+    dof_1 = len(y_obs) - len(delta_hat1)
+    chi2_red_1 = chi2_1 / dof_1
 
-    # Residual function for MCMC — OpNav angular case
+    print("\n[Stage 1] delta_hat1:", delta_hat1)
+    print(f"[Stage 1] chi2_red = {chi2_red_1:.3f}  (chi2={chi2_1:.1f}, dof={dof_1})")
+
+    # ============================================================
+    # Stage 2: relinearize STTs about ref1 = ref0 + delta_hat1
+    # ============================================================
+    x0_ref1 = x0_ref0 + delta_hat1
+
+    print("\n[Stage 2] Propagating ref1 and computing STTs about ref1...")
+    sol_ref, stts_ref = propagator.propagate(
+        x0=x0_ref1,
+        t_eval=t_obs_used,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+    # ============================================================
+    # Residual function for MCMC — OpNav angular case (STT-based)
+    # ============================================================
     def residuals_normalized(delta_x0):
         # 1. Propagate the perturbed trajectory
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta_x0)
 
         # 2. Line-of-sight vector: target - observer
-        los_vec = x_est[:, :3] - sc_pos  # shape (N, 3)
+        los_vec = x_est[:, :3] - sc_pos
 
         # 3. Normalize to get unit vectors
         los_unit = los_vec / np.linalg.norm(los_vec, axis=1, keepdims=True)
@@ -477,72 +599,41 @@ if __name__ == "__main__":
         y_model[0::2] = ra_model
         y_model[1::2] = dec_model
 
-        # 7. Residuals (assuming y_obs in radians and wrapped consistently)
-        def wrap_to_pi(a):
-            return (a + np.pi) % (2 * np.pi) - np.pi
-
+        # 7. Residuals
         residuals = np.empty_like(y_obs)
-
-        # RA residuals: wrapped difference
         residuals[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
-
-        # DEC residuals: plain difference (not periodic)
         residuals[1::2] = y_obs[1::2] - y_model[1::2]
 
-        # 8. Normalize by measurement uncertainties
+        # 8. Normalize
         weights = np.empty_like(y_obs)
         weights[0::2] = sigma_ra
         weights[1::2] = sigma_dec
-
         return residuals / weights
 
-    # Assign weights to the residuals
-    weights = np.hstack(
-        [
-            np.full(len(t_obs_used), sigma_ra),
-            np.full(len(t_obs_used), sigma_dec),
-        ]
-    )
+    # Correct interleaved weights (matches y_obs layout)
+    weights = np.empty_like(y_obs)
+    weights[0::2] = sigma_ra
+    weights[1::2] = sigma_dec
 
-    # Evaluate residuals at delta_x0 = 0 (prefit)
-    delta_prefit = np.zeros(6)
-
-    # Run Batch Estimation
-    print("")
-    print("\nRunning STT batch least-squares estimation...")
+    # ============================================================
+    # Stage 2 batch refine (STT-based)
+    # ============================================================
+    print("\n[Stage 2] Running STT batch least-squares estimation...")
     batch_result, batch_cov = compute_STT_batch_solution(
-        residuals_func=residuals_normalized, x0=delta_prefit, sigma=weights
+        residuals_func=residuals_normalized, x0=np.zeros(6), sigma=weights
     )
     batch_estimate = batch_result.x
 
-    # Call the unified plot function
-    plot_normalized_residuals_vs_time(
-        residuals_func=residuals_normalized,
-        delta_x0_list=[delta_prefit, batch_estimate],
-        labels=["Prefit", "Batch"],
-        colors=["blue", "green"],
-        t_obs_used=t_obs_used,
-    )
-    plt.show()
+    chi2_2 = np.sum(residuals_normalized(batch_estimate) ** 2)
+    dof_2 = len(y_obs) - len(batch_estimate)
+    chi2_red_2 = chi2_2 / dof_2
 
-    # Print batch solution summary
-    print("\n=== Batch Least-Squares Estimate ===")
-    param_names = ["Δx", "Δy", "Δz", "Δvx", "Δvy", "Δvz"]
-    batch_std = np.sqrt(np.diag(batch_cov))
-    for i, name in enumerate(param_names):
-        estimate = batch_estimate[i]
-        sigma = batch_std[i]
-        print(f"{name:>5}: {estimate:+.6e} ± {sigma:.2e} [σ]")
+    print("\n[Stage 2] delta_hat2:", batch_estimate)
+    print(f"[Stage 2] chi2_red = {chi2_red_2:.3f}  (chi2={chi2_2:.1f}, dof={dof_2})")
 
-    # Priors
-    initial_guess = np.zeros(6)
-    pos_lower, pos_upper = -1e-1, 1e-1  # Position in km
-    vel_lower, vel_upper = -1e-3, 1e-3  # Velocity in km/s
-    priors = [norm(loc=0.0, scale=pos_upper) for _ in range(3)] + [  # position in km
-        norm(loc=0.0, scale=vel_upper) for _ in range(3)  # velocity in km/s
-    ]
-
-    # Run MCMC
+    # ============================================================
+    # MCMC
+    # ============================================================
     model = MCMCModel(
         residuals_func=residuals_normalized,
         initial_params=initial_guess,
@@ -551,16 +642,18 @@ if __name__ == "__main__":
     )
     model.setup_whitening_from_priors()
     model.run(
-        n_samples=20000,
+        n_samples=5000,
         n_walkers=128,
-        burn_in=200,
-        thin=20,
-        spherical_spread=1e-3,  # TODO: use =1 for case 3, show jay the difference!
+        burn_in=2000,
+        thin=10,
+        spherical_spread=1e-3,
         method_optimize="Powell",
-        use_demoves=True,
+        use_demoves=False,
     )
 
-    # Plot MCMC results
+    # Truth delta w.r.t ref1 (since MCMC is about ref1)
+    true_theta_about_ref1 = x0_true - x0_ref1  # == ref_dev - delta_hat1
+
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=t_obs_used, opnav_data=True)
     model.plot_log_likelihood()
@@ -568,7 +661,7 @@ if __name__ == "__main__":
         batch_mean=batch_estimate,
         batch_cov=batch_cov,
         use_median_as_truth=False,
-        true_theta=ref_dev,
+        true_theta=true_theta_about_ref1,
     )
     model.summary()
     model.print_regression_diagnostics()
@@ -576,6 +669,7 @@ if __name__ == "__main__":
     model.plot_autocorrelation()
 
     theta_hat, cov = model.get_estimate_and_covariance()
+
     plot_estimation_error_and_covariance(
         stts=stts_ref,
         sol=sol_ref,

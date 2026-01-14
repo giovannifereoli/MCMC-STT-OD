@@ -10,18 +10,6 @@ from scipy.spatial.transform import Rotation as R
 from astropy.time import Time
 import matplotlib.pyplot as plt
 
-# NOTE:
-# 1) It's true that for IOD not having i.c. means bad STTs...
-
-# CURRENT TODOs:
-# TODO: Implement nominal and edge-case comparisons with batch estimation; incorporate more realistic dynamics in the simulation.
-# TODO: Refactor MCMC sampling loop to use step-by-step calls via .sample(), allowing for real-time monitoring and early stopping upon stationarity.
-# TODO: Improve plotting routines: fix units, label histograms clearly, and ensure consistent formatting.
-
-# FUTURE TODOs:
-# TODO: put data paper 'Multiple-Shooting for IOD', emulate it, find more cases
-# TODO: PTSampler useless, https://prappleizer.github.io/Tutorials/MCMC/MCMC_Tutorial.html is the proof that emcee is enough!
-
 
 def generate_stt_functions(mu, order, beta=0.0):
     """

@@ -181,6 +181,7 @@ class MCMCModel:
             print(f"[Optimization] Success: {result.message}")
 
         x_opt = result.x
+        # Transform back to original space if whitened, ALWAYS
         if use_whitened:
             x_opt = self.whiten_L @ x_opt + self.whiten_mean
 
@@ -197,7 +198,7 @@ class MCMCModel:
         thin_frac=0.5,
         spherical_spread=1e-4,
         method_optimize="Powell",
-        use_demoves=True,
+        use_demoves=False,
     ):
         # Use optimization for better initial guess
         optimized_guess = self.optimize_initial_guess(method=method_optimize)
@@ -228,8 +229,8 @@ class MCMCModel:
         # Define MCMC moves
         if use_demoves:
             moves = [
-                (emcee.moves.DEMove(), 0.8),
-                (emcee.moves.DESnookerMove(), 0.2),
+                (emcee.moves.DEMove(), 0.7),
+                (emcee.moves.DESnookerMove(), 0.3),
             ]
         else:
             moves = emcee.moves.StretchMove()
@@ -463,10 +464,14 @@ class MCMCModel:
         use_median_as_truth=True,
         true_theta=None,
         plot_contours_labels=False,
+        batch_sigma_levels=(1.0,),
     ):
         if self.samples is None:
             print("Run MCMC first.")
             return
+
+        # Compute median (more meaningful) or MAP (best residuals) parameters and post-fit residuals
+        best_params = self.get_map_estimate()
 
         truths = np.median(self.samples, axis=0) if use_median_as_truth else true_theta
         labels = [f"$\\theta_{{{i}}}$" for i in range(self.ndim)]
@@ -502,6 +507,9 @@ class MCMCModel:
                 if true_theta is not None:
                     x_vals.append(true_theta[j])
                     y_vals.append(true_theta[i])
+                if best_params is not None:
+                    x_vals.append(best_params[j])
+                    y_vals.append(best_params[i])
 
                 ax.set_xlim(min(x_vals), max(x_vals))
                 ax.set_ylim(min(y_vals), max(y_vals))
@@ -511,6 +519,7 @@ class MCMCModel:
                     cov_sub = batch_cov[np.ix_([j, i], [j, i])]
                     mean_sub = [batch_mean[j], batch_mean[i]]
 
+                    # Plot batch mean
                     ax.plot(
                         mean_sub[0],
                         mean_sub[1],
@@ -518,23 +527,33 @@ class MCMCModel:
                         label="Batch Mean" if (i == 1 and j == 0) else "",
                     )
 
+                    # Eigen-decomposition
                     vals, vecs = np.linalg.eigh(cov_sub)
                     order = vals.argsort()[::-1]
                     vals, vecs = vals[order], vecs[:, order]
                     angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
-                    width, height = 2 * np.sqrt(vals)
 
-                    ellipse = Ellipse(
-                        xy=mean_sub,
-                        width=width,
-                        height=height,
-                        angle=angle,
-                        edgecolor="red",
-                        facecolor="none",
-                        lw=1.5,
-                        label=r"Batch $1\sigma$ Ellipse" if (i == 1 and j == 0) else "",
-                    )
-                    ax.add_patch(ellipse)
+                    # Draw requested σ-ellipses
+                    for k in batch_sigma_levels:
+                        width, height = 2 * k * np.sqrt(vals)
+
+                        ell = Ellipse(
+                            xy=mean_sub,
+                            width=width,
+                            height=height,
+                            angle=angle,
+                            edgecolor="red",
+                            facecolor="none",
+                            lw=1.5 if k == 1 else 1.0,
+                            linestyle="-" if k == 1 else "--",
+                            alpha=1.0 if k == 1 else 0.8,
+                            label=(
+                                rf"Batch ${int(k)}\sigma$"
+                                if (i == 1 and j == 0)
+                                else ""
+                            ),
+                        )
+                        ax.add_patch(ell)
 
                 # Plot true value
                 if true_theta is not None:
@@ -543,6 +562,17 @@ class MCMCModel:
                         true_theta[i],
                         "go",
                         label="True Value" if (i == 1 and j == 0) else "",
+                    )
+
+                # Plot MCMC best estimate (MAP)
+                if best_params is not None:
+                    ax.plot(
+                        best_params[j],
+                        best_params[i],
+                        "kx",
+                        markersize=8,
+                        mew=2,
+                        label="MCMC MAP" if (i == 1 and j == 0) else "",
                     )
 
                 # Plot contour labels
@@ -658,6 +688,7 @@ class MCMCModel:
         print(f"AIC: {AIC:.3f}")
         print(f"BIC: {BIC:.3f}")
         print(f"RMS of residuals: {RMS:.3f}")
+        print(f"MAP parameters: {theta_best}")
         # print("Parameter uncertainties (1σ):")
         # for i, std in enumerate(param_uncertainties):
         #    print(f"  θ_{i}: ±{std:.14f}")
@@ -722,8 +753,6 @@ class MCMCModel:
 
         idx_max = np.argmax(self.log_probs)
         map_params = self.samples[idx_max]
-        print(f"[MAP] log-posterior = {self.log_probs[idx_max]:.3f}")
-        print(f"[MAP] parameters: {map_params}")
         return map_params
 
     def gelman_rubin_diagnostic(self, split=True, threshold=1.1):
