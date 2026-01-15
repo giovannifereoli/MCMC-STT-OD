@@ -10,9 +10,6 @@ import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from scipy.optimize import least_squares
 
-# TODO: fix stage 2, add prior or make stage 1
-# TODO: figure out banana here: 1) remove prior
-
 
 def generate_stt_functions(
     mu, order, R_eq=0.290, J2=1.962e-5, Cr=1.2, A_m=0.1, P0=4.56e-6
@@ -113,15 +110,39 @@ def generate_opnav_measurements(x_true, sc_pos, sigma_ra, sigma_dec):
     return y_obs
 
 
-def compute_STT_batch_solution(residuals_func, x0, sigma):
+def compute_STT_batch_solution(
+    residuals_func,
+    x0,
+    sigma,
+    priors=None,  # list of scipy.stats.norm, length 6
+    max_nfev=40000,
+):
+    if priors is None:
+        prior_mean = np.zeros_like(x0)
+        prior_sigma = np.full_like(x0, np.inf)
+    else:
+        prior_mean = np.array([p.mean() for p in priors], dtype=float)
+        prior_sigma = np.array([p.std() for p in priors], dtype=float)
+        if np.any(prior_sigma <= 0):
+            raise ValueError("Prior std must be > 0 for all parameters.")
+
     # Define raw (normalized) residual function for LS
     def raw_residuals(delta_x0):
-        res = residuals_func(delta_x0)
-        return res  # normalized residuals
+        res_meas = residuals_func(delta_x0)
+        res_prior = (delta_x0 - prior_mean) / prior_sigma
+        return np.hstack([res_meas, res_prior])  # normalized residuals
 
     # Run nonlinear least-squares (trust-region or LM)
     result = least_squares(
-        fun=raw_residuals, x0=x0, method="trf", jac="2-point", verbose=2
+        fun=raw_residuals,
+        x0=x0,
+        method="trf",
+        jac="2-point",
+        max_nfev=max_nfev,
+        ftol=1e-12,
+        xtol=1e-12,
+        gtol=1e-12,
+        verbose=2,
     )
 
     # Estimate covariance from inverse JTJ
@@ -269,6 +290,12 @@ def plot_estimation_error_and_covariance(
     plt.show()
 
 
+# NOTE: The trick in general to make posterior not gaussian is to effectively reduce prior and show likelihood.
+# then, play around with arc length and measurements sparsity.
+
+
+# NOTE: Initialize prior * 1.3 * 1e2 is the sweet spot for now
+
 if __name__ == "__main__":
     # ============================================================
     # Constants for Bennu
@@ -323,7 +350,7 @@ if __name__ == "__main__":
     # ============================================================
     JD0 = Time("2025-04-24T00:00:00", scale="utc").jd
     JD0_seconds = (JD0 - Time("2000-01-01T12:00:00", scale="utc").jd) * 86400.0
-    t_obs = JD0_seconds + np.linspace(0, 24 * 3600, num=100)
+    t_obs = JD0_seconds + np.linspace(0, 0.25 * 24 * 3600, num=100)
     t_obs_used = t_obs
 
     # ============================================================
@@ -399,7 +426,7 @@ if __name__ == "__main__":
     )
 
     # Priors proportional to the same deviation scale
-    increase_factor = 2 * 1e2
+    increase_factor = 1.13 * 1e2
     prior_sigma_pos = increase_factor * pos_dev_frac * np.abs(x0_ref0[:3])
     prior_sigma_vel = increase_factor * vel_dev_frac * np.abs(x0_ref0[3:])
 
@@ -532,7 +559,11 @@ if __name__ == "__main__":
     # ============================================================
     print("\n[Stage 2] Running STT batch least-squares estimation...")
     batch_result, batch_cov = compute_STT_batch_solution(
-        residuals_func=residuals_normalized, x0=np.zeros(6), sigma=weights
+        residuals_func=residuals_normalized,
+        x0=np.zeros(6),
+        sigma=weights,
+        priors=priors,
+        max_nfev=40000,
     )
     batch_estimate = batch_result.x
 
