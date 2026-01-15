@@ -406,7 +406,7 @@ if __name__ == "__main__":
     ax.scatter(*sc_pos, color="red", label="Spacecraft", s=50)
 
     # Line-of-Sight Vectors
-    N_skip = 30
+    N_skip = 1
     for i in range(0, len(x_true), N_skip):
         ax.plot(
             [sc_pos[0], x_true[i, 0]],
