@@ -204,7 +204,13 @@ class STTPropagatorND:
     # -----------------------------
     # Public API
     # -----------------------------
-    def propagate(self, x0, t_eval, show_progress=True, **options):
+    def propagate(self, x0, t_eval, show_progress=True, compute_stt=True, **options):
+        if not compute_stt:
+            sol = self.propagate_state_only(
+                x0, t_eval, show_progress=show_progress, **options
+            )
+            return sol, None
+
         t_eval = np.asarray(t_eval, dtype=float).reshape(-1)
         if t_eval.size < 2:
             raise ValueError("t_eval must have at least 2 points")
@@ -238,6 +244,47 @@ class STTPropagatorND:
             print("")
 
         return sol, self._unpack_stts(sol, n)
+
+    def propagate_state_only(self, x0, t_eval, show_progress=True, **options):
+        """
+        Integrate only the state dx/dt = f(x,t), no STM/STTs.
+        Returns:
+          sol: solve_ivp solution with sol.y shape (n, n_steps)
+        """
+        t_eval = np.asarray(t_eval, dtype=float).reshape(-1)
+        if t_eval.size < 2:
+            raise ValueError("t_eval must have at least 2 points")
+
+        n = self._infer_n(x0)
+        x0 = np.asarray(x0, dtype=float).reshape(-1)
+        if x0.size != n:
+            raise ValueError(f"x0 length {x0.size} does not match n={n}")
+
+        t_start = float(t_eval[0])
+        t_end = float(t_eval[-1])
+        last_print = -1
+
+        def rhs_state(t, x):
+            nonlocal last_print
+            if show_progress:
+                denom = (t_end - t_start) if (t_end - t_start) != 0 else 1.0
+                progress = int(100 * (t - t_start) / denom)
+                if progress > last_print:
+                    bar = "█" * (progress // 2) + "-" * (50 - progress // 2)
+                    print(f"\rProgress |{bar}| {progress:.1f}% - t = {t:.2f}", end="")
+                    last_print = progress
+            return self._as_float_array(self.f_func(*x, t)).reshape(n)
+
+        sol = solve_ivp(
+            fun=rhs_state,
+            t_span=(t_start, t_end),
+            t_eval=t_eval,
+            y0=x0,
+            **options,
+        )
+        if show_progress:
+            print("")
+        return sol
 
     def propagate_deviation(self, sol, stts, delta_x0):
         """

@@ -48,6 +48,13 @@ Units:
 # TODO: fix plots, add ground truth, labels
 # TODO: estimate wrong, covariance wrong
 
+# TODO: fix isse If delta0 = 0 does not give you a trajectory/RADEC close to
+# the truth-generated measurements, then your “truth generator” and your “model evaluator”
+# are not the same system (frame/time/sign conventions mismatch), or you’re accidentally
+# evaluating measurements at different epochs / different states.
+
+# This massive chi-squared (should be ~1.0) means your model predictions are completely wrong at the true initial conditions!
+
 import os
 import sys
 from pathlib import Path
@@ -73,17 +80,6 @@ from MCMC import MCMCModel
 
 def wrap_to_pi(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
-
-
-def radec_from_los(los_vec):
-    """
-    los_vec: (N,3) from observer to target in inertial
-    returns ra in [0,2pi), dec in [-pi/2, pi/2]
-    """
-    u = los_vec / np.linalg.norm(los_vec, axis=1, keepdims=True)
-    ra = np.mod(np.arctan2(u[:, 1], u[:, 0]), 2 * np.pi)
-    dec = np.arcsin(u[:, 2])
-    return ra, dec
 
 
 def occultation_mask(sc_pos, part_pos, R_body):
@@ -254,9 +250,9 @@ def generate_opnav_measurements_from_sc(x_part, sc_state, sigma_ra, sigma_dec, r
     sc_state: (N,6) spacecraft inertial
     """
     los = x_part[:, :3] - sc_state[:, :3]
-    ra, dec = radec_from_los(los)
+    ra, dec, _, _ = radec_and_partials_from_los(los)
 
-    ra_meas = np.mod(ra + rng.normal(0.0, sigma_ra, size=ra.shape), 2 * np.pi)
+    ra_meas = ra + rng.normal(0.0, sigma_ra, size=ra.shape)
     dec_meas = dec + rng.normal(0.0, sigma_dec, size=dec.shape)
 
     y = np.empty(2 * len(ra))
@@ -667,17 +663,22 @@ if __name__ == "__main__":
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
-    ref_pct_r = 0.05  # 5% of each position component
-    ref_pct_v = 0.05  # 5% of each velocity component
-    ref_pct_mu = 0.10  # 10% of mu
-    ref_pct_c = 0.50  # 50% of each C/S coefficient
+    ref_pct_r = 1e-24 * 0.01  # 1% of each position component
+    ref_pct_v = 1e-24 * 0.01  # 1% of each velocity component
+    ref_pct_mu = 1e-24 * 0.01  # 1% of mu
+    ref_pct_c = 1e-24 * 0.01  # 1% of each C/S coefficient
 
     # priors (on deltas about the reference) are these fractions of |truth|
-    prior_pct_r = 0.20  # 20% of each position component
-    prior_pct_v = 0.50  # 50% of each velocity component
-    prior_pct_mu = 0.50  # 50% of mu
-    prior_pct_c = 1.00  # 100% of each C/S coefficient
-    prior_looseness = 1
+    # NOTE: ach component of the particle's position is assigned a 250 m a priori
+    # uncertainty, which in three dimensions roughly equates to Bennu's volume.
+    # Each component of the particle's velocity is assigned a 30 cm/s a priori
+    # uncertainty, which is the same order of magnitude as the escape speeds on
+    # Bennu's surface.
+    prior_pct_r = ref_pct_r  # 1% of each position component
+    prior_pct_v = ref_pct_v  # 1% of each velocity component
+    prior_pct_mu = ref_pct_mu  # 1% of mu
+    prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
+    prior_looseness = 1e1
 
     # MCMC settings
     n_walkers = 128
@@ -786,7 +787,8 @@ if __name__ == "__main__":
     # --------------------------
     # Observability mask (occultation by Bennu sphere proxy)
     # --------------------------
-    vis_mask = occultation_mask(sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu)
+    # vis_mask = occultation_mask(sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu)
+    vis_mask = np.ones(len(sc_state_full), dtype=bool)  # All True = all visible
 
     ets = ets_full[vis_mask]  # ETs for labeling / plots
     tau = tau_full[vis_mask]  # taus for propagation / residuals
@@ -921,7 +923,7 @@ if __name__ == "__main__":
             y_model[1::2] = dec_model
 
             res = np.empty_like(y_obs)
-            res[0::2] = (y_obs[0::2] - y_model[0::2] + np.pi) % (2 * np.pi) - np.pi
+            res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
             res[1::2] = y_obs[1::2] - y_model[1::2]
 
             r = res / w  # normalized residual vector (2N,)
@@ -1007,6 +1009,119 @@ if __name__ == "__main__":
 
         return x0_ref, delta_total, cov_full
 
+    def solve_stage1_full_nonlinear_lsq(
+        propagator,
+        x0_ref,
+        tau,  # (N,) seconds since start
+        sc_state,  # (N,6)
+        y_obs,  # (2N,)
+        sigma_ra,
+        sigma_dec,
+        priors=None,  # list of scipy.stats.norm for the UPDATE variables
+        update_idx=None,  # indices in 12D x0 to solve for
+        rtol=1e-10,
+        atol=1e-12,
+        method="LSODA",
+        max_nfev=2000,
+        verbose=2,
+    ):
+        """
+        Full nonlinear batch (MAP) using SciPy least_squares.
+        - Decision variable is delta (len n_upd) applied to x0_ref[update_idx].
+        - For each evaluation: propagate with updated x0, compute RA/DEC, residuals, add priors.
+        - No STM used (this isolates whether STM/Jacobian is causing the bias).
+        """
+
+        if update_idx is None:
+            update_idx = np.arange(12)
+        update_idx = np.asarray(update_idx, dtype=int)
+        n_upd = len(update_idx)
+
+        # Prior mean/sigma on delta in the UPDATE variable space
+        if priors is None:
+            prior_mean = np.zeros(n_upd)
+            prior_sig = np.full(n_upd, np.inf)
+        else:
+            prior_mean = np.array([p.mean() for p in priors], dtype=float)
+            prior_sig = np.array([p.std() for p in priors], dtype=float)
+
+        finite = np.isfinite(prior_sig)
+
+        # Measurement weights
+        w = np.empty_like(y_obs, dtype=float)
+        w[0::2] = sigma_ra
+        w[1::2] = sigma_dec
+
+        def residual_vector(delta_upd):
+            # Build x0 candidate
+            x0 = x0_ref.copy()
+            x0[update_idx] = x0_ref[update_idx] + delta_upd
+
+            # Propagate (no STTs needed here)
+            sol = propagator.propagate_state_only(
+                x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
+            )
+            x = sol.y[:12, :].T  # (N,12)
+
+            # Model observables
+            los = x[:, :3] - sc_state[:, :3]
+            ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
+
+            y_model = np.empty_like(y_obs)
+            y_model[0::2] = ra_model
+            y_model[1::2] = dec_model
+
+            # Residuals (wrap RA robustly)
+            res = np.empty_like(y_obs)
+            # IMPORTANT: use wrap_to_pi; avoid modulo expressions that can be numerically touchy
+            res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+            res[1::2] = y_obs[1::2] - y_model[1::2]
+
+            r_meas = res / w
+
+            # Priors appended as additional residuals
+            if np.any(finite):
+                r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
+                return np.hstack([r_meas, r_pri])
+
+            return r_meas
+
+        # Initial guess: zero delta about x0_ref
+        x0 = np.zeros(n_upd)
+
+        result = least_squares(
+            fun=residual_vector,
+            x0=x0,
+            method="trf",
+            jac="2-point",  # intentionally FD for the "full nonlinear check"
+            max_nfev=max_nfev,
+            ftol=1e-14,
+            xtol=1e-14,
+            gtol=1e-14,
+            verbose=verbose,
+        )
+
+        # Build outputs in your same conventions
+        delta_hat_upd = result.x
+        delta_hat_full = np.zeros(12)
+        delta_hat_full[update_idx] = delta_hat_upd
+
+        x0_ref1 = x0_ref + delta_hat_full
+        # Covariance approximation from J^T J (posterior if priors included)
+        J = result.jac
+        try:
+            cov_upd = np.linalg.inv(J.T @ J)
+        except np.linalg.LinAlgError:
+            cov_upd = np.linalg.pinv(J.T @ J)
+
+        cov_full = np.full((12, 12), np.inf)
+        for i, ii in enumerate(update_idx):
+            for j, jj in enumerate(update_idx):
+                cov_full[ii, jj] = cov_upd[i, j]
+
+        return x0_ref1, delta_hat_full, cov_full, result
+
+    """
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,
         x0_ref=x0_ref,
@@ -1021,6 +1136,22 @@ if __name__ == "__main__":
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
+    )"""
+
+    x0_ref1, delta_hat1, cov1, res_nl = solve_stage1_full_nonlinear_lsq(
+        propagator=propagator,
+        x0_ref=x0_ref,
+        tau=tau,
+        sc_state=sc_state,
+        y_obs=y_obs,
+        sigma_ra=sigma_ra,
+        sigma_dec=sigma_dec,
+        priors=priors,  # set to None to test "no priors"
+        update_idx=np.arange(12),
+        rtol=1e-8,
+        atol=1e-10,
+        max_nfev=4000,
+        verbose=2,
     )
 
     # Consistency of bookkeeping
@@ -1060,7 +1191,7 @@ if __name__ == "__main__":
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
 
         los = x_est[:, :3] - sc_state[:, :3]
-        ra_model, dec_model = radec_from_los(los)
+        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
 
         y_model = np.empty_like(y_obs)
         y_model[0::2] = ra_model
@@ -1105,7 +1236,7 @@ if __name__ == "__main__":
         burn_in=burn_in,
         thin=thin,
         spherical_spread=spherical_spread,
-        method_optimize="lsq",
+        method_optimize="Powell",
     )
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
