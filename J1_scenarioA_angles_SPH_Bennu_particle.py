@@ -42,6 +42,16 @@ Units:
 - km, km/s, seconds (ET)
 """
 
+# TODO: missing stage 1
+# TODO: check all the values
+# TODO: check all the math and workflow
+
+# TODO: corner plots is horrible now
+
+import os
+import sys
+from pathlib import Path
+
 import sympy as sp
 import numpy as np
 from itertools import product
@@ -52,7 +62,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.stats import norm
 
-from STTPropagation import STTPropagator
+from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
 
@@ -135,11 +145,8 @@ def generate_stt_functions_bennu_deg2(
     """
     Build symbolic f, A, B_k for augmented 12D state:
       X = [x y z vx vy vz mu C20 C21 S21 C22 S22]
-    where x,y,z,vx,vy,vz are in inertial Bennu-centered J2000,
-    and gravity params are constants.
-    Bennu rotates via known alpha/delta and constant spin omega.
-
-    f_func, A_func, B_funcs MUST be called as f_func(*X, t) (t in seconds).
+    Dynamics are inertial, Bennu-centered. Gravity is defined in body-fixed and rotated.
+    f_func, A_func, B_funcs are called as f_func(*X, t).
     """
 
     # ---- symbols ----
@@ -169,15 +176,16 @@ def generate_stt_functions_bennu_deg2(
     R_ib = Rz(W) * Rx(sp.pi / 2 - delta) * Rz(alpha + sp.pi / 2)
     R_bi = R_ib.T
 
-    r_b = R_ib * r_i
-    xb, yb, zb = r_b[0], r_b[1], r_b[2]
+    # ---- IMPORTANT FIX: define body-fixed coordinates as independent symbols ----
+    xb_s, yb_s, zb_s = sp.symbols("xb yb zb", real=True)
+    r_b_s = sp.Matrix([xb_s, yb_s, zb_s])
 
-    # ---- body-fixed degree-2 potential ----
-    r2 = xb**2 + yb**2 + zb**2
+    # geometry in body-fixed (independent variables)
+    r2 = xb_s**2 + yb_s**2 + zb_s**2
     r = sp.sqrt(r2)
 
-    lam = sp.atan2(yb, xb)
-    phi = sp.atan2(zb, sp.sqrt(xb**2 + yb**2))
+    lam = sp.atan2(yb_s, xb_s)
+    phi = sp.atan2(zb_s, sp.sqrt(xb_s**2 + yb_s**2))
     sphi = sp.sin(phi)
     cphi = sp.cos(phi)
 
@@ -192,10 +200,15 @@ def generate_stt_functions_bennu_deg2(
     F2 = C20 * P20 + P21 * (C21 * cos1 + S21 * sin1) + P22 * (C22 * cos2 + S22 * sin2)
 
     R2 = sp.Float(R_ref_km**2)
-    U = mu / r * (1 + (R2 / r2) * F2)
+    U_b = mu / r * (1 + (R2 / r2) * F2)
 
-    # body-fixed acceleration
-    a_b = -sp.Matrix([sp.diff(U, xb), sp.diff(U, yb), sp.diff(U, zb)])
+    # body-fixed acceleration as gradient wrt (xb_s, yb_s, zb_s) SYMBOLS (now SymPy is happy)
+    a_b_s = -sp.Matrix([sp.diff(U_b, xb_s), sp.diff(U_b, yb_s), sp.diff(U_b, zb_s)])
+
+    # now substitute actual r_b(t) = R_ib(t) * r_i into that acceleration
+    r_b_expr = R_ib * r_i
+    subs_rb = {xb_s: r_b_expr[0], yb_s: r_b_expr[1], zb_s: r_b_expr[2]}
+    a_b = sp.Matrix([a_b_s[i].subs(subs_rb) for i in range(3)])
 
     # inertial acceleration
     a_i = R_bi * a_b
@@ -203,7 +216,7 @@ def generate_stt_functions_bennu_deg2(
     # ---- augmented dynamics (12D) ----
     f = sp.Matrix([vx, vy, vz, a_i[0], a_i[1], a_i[2], 0, 0, 0, 0, 0, 0])
 
-    # ---- A and B tensors ----
+    # ---- A and higher-order tensors ----
     A = f.jacobian(X)
     B_syms = {1: A}
 
@@ -220,6 +233,9 @@ def generate_stt_functions_bennu_deg2(
     args = (x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22, t)
     f_func = sp.lambdify(args, f, "numpy")
     A_func = sp.lambdify(args, B_syms[1], "numpy")
+
+    # NOTE: for B_k, lambdify on .tolist() returns nested Python lists; that’s fine if your
+    # STTPropagator handles it. If not, wrap with np.array(...) inside your propagator.
     B_funcs = {
         k: sp.lambdify(args, B_syms[k].tolist(), "numpy") for k in range(2, order + 1)
     }
@@ -290,6 +306,263 @@ def compute_STT_batch_solution(residuals_func, x0, priors=None, max_nfev=40000):
 
 
 # ============================================================
+# SPICE kernel loading
+# ============================================================
+
+
+def list_files(d: Path):
+    if not d.exists():
+        return []
+    return sorted([str(p) for p in d.iterdir() if p.is_file()])
+
+
+def safe_furnsh(kpath: str):
+    """Load a kernel, with a helpful error if it fails."""
+    try:
+        spice.furnsh(kpath)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load kernel:\n  {kpath}\nError:\n  {e}") from e
+
+
+def load_kernels(kernel_root: Path):
+    # OREx Trajectories
+    orex_traj_kernels_path = kernel_root / "orex" / "orex_trajectories"
+    traj_kernel_files = list_files(orex_traj_kernels_path)
+
+    # OREx Instrument Kernels
+    instrument_kernels = [
+        str(kernel_root / "orex" / "instrument_kernels" / "orx_navcam_v02.ti"),
+        str(kernel_root / "orex" / "instrument_kernels" / "orx_ocams_v07.ti"),
+    ]
+
+    # OREx Frame Kernels
+    frame_kernels = [
+        str(kernel_root / "orex" / "frame_kernels" / "orx_v14.tf"),
+    ]
+
+    # OREx Attitude Kernels
+    attitude_kernels_path = kernel_root / "orex" / "attitude_kernels"
+    attitude_kernels = list_files(attitude_kernels_path)
+
+    # OREx Clock Kernels
+    clock_kernels = [
+        str(kernel_root / "orex" / "clock_kernels" / "orx_sclkscet_00093.tsc"),
+    ]
+
+    # Other SPICE Kernels
+    other_kernels = [
+        str(kernel_root / "pck00010.tpc"),
+        str(kernel_root / "naif0012.tls"),
+        str(kernel_root / "de424.bsp"),
+        str(kernel_root / "gm_de440.tpc"),
+        str(kernel_root / "bennu_v17.tpc"),
+        str(kernel_root / "orex" / "bennu_refdrmc_v1.bsp"),
+        str(
+            kernel_root
+            / "orex"
+            / "bennu_shape_models"
+            / "bennu_g_12600mm_alt_obj_0000n00000_v021a.bds"
+        ),
+        str(kernel_root / "orex" / "orx_struct_v04.bsp"),
+        str(kernel_root / "trajectories" / "de432s.bsp"),
+    ]
+
+    kernels = (
+        traj_kernel_files
+        + instrument_kernels
+        + frame_kernels
+        + attitude_kernels
+        + clock_kernels
+        + other_kernels
+    )
+
+    # Load all kernels (and fail fast if something is missing)
+    for k in kernels:
+        if not os.path.isfile(k):
+            raise FileNotFoundError(f"Kernel not found: {k}")
+        safe_furnsh(k)
+
+    return kernels
+
+
+# ============================================================
+# BETTER TRAJECTORY PLOT USING THE SHAPE MODEL (trimesh)
+# ============================================================
+
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+
+def set_axes_equal_3d(ax):
+    """Make 3D axes have equal scale so the mesh doesn't look like a pancake."""
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    y_range = abs(y_limits[1] - y_limits[0])
+    z_range = abs(z_limits[1] - z_limits[0])
+
+    x_mid = np.mean(x_limits)
+    y_mid = np.mean(y_limits)
+    z_mid = np.mean(z_limits)
+
+    plot_radius = 0.5 * max([x_range, y_range, z_range])
+
+    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
+    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
+    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
+
+
+def add_trimesh_to_ax(
+    ax, mesh, color=(0.7, 0.7, 0.7, 1.0), alpha=0.35, edge_alpha=0.15, max_faces=30000
+):
+    """
+    Render a trimesh.Trimesh on a matplotlib 3D axis.
+    Downsamples faces if mesh is huge (matplotlib dies otherwise).
+    """
+    # Downsample faces if necessary
+    faces = mesh.faces
+    verts = mesh.vertices
+
+    if faces.shape[0] > max_faces:
+        idx = np.random.default_rng(0).choice(
+            faces.shape[0], size=max_faces, replace=False
+        )
+        faces = faces[idx]
+
+    poly3d = verts[faces]  # (F,3,3)
+    coll = Poly3DCollection(poly3d, linewidths=0.2)
+    coll.set_facecolor(color)
+    coll.set_alpha(alpha)
+    coll.set_edgecolor((0.0, 0.0, 0.0, edge_alpha))
+    ax.add_collection3d(coll)
+
+
+def normalize_mesh_scale(mesh, target_radius_km, mode="rms"):
+    """
+    Optional: scale the mesh so its "radius" matches target_radius_km.
+    mode:
+      - "max": use max vertex norm
+      - "rms": use RMS vertex norm (usually smoother)
+    """
+    verts = mesh.vertices
+    r = np.linalg.norm(verts, axis=1)
+    if mode == "max":
+        scale = target_radius_km / np.max(r)
+    else:
+        scale = target_radius_km / np.sqrt(np.mean(r**2))
+    mesh = mesh.copy()
+    mesh.apply_scale(scale)
+    return mesh, scale
+
+
+def plot_bennu_scene(
+    bennu_mesh,
+    sc_state_full,
+    x_true_full,
+    x_map,
+    ets_full=None,
+    vis_mask=None,
+    title="OSIRIS-REx + Particle around Bennu (mesh)",
+    mesh_target_radius_km=None,
+    mesh_scale_mode="rms",
+    downsample=3,
+):
+    """
+    bennu_mesh: trimesh.Trimesh in Bennu body-fixed coordinates, centered at origin.
+               For visualization, we treat it as "static" in Bennu-centered inertial.
+               (If you want time-varying attitude of the mesh, we can animate, but this is already a huge improvement.)
+    sc_state_full: (N,6) inertial
+    x_true_full:   (N,12 or 6) inertial
+    x_map:         (N_visible,12 or 6) inertial (MAP on visible arc)
+    vis_mask:      (N,) bool; if provided, show visible vs occulted points
+    """
+
+    # Optional mesh scaling
+    if mesh_target_radius_km is not None:
+        bennu_mesh_plot, scale = normalize_mesh_scale(
+            bennu_mesh, mesh_target_radius_km, mode=mesh_scale_mode
+        )
+        print(
+            f"[Plot] Mesh scaled by factor {scale:.6g} to match radius ~{mesh_target_radius_km} km ({mesh_scale_mode})."
+        )
+    else:
+        bennu_mesh_plot = bennu_mesh
+
+    # Downsample trajectories for rendering
+    sl = slice(None, None, max(1, int(downsample)))
+    sc = sc_state_full[sl, :3]
+    pt = x_true_full[sl, :3]
+
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Mesh
+    add_trimesh_to_ax(ax, bennu_mesh_plot, alpha=0.35, edge_alpha=0.10, max_faces=25000)
+
+    # Spacecraft (full arc)
+    ax.plot(sc[:, 0], sc[:, 1], sc[:, 2], linewidth=2.0, label="SC (SPICE truth)")
+
+    # Particle truth
+    ax.plot(pt[:, 0], pt[:, 1], pt[:, 2], linewidth=2.0, label="Particle truth")
+
+    # Particle MAP (only visible arc typically)
+    ax.plot(
+        x_map[:, 0],
+        x_map[:, 1],
+        x_map[:, 2],
+        linewidth=2.5,
+        label="Particle MAP (visible arc)",
+    )
+
+    # Optional: show visible vs occulted points on spacecraft track (makes geometry readable)
+    if vis_mask is not None and ets_full is not None:
+        vis_mask_ds = vis_mask[sl]
+        sc_vis = sc[vis_mask_ds]
+        sc_occ = sc[~vis_mask_ds]
+        if sc_vis.shape[0] > 0:
+            ax.scatter(
+                sc_vis[:, 0],
+                sc_vis[:, 1],
+                sc_vis[:, 2],
+                s=18,
+                marker="o",
+                label="SC epochs used (visible)",
+            )
+        if sc_occ.shape[0] > 0:
+            ax.scatter(
+                sc_occ[:, 0],
+                sc_occ[:, 1],
+                sc_occ[:, 2],
+                s=14,
+                marker="x",
+                label="SC epochs dropped (occulted)",
+            )
+
+    ax.set_xlabel("X [km]")
+    ax.set_ylabel("Y [km]")
+    ax.set_zlabel("Z [km]")
+    ax.set_title(title)
+
+    # Better view
+    ax.view_init(elev=25, azim=35)
+
+    # Auto limits around trajectories + mesh
+    all_xyz = np.vstack([sc_state_full[:, :3], x_true_full[:, :3], x_map[:, :3]])
+    pad = 0.2 * np.max(np.linalg.norm(all_xyz, axis=1))
+    ax.set_xlim(np.min(all_xyz[:, 0]) - pad, np.max(all_xyz[:, 0]) + pad)
+    ax.set_ylim(np.min(all_xyz[:, 1]) - pad, np.max(all_xyz[:, 1]) + pad)
+    ax.set_zlim(np.min(all_xyz[:, 2]) - pad, np.max(all_xyz[:, 2]) + pad)
+    set_axes_equal_3d(ax)
+
+    ax.legend(loc="upper right")
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
 # MAIN SCRIPT
 # ============================================================
 
@@ -298,14 +571,15 @@ if __name__ == "__main__":
     # --------------------------
     # USER SETTINGS (edit these)
     # --------------------------
-    META_KERNEL = "kernels/bennu_meta.tm"  # <-- EDIT
-    SC_NAME = "ORX"  # <-- EDIT: name in SPK (e.g., "OSIRIS-REX" or "ORX")
-    CENTER = "BENNU"  # <-- EDIT: center name in SPICE
+    KERNEL_ROOT = Path("./kernels")
+    SC_NAME = "OSIRIS-REX"
+    CENTER = "BENNU"
     FRAME_I = "J2000"
+    ABCORR = "NONE"
 
     # Observation window (must be covered by SPK)
-    utc0 = "2019-03-01T00:00:00"  # <-- EDIT
-    utc1 = "2019-03-01T02:00:00"  # <-- EDIT
+    utc0 = "2019-03-01T00:00:00"
+    utc1 = "2019-03-01T02:00:00"
     n_obs = 120
 
     # Bennu physical
@@ -319,7 +593,7 @@ if __name__ == "__main__":
     omega_true = 2 * np.pi / spin_period  # rad/s
 
     # Dynamics / STT order
-    stt_order = 2  # can be 2,3,4,... (careful: symbolic cost grows fast)
+    stt_order = 1  # can be 2,3,4,... (careful: symbolic cost grows fast)
 
     # Truth gravity params
     mu_true = 4.892e-9
@@ -350,18 +624,19 @@ if __name__ == "__main__":
     sig_c20 = 2e-5
     sig_c21s21 = 5e-6
     sig_c22s22 = 5e-6
+    prior_looseness = 1e1
 
     # MCMC settings
     n_walkers = 128
-    n_samples = 20000
-    burn_in = 3000
+    n_samples = 2000
+    burn_in = 300
     thin = 10
     spherical_spread = 1e-2
 
     # --------------------------
     # Load SPICE & spacecraft truth
     # --------------------------
-    spice.furnsh(META_KERNEL)
+    _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
     et1 = spice.utc2et(utc1)
@@ -405,7 +680,7 @@ if __name__ == "__main__":
 
     # Outward initial velocity (random hemisphere w.r.t. r0_true)
     rng = np.random.default_rng(7)
-    vmag = 2e-4
+    vmag = 2e-5
     u = rng.normal(size=3)
     u /= np.linalg.norm(u)
     if np.dot(u, r0_true) < 0:
@@ -427,8 +702,8 @@ if __name__ == "__main__":
         w0_rad=0.0,
     )
 
-    propagator = STTPropagator(
-        order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs
+    propagator = STTPropagatorND(
+        order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
     )
 
     # --------------------------
@@ -436,7 +711,7 @@ if __name__ == "__main__":
     # --------------------------
     print("\nPropagating particle truth...")
     sol_true, stts_true = propagator.propagate(
-        x0_true, ets_full, rtol=1e-11, atol=1e-13
+        x0_true, ets_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
     x_true_full = sol_true.y[:12, :].T  # (N,12)
 
@@ -480,7 +755,7 @@ if __name__ == "__main__":
 
     # propagate reference about the visible arc
     sol_ref, stts_ref = propagator.propagate(
-        x0=x0_ref, t_eval=ets, rtol=1e-12, atol=1e-14
+        x0=x0_ref, t_eval=ets, rtol=1e-8, atol=1e-10, method="LSODA"
     )
     x_ref = sol_ref.y[:12, :].T
 
@@ -511,7 +786,7 @@ if __name__ == "__main__":
     # --------------------------
     # Priors on 12D delta0
     # --------------------------
-    prior_sigma = np.array(
+    prior_sigma = prior_looseness * np.array(
         [
             sig_r,
             sig_r,
@@ -575,44 +850,34 @@ if __name__ == "__main__":
     true_delta = x0_true - x0_ref
 
     # --------------------------
+    # Diagnostics
+    # --------------------------
+
+    model.plot_convergence()
+    model.plot_postfit_residuals_time(t_obs_used=ets, opnav_data=True)
+    model.plot_log_likelihood()
+
+    model.summary()
+    model.print_regression_diagnostics()
+    model.gelman_rubin_diagnostic()
+    model.plot_autocorrelation()
+
+    # --------------------------
     # Plot: Bennu sphere + SC truth + particle truth + particle MAP
     # --------------------------
     _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, delta_map)
 
-    fig = plt.figure(figsize=(9, 7))
-    ax = fig.add_subplot(111, projection="3d")
-
-    # Bennu sphere
-    uu = np.linspace(0, 2 * np.pi, 40)
-    vv = np.linspace(-np.pi / 2, np.pi / 2, 20)
-    xs = R_bennu * np.outer(np.cos(uu), np.cos(vv))
-    ys = R_bennu * np.outer(np.sin(uu), np.cos(vv))
-    zs = R_bennu * np.outer(np.ones_like(uu), np.sin(vv))
-    ax.plot_surface(xs, ys, zs, alpha=0.12, linewidth=0)
-
-    ax.plot(
-        sc_state_full[:, 0],
-        sc_state_full[:, 1],
-        sc_state_full[:, 2],
-        label="SC (SPICE truth)",
+    plot_bennu_scene(
+        bennu_mesh=bennu_mesh,
+        sc_state_full=sc_state_full,
+        x_true_full=x_true_full,
+        x_map=x_map,
+        ets_full=ets_full,
+        vis_mask=vis_mask,
+        mesh_target_radius_km=R_bennu,  # optional but usually helpful
+        mesh_scale_mode="rms",
+        downsample=2,
     )
-    ax.plot(
-        x_true_full[:, 0], x_true_full[:, 1], x_true_full[:, 2], label="Particle truth"
-    )
-    ax.plot(
-        x_map[:, 0],
-        x_map[:, 1],
-        x_map[:, 2],
-        label="Particle MAP (STT-based, visible arc)",
-    )
-
-    ax.set_xlabel("X [km]")
-    ax.set_ylabel("Y [km]")
-    ax.set_zlabel("Z [km]")
-    ax.set_title("OSIRIS-REx + Particle Trajectories (Bennu-centered J2000)")
-    ax.legend()
-    plt.tight_layout()
-    plt.show()
 
     # --------------------------
     # Plot visibility mask
