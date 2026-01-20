@@ -463,115 +463,174 @@ class MCMCModel:
         batch_cov=None,
         use_median_as_truth=True,
         true_theta=None,
-        plot_contours_labels=False,
+        plot_contours_labels=False,  # keep off unless you really need it
         batch_sigma_levels=(1.0,),
+        idx=None,  # NEW: list/array of parameter indices to plot
+        max_dims=10,  # NEW: auto-limit number of dims (readability)
+        bins=40,
+        quantile_range=(0.005, 0.995),  # NEW: robust axis limits
+        title_digits=3,  # NEW: avoid long titles
     ):
         if self.samples is None:
             print("Run MCMC first.")
             return
 
-        # Compute median (more meaningful) or MAP (best residuals) parameters and post-fit residuals
-        best_params = self.get_map_estimate()
+        samples = np.asarray(self.samples)
 
-        truths = np.median(self.samples, axis=0) if use_median_as_truth else true_theta
-        labels = [f"$\\theta_{{{i}}}$" for i in range(self.ndim)]
+        # ----------------------------
+        # Choose dimensions to plot
+        # ----------------------------
+        ndim = samples.shape[1]
+        if idx is None:
+            if ndim > max_dims:
+                idx = np.arange(max_dims)  # first max_dims by default
+            else:
+                idx = np.arange(ndim)
+        else:
+            idx = np.asarray(idx, dtype=int)
 
-        # Plot MCMC corner
+        s = samples[:, idx]
+        d = s.shape[1]
+
+        # Truths & best params on the same subspace
+        best_params_full = self.get_map_estimate()
+        best_params = best_params_full[idx] if best_params_full is not None else None
+
+        truths_full = np.median(samples, axis=0) if use_median_as_truth else true_theta
+        truths = truths_full[idx] if truths_full is not None else None
+
+        # Labels
+        labels = [f"$\\theta_{{{k}}}$" for k in idx]
+
+        # ----------------------------
+        # Robust range so outliers don't ruin scaling
+        # ----------------------------
+        qlo, qhi = quantile_range
+        ranges = []
+        for j in range(d):
+            lo, hi = np.quantile(s[:, j], [qlo, qhi])
+            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                ranges.append((lo, hi))
+            else:
+                # fallback
+                mn, mx = np.min(s[:, j]), np.max(s[:, j])
+                ranges.append((mn, mx))
+
+        # ----------------------------
+        # Figure size that scales with d
+        # Rule of thumb: ~1.2–1.6 inch per dim
+        # ----------------------------
+        inches_per_dim = 1.35
+        fig_size = max(8.0, inches_per_dim * d)
+
         fig = corner.corner(
-            self.samples,
+            s,
             labels=labels,
             truths=truths,
+            range=ranges,
+            bins=bins,
             show_titles=True,
-            title_fmt=".6f",
-            title_kwargs={"fontsize": 12},
-            color="blue",
+            title_fmt=f".{title_digits}g",
+            title_kwargs={"fontsize": 10},
+            label_kwargs={"fontsize": 11},
+            color="tab:blue",
             plot_contours=True,
             fill_contours=False,
+            smooth=1.0,
+            smooth1d=1.0,
+            # avoid huge numbers of points making the plot slow:
+            # max_n_ticks=4,  # (older corner versions)
         )
 
-        axes = np.array(fig.axes).reshape((self.ndim, self.ndim))
+        # Corner returns a figure; axes are in row-major order
+        axes = np.array(fig.axes).reshape((d, d))
 
-        for i in range(self.ndim):
+        # ----------------------------
+        # Overlay batch ellipses / points
+        # ----------------------------
+        if batch_mean is not None:
+            batch_mean = np.asarray(batch_mean)
+            bm = batch_mean[idx]
+        else:
+            bm = None
+
+        if batch_cov is not None:
+            batch_cov = np.asarray(batch_cov)
+            bc = batch_cov[np.ix_(idx, idx)]
+        else:
+            bc = None
+
+        if true_theta is not None:
+            true_theta = np.asarray(true_theta)
+            tt = true_theta[idx]
+        else:
+            tt = None
+
+        for i in range(d):
             for j in range(i):
                 ax = axes[i, j]
 
-                # Ensure batch mean and/or true_theta are visible in range
-                xlim = ax.get_xlim()
-                ylim = ax.get_ylim()
-                x_vals = [xlim[0], xlim[1]]
-                y_vals = [ylim[0], ylim[1]]
-
-                if batch_mean is not None:
-                    x_vals.append(batch_mean[j])
-                    y_vals.append(batch_mean[i])
-                if true_theta is not None:
-                    x_vals.append(true_theta[j])
-                    y_vals.append(true_theta[i])
-                if best_params is not None:
-                    x_vals.append(best_params[j])
-                    y_vals.append(best_params[i])
-
-                ax.set_xlim(min(x_vals), max(x_vals))
-                ax.set_ylim(min(y_vals), max(y_vals))
-
-                # Plot batch mean
-                if batch_mean is not None and batch_cov is not None:
-                    cov_sub = batch_cov[np.ix_([j, i], [j, i])]
-                    mean_sub = [batch_mean[j], batch_mean[i]]
-
-                    # Plot batch mean
+                # batch mean + ellipses
+                if bm is not None:
                     ax.plot(
-                        mean_sub[0],
-                        mean_sub[1],
+                        bm[j],
+                        bm[i],
                         "ro",
+                        ms=4.5,
                         label="Batch Mean" if (i == 1 and j == 0) else "",
                     )
 
-                    # Eigen-decomposition
+                if bm is not None and bc is not None and np.all(np.isfinite(bc)):
+                    cov_sub = bc[np.ix_([j, i], [j, i])]
+                    mean_sub = [bm[j], bm[i]]
+
+                    # guard against singular / negative eigenvalues
                     vals, vecs = np.linalg.eigh(cov_sub)
-                    order = vals.argsort()[::-1]
+                    vals = np.maximum(vals, 0.0)
+                    order = np.argsort(vals)[::-1]
                     vals, vecs = vals[order], vecs[:, order]
-                    angle = np.degrees(np.arctan2(*vecs[:, 0][::-1]))
 
-                    # Draw requested σ-ellipses
-                    for k in batch_sigma_levels:
-                        width, height = 2 * k * np.sqrt(vals)
+                    # if both eigenvalues are ~0, skip ellipse
+                    if np.max(vals) > 0:
+                        angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+                        for ksig in batch_sigma_levels:
+                            width, height = 2 * ksig * np.sqrt(vals)
+                            ell = Ellipse(
+                                xy=mean_sub,
+                                width=width,
+                                height=height,
+                                angle=angle,
+                                edgecolor="red",
+                                facecolor="none",
+                                lw=1.4 if ksig == 1 else 1.0,
+                                linestyle="-" if ksig == 1 else "--",
+                                alpha=0.95,
+                                label=(
+                                    rf"Batch {ksig:g}$\sigma$"
+                                    if (i == 1 and j == 0)
+                                    else ""
+                                ),
+                            )
+                            ax.add_patch(ell)
 
-                        ell = Ellipse(
-                            xy=mean_sub,
-                            width=width,
-                            height=height,
-                            angle=angle,
-                            edgecolor="red",
-                            facecolor="none",
-                            lw=1.5 if k == 1 else 1.0,
-                            linestyle="-" if k == 1 else "--",
-                            alpha=1.0 if k == 1 else 0.8,
-                            label=(
-                                rf"Batch ${int(k)}\sigma$"
-                                if (i == 1 and j == 0)
-                                else ""
-                            ),
-                        )
-                        ax.add_patch(ell)
-
-                # Plot true value
-                if true_theta is not None:
+                # true value
+                if tt is not None:
                     ax.plot(
-                        true_theta[j],
-                        true_theta[i],
+                        tt[j],
+                        tt[i],
                         "go",
+                        ms=4.5,
                         label="True Value" if (i == 1 and j == 0) else "",
                     )
 
-                # Plot MCMC best estimate (MAP)
+                # MCMC MAP
                 if best_params is not None:
                     ax.plot(
                         best_params[j],
                         best_params[i],
                         "kx",
-                        markersize=8,
-                        mew=2,
+                        ms=6,
+                        mew=1.6,
                         label="MCMC MAP" if (i == 1 and j == 0) else "",
                     )
 
@@ -607,11 +666,23 @@ class MCMCModel:
                     }
                     ax.clabel(contour_set, fmt=fmt_dict, inline=True, fontsize=8)
 
-        # Add single legend
-        axes[1, 0].legend(loc="upper right", fontsize=10)
+        # ----------------------------
+        # Global formatting tweaks
+        # ----------------------------
+        for ax in fig.get_axes():
+            ax.tick_params(labelsize=8)
+            # reduce label padding a bit
+            ax.xaxis.labelpad = 6
+            ax.yaxis.labelpad = 6
 
-        fig.set_size_inches(12, 12)
-        plt.tight_layout()
+        # Single legend in one axis (if it exists)
+        if d >= 2:
+            axes[1, 0].legend(loc="upper right", fontsize=9, frameon=True)
+
+        fig.set_size_inches(fig_size, fig_size)
+        fig.subplots_adjust(
+            wspace=0.05, hspace=0.05
+        )  # better than tight_layout for corner
         plt.show()
 
     def summary(self):
@@ -863,7 +934,7 @@ class MCMCModel:
         plt.tight_layout()
         plt.show()
 
-    def get_estimate_and_covariance(self, method="median"):
+    def get_estimate_and_covariance(self, method="map"):
         if self.samples is None:
             raise RuntimeError("Run MCMC before calling this method.")
 
@@ -871,6 +942,8 @@ class MCMCModel:
             theta_hat = np.median(self.samples, axis=0)
         elif method == "mean":
             theta_hat = np.mean(self.samples, axis=0)
+        elif method == "map":
+            theta_hat = self.get_map_estimate()
         else:
             raise ValueError("Method must be 'median' or 'mean'.")
 

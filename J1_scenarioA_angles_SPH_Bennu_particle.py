@@ -42,11 +42,11 @@ Units:
 - km, km/s, seconds (ET)
 """
 
-# TODO: missing stage 1
-# TODO: check all the values
-# TODO: check all the math and workflow
-
+# TODO: check all the math
 # TODO: corner plots is horrible now
+# TODO: particle trajectory straight line?
+# TODO: fix plots, add ground truth, labels
+# TODO: estimate wrong, covariance wrong
 
 import os
 import sys
@@ -267,56 +267,46 @@ def generate_opnav_measurements_from_sc(x_part, sc_state, sigma_ra, sigma_dec, r
 
 def radec_and_partials_from_los(los):
     """
-    los: (N,3) vector from SC to particle (in inertial)
+    los: (N,3) from SC to particle
     returns:
-        ra, dec: (N,)
-        d_ra_d_r: (N,3) partial ra wrt particle position r (NOT los)
-        d_dec_d_r:(N,3) partial dec wrt particle position r
-    Notes:
-    ra = atan2(y,x)
-    dec = asin(z / rho)
-    where rho = ||los||.
-    Since los = r_part - r_sc, d/d(r_part) == d/d(los).
+      ra, dec: (N,)
+      d_ra_d_r, d_dec_d_r: (N,3) wrt particle position (same as wrt los)
     """
     x = los[:, 0]
     y = los[:, 1]
     z = los[:, 2]
-    rho2 = x * x + y * y + z * z
-    rho = np.sqrt(rho2)
 
-    # RA
-    ra = np.mod(np.arctan2(y, x), 2 * np.pi)
-    denom_ra = x * x + y * y
-    # guard against degenerate LOS along z
-    denom_ra = np.maximum(denom_ra, 1e-30)
+    rxy2 = x * x + y * y
+    rxy = np.sqrt(np.maximum(rxy2, 1e-30))
+    rho2 = rxy2 + z * z
+    rho = np.sqrt(np.maximum(rho2, 1e-30))
 
+    # RA: use raw atan2, NO modulo
+    ra = np.arctan2(y, x)  # (-pi, pi]
+    denom_ra = np.maximum(rxy2, 1e-30)
     d_ra_dx = -y / denom_ra
     d_ra_dy = x / denom_ra
     d_ra_dz = 0.0 * z
 
-    # DEC: dec = asin(z/rho)
-    u = z / rho
-    u = np.clip(u, -1.0, 1.0)
-    dec = np.arcsin(u)
+    # -DEC: use atan2(z, rxy)
+    dec = np.arctan2(z, rxy)
 
-    # ddec/dlos = (1/sqrt(1-u^2)) * d(z/rho)/dlos
-    fac = 1.0 / np.maximum(np.sqrt(1.0 - u * u), 1e-30)
+    # ddec/dx, ddec/dy, ddec/dz
+    # dec = atan2(z, rxy)
+    # ddec/dz = rxy / (rxy^2 + z^2) = rxy / rho^2
+    # ddec/drxy = -z / (rxy^2 + z^2) = -z / rho^2
+    # drxy/dx = x/rxy, drxy/dy = y/rxy
+    denom_dec = np.maximum(rho2, 1e-30)
 
-    # d(z/rho)/dx = -z * x / rho^3
-    # d(z/rho)/dy = -z * y / rho^3
-    # d(z/rho)/dz = (rho^2 - z^2) / rho^3 = (x^2 + y^2) / rho^3
-    rho3 = np.maximum(rho2 * rho, 1e-30)
+    d_dec_dz = rxy / denom_dec
+    d_dec_drxy = -z / denom_dec
 
-    d_u_dx = -z * x / rho3
-    d_u_dy = -z * y / rho3
-    d_u_dz = (x * x + y * y) / rho3
-
-    d_dec_dx = fac * d_u_dx
-    d_dec_dy = fac * d_u_dy
-    d_dec_dz = fac * d_u_dz
+    d_dec_dx = d_dec_drxy * (x / rxy)
+    d_dec_dy = d_dec_drxy * (y / rxy)
 
     d_ra_d_r = np.stack([d_ra_dx, d_ra_dy, d_ra_dz], axis=1)
     d_dec_d_r = np.stack([d_dec_dx, d_dec_dy, d_dec_dz], axis=1)
+
     return ra, dec, d_ra_d_r, d_dec_d_r
 
 
@@ -495,123 +485,128 @@ def add_trimesh_to_ax(
     ax.add_collection3d(coll)
 
 
-def normalize_mesh_scale(mesh, target_radius_km, mode="rms"):
-    """
-    Optional: scale the mesh so its "radius" matches target_radius_km.
-    mode:
-      - "max": use max vertex norm
-      - "rms": use RMS vertex norm (usually smoother)
-    """
-    verts = mesh.vertices
-    r = np.linalg.norm(verts, axis=1)
-    if mode == "max":
-        scale = target_radius_km / np.max(r)
-    else:
-        scale = target_radius_km / np.sqrt(np.mean(r**2))
-    mesh = mesh.copy()
-    mesh.apply_scale(scale)
-    return mesh, scale
-
-
-def plot_bennu_scene(
+def plot_bennu_scene_body_fixed(
     bennu_mesh,
     sc_state_full,
     x_true_full,
     x_map,
-    ets_full=None,
+    tau_full,
+    tau_map,
+    alpha,
+    delta,
+    omega,
     vis_mask=None,
-    title="OSIRIS-REx + Particle around Bennu (mesh)",
+    title="OSIRIS-REx + Particle around Bennu (BODY-FIXED)",
     mesh_target_radius_km=None,
     mesh_scale_mode="rms",
     downsample=3,
 ):
     """
-    bennu_mesh: trimesh.Trimesh in Bennu body-fixed coordinates, centered at origin.
-               For visualization, we treat it as "static" in Bennu-centered inertial.
-               (If you want time-varying attitude of the mesh, we can animate, but this is already a huge improvement.)
+    BODY-FIXED visualization.
+
+    bennu_mesh: trimesh.Trimesh in Bennu body-fixed coordinates, centered at origin
     sc_state_full: (N,6) inertial
     x_true_full:   (N,12 or 6) inertial
-    x_map:         (N_visible,12 or 6) inertial (MAP on visible arc)
-    vis_mask:      (N,) bool; if provided, show visible vs occulted points
+    x_map:         (N_vis,12 or 6) inertial
+    tau_full:      (N,) seconds since start for sc_state_full / x_true_full
+    tau_map:       (N_vis,) seconds since start for x_map
     """
 
-    # Optional mesh scaling
-    if mesh_target_radius_km is not None:
-        bennu_mesh_plot, scale = normalize_mesh_scale(
-            bennu_mesh, mesh_target_radius_km, mode=mesh_scale_mode
-        )
-        print(
-            f"[Plot] Mesh scaled by factor {scale:.6g} to match radius ~{mesh_target_radius_km} km ({mesh_scale_mode})."
-        )
-    else:
-        bennu_mesh_plot = bennu_mesh
-
-    # Downsample trajectories for rendering
+    # ------------------------------------------------------------
+    # Downsample
+    # ------------------------------------------------------------
     sl = slice(None, None, max(1, int(downsample)))
-    sc = sc_state_full[sl, :3]
-    pt = x_true_full[sl, :3]
 
+    sc_i = sc_state_full[sl, :3]
+    pt_i = x_true_full[sl, :3]
+    tau_i = tau_full[sl]
+
+    # ------------------------------------------------------------
+    # Rotate INERTIAL -> BODY-FIXED
+    # ------------------------------------------------------------
+    sc_b = np.zeros_like(sc_i)
+    pt_b = np.zeros_like(pt_i)
+
+    for k, tk in enumerate(tau_i):
+        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, tk)
+        sc_b[k] = R_ib @ sc_i[k]
+        pt_b[k] = R_ib @ pt_i[k]
+
+    # MAP arc (already visible-only, separate tau grid)
+    pt_map_b = np.zeros_like(x_map[:, :3])
+    for k, tk in enumerate(tau_map):
+        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, tk)
+        pt_map_b[k] = R_ib @ x_map[k, :3]
+
+    # ------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Mesh
-    add_trimesh_to_ax(ax, bennu_mesh_plot, alpha=0.35, edge_alpha=0.10, max_faces=25000)
+    # Bennu mesh (already body-fixed)
+    add_trimesh_to_ax(ax, bennu_mesh, alpha=0.35, edge_alpha=0.10, max_faces=25000)
 
-    # Spacecraft (full arc)
-    ax.plot(sc[:, 0], sc[:, 1], sc[:, 2], linewidth=2.0, label="SC (SPICE truth)")
+    # Spacecraft
+    ax.plot(sc_b[:, 0], sc_b[:, 1], sc_b[:, 2], linewidth=2.0, label="SC (body-fixed)")
 
     # Particle truth
-    ax.plot(pt[:, 0], pt[:, 1], pt[:, 2], linewidth=2.0, label="Particle truth")
+    ax.plot(pt_b[:, 0], pt_b[:, 1], pt_b[:, 2], linewidth=2.0, label="Particle truth")
 
-    # Particle MAP (only visible arc typically)
+    # Particle MAP
     ax.plot(
-        x_map[:, 0],
-        x_map[:, 1],
-        x_map[:, 2],
+        pt_map_b[:, 0],
+        pt_map_b[:, 1],
+        pt_map_b[:, 2],
         linewidth=2.5,
         label="Particle MAP (visible arc)",
     )
 
-    # Optional: show visible vs occulted points on spacecraft track (makes geometry readable)
-    if vis_mask is not None and ets_full is not None:
+    # ------------------------------------------------------------
+    # Optional: visible / occulted SC points
+    # ------------------------------------------------------------
+    if vis_mask is not None:
         vis_mask_ds = vis_mask[sl]
-        sc_vis = sc[vis_mask_ds]
-        sc_occ = sc[~vis_mask_ds]
-        if sc_vis.shape[0] > 0:
+        sc_vis = sc_b[vis_mask_ds]
+        sc_occ = sc_b[~vis_mask_ds]
+
+        if sc_vis.size:
             ax.scatter(
                 sc_vis[:, 0],
                 sc_vis[:, 1],
                 sc_vis[:, 2],
                 s=18,
                 marker="o",
-                label="SC epochs used (visible)",
+                label="SC visible epochs",
             )
-        if sc_occ.shape[0] > 0:
+        if sc_occ.size:
             ax.scatter(
                 sc_occ[:, 0],
                 sc_occ[:, 1],
                 sc_occ[:, 2],
                 s=14,
                 marker="x",
-                label="SC epochs dropped (occulted)",
+                label="SC occulted epochs",
             )
 
-    ax.set_xlabel("X [km]")
-    ax.set_ylabel("Y [km]")
-    ax.set_zlabel("Z [km]")
+    # ------------------------------------------------------------
+    # Axes / view
+    # ------------------------------------------------------------
+    ax.set_xlabel("X_b [km]")
+    ax.set_ylabel("Y_b [km]")
+    ax.set_zlabel("Z_b [km]")
     ax.set_title(title)
 
-    # Better view
     ax.view_init(elev=25, azim=35)
 
-    # Auto limits around trajectories + mesh
-    all_xyz = np.vstack([sc_state_full[:, :3], x_true_full[:, :3], x_map[:, :3]])
+    all_xyz = np.vstack([sc_b, pt_b, pt_map_b])
     pad = 0.2 * np.max(np.linalg.norm(all_xyz, axis=1))
+
     ax.set_xlim(np.min(all_xyz[:, 0]) - pad, np.max(all_xyz[:, 0]) + pad)
     ax.set_ylim(np.min(all_xyz[:, 1]) - pad, np.max(all_xyz[:, 1]) + pad)
     ax.set_zlim(np.min(all_xyz[:, 2]) - pad, np.max(all_xyz[:, 2]) + pad)
-    set_axes_equal_3d(ax)
 
+    set_axes_equal_3d(ax)
     ax.legend(loc="upper right")
     plt.tight_layout()
     plt.show()
@@ -635,7 +630,7 @@ if __name__ == "__main__":
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
     utc1 = "2019-03-01T02:00:00"
-    n_obs = 120
+    n_obs = 50
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -662,8 +657,13 @@ if __name__ == "__main__":
     )
 
     # Measurement noise
-    sigma_ra = np.deg2rad(0.005)
-    sigma_dec = np.deg2rad(0.005)
+    sigma_pix = 0.1  # pixel noise (1-sigma)
+    fov_deg = 44.0  # full FOV [deg]  (e.g. NavCam ~44 deg)
+    n_pix = 2592  # pixels across FOV (e.g. NavCam)
+    fov_rad = np.deg2rad(fov_deg)
+    sigma_angle = sigma_pix * (fov_rad / n_pix)  # radians
+    sigma_ra = sigma_angle
+    sigma_dec = sigma_angle
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
@@ -826,20 +826,25 @@ if __name__ == "__main__":
         ]
     )
     x0_ref = x0_true - ref_dev
+    print("\n[Reference] deviation from truth:", ref_dev)
 
     # --------------------------
     # Priors on 12D delta0
     # --------------------------
-    sig_prior_r = np.abs(x0_true[0:3] * prior_pct_r)
-    sig_prior_v = np.abs(x0_true[3:6] * prior_pct_v)
+    r_scale = np.linalg.norm(x0_true[0:3])
+    v_scale = np.linalg.norm(x0_true[3:6])
+    sig_prior_r = prior_pct_r * r_scale * np.ones(3)
+    sig_prior_v = prior_pct_v * v_scale * np.ones(3)
     sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
     sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
 
-    prior_sigma = np.hstack([sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c])
+    prior_sigma = prior_looseness * np.hstack(
+        [sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c]
+    )
 
     priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
 
-    print("[Prior] sigmas:", prior_sigma)
+    print("\n[Prior] sigmas:", prior_sigma)
 
     # --------------------------
     # Stage 1: full nonlinear batch (NO STTs) on visible arc (tau grid)
@@ -949,12 +954,15 @@ if __name__ == "__main__":
             finite = np.isfinite(prior_sig)
             if np.any(finite):
                 Wp = np.diag(1.0 / prior_sig[finite])
-                rp = (
-                    prior_mean[finite] / prior_sig[finite]
-                )  # since prior on delta about current ref
-                # append
                 Jp = np.zeros((Wp.shape[0], n_upd))
                 Jp[:, finite] = Wp
+
+                # IMPORTANT: anchor to initial reference using the accumulated delta
+                rp = (
+                    -(delta_total[update_idx][finite] - prior_mean[finite])
+                    / prior_sig[finite]
+                )
+
                 rows.append(Jp)
                 rhs.append(rp)
 
@@ -975,15 +983,31 @@ if __name__ == "__main__":
 
             if verbose:
                 print(
-                    f"[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}"
+                    f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}"
                 )
 
             if step_norm < tol:
                 break
 
-        return x0_ref, delta_total
+        # Compute covariance at convergence
+        # Cov = (A^T A)^{-1} for the update variables
+        # This is the covariance of the delta we solved for
+        try:
+            AtA = A.T @ A
+            cov_upd = np.linalg.inv(AtA)
+        except np.linalg.LinAlgError:
+            print("[WARNING] Covariance matrix is singular, using pseudoinverse")
+            cov_upd = np.linalg.pinv(A.T @ A)
 
-    x0_ref1, delta_hat1 = solve_stage1_gn_with_stm(
+        # Embed into full 12x12 covariance (infinite variance for non-updated params)
+        cov_full = np.full((12, 12), np.inf)
+        for i, idx_i in enumerate(update_idx):
+            for j, idx_j in enumerate(update_idx):
+                cov_full[idx_i, idx_j] = cov_upd[i, j]
+
+        return x0_ref, delta_total, cov_full
+
+    x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,
         x0_ref=x0_ref,
         tau=tau,  # seconds since start
@@ -998,6 +1022,28 @@ if __name__ == "__main__":
         atol=1e-10,
         verbose=True,
     )
+
+    # Consistency of bookkeeping
+    err_ref_update = np.linalg.norm((x0_ref + delta_hat1) - x0_ref1)
+    print("\n[Check] ||(x0_ref + delta_hat1) - x0_ref1|| =", err_ref_update)
+
+    # Truth deltas
+    true_delta_ref = x0_true - x0_ref
+    true_delta_ref1 = x0_true - x0_ref1
+
+    print("[Check] true_delta about ref  (x0_true-x0_ref):", true_delta_ref)
+    print("[Check] true_delta about ref1 (x0_true-x0_ref1):", true_delta_ref1)
+
+    # Should be: true_delta_ref1 = true_delta_ref - delta_hat1
+    err_truth_relation = np.linalg.norm(true_delta_ref1 - (true_delta_ref - delta_hat1))
+    print(
+        "[Check] ||true_delta_ref1 - (true_delta_ref - delta_hat1)|| =",
+        err_truth_relation,
+    )
+
+    print("\n[Stage 1] Covariance diagonal (stdev):")
+    print(np.sqrt(np.diag(cov1)))
+    print("[Stage 1] delta_hat1:\n", delta_hat1)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1 (propagate ref1 + STTs on tau grid)
@@ -1030,30 +1076,26 @@ if __name__ == "__main__":
         return res / w
 
     # --------------------------
-    # Stage 2: STT-based MAP
+    # Chi2 and Prior at ref1
     # --------------------------
-    print("\n[Stage 2] STT-based MAP...")
-    batch_res, batch_cov = compute_STT_batch_solution(
-        residuals_func=residuals_normalized,
-        x0=np.zeros(12),
-        priors=priors,
-        max_nfev=20000,
+    chi2_at_ref = np.sum(residuals_normalized(np.zeros(12)) ** 2)
+    dof = len(y_obs) - 12
+    print(
+        f"\n[Stage 2] At ref1 (delta=0): chi2_red = {chi2_at_ref/dof:.3f}  (chi2={chi2_at_ref:.2f}, dof={dof})"
     )
-    delta_map = batch_res.x
 
-    chi2 = np.sum(residuals_normalized(delta_map) ** 2)
-    dof = len(y_obs) - len(delta_map)
-    print(f"\n[Stage 2] chi2_red = {chi2/dof:.3f}  (chi2={chi2:.2f}, dof={dof})")
-    print("[Stage 2] delta_map:\n", delta_map)
+    # After stage-1:
+    delta_shift = x0_ref1 - x0_ref  # should equal delta_hat1
+    priors_ref1 = [norm(loc=-ds, scale=s) for ds, s in zip(delta_shift, prior_sigma)]
 
     # --------------------------
-    # MCMC
+    # MCMC (no Stage 2 batch optimization)
     # --------------------------
-    print("\n[MCMC] Running...")
+    print("\n[MCMC] Running (starting from zeros about ref1)...")
     model = MCMCModel(
         residuals_func=residuals_normalized,
         initial_params=np.zeros(12),  # delta about ref1
-        param_priors=priors,
+        param_priors=priors_ref1,
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
@@ -1068,8 +1110,18 @@ if __name__ == "__main__":
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
 
+    # Compute chi2 at MCMC solution
+    chi2_mcmc = np.sum(residuals_normalized(theta_hat) ** 2)
+    print(
+        f"\n[MCMC] At theta_hat: chi2_red = {chi2_mcmc/dof:.3f}  (chi2={chi2_mcmc:.2f}, dof={dof})"
+    )
+    print("[MCMC] theta_hat:\n", theta_hat)
+    print("\n[MCMC] Covariance diagonal (stdev):")
+    print(np.sqrt(np.diag(P_mcmc)))
+
     # Truth delta about ref1
     true_delta = x0_true - x0_ref1
+    print("\n[Truth] true_delta about ref1:\n", true_delta)
 
     # --------------------------
     # Diagnostics
@@ -1085,16 +1137,20 @@ if __name__ == "__main__":
     model.plot_autocorrelation()
 
     # --------------------------
-    # Plot scene
+    # Plot scene (using MCMC mean estimate)
     # --------------------------
-    _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, delta_map)
+    _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, theta_hat)
 
-    plot_bennu_scene(
+    plot_bennu_scene_body_fixed(
         bennu_mesh=bennu_mesh,
         sc_state_full=sc_state_full,
         x_true_full=x_true_full,
         x_map=x_map,
-        ets_full=ets_full,
+        tau_full=tau_full,
+        tau_map=tau,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
         vis_mask=vis_mask,
         mesh_target_radius_km=R_bennu,
         mesh_scale_mode="rms",
@@ -1102,7 +1158,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------
-    # Plot visibility mask (still labeled in ET-time since start, so tau is fine here too)
+    # Plot visibility mask
     # --------------------------
     t_hr = tau_full / 3600.0
     plt.figure(figsize=(10, 2.6))
@@ -1116,7 +1172,7 @@ if __name__ == "__main__":
     plt.show()
 
     # --------------------------
-    # Corner plot
+    # Corner plot (MCMC only, no batch comparison)
     # --------------------------
     try:
         labels = [
@@ -1134,8 +1190,10 @@ if __name__ == "__main__":
             r"$\delta S_{22}$",
         ]
         model.plot_corner_with_batch(
-            batch_mean=delta_map,
-            batch_cov=batch_cov,
+            batch_mean=np.zeros(
+                12
+            ),  # Stage 1 converged to ref1, so delta about ref1 is zero
+            batch_cov=cov1,  # Stage 1 covariance
             use_median_as_truth=False,
             true_theta=true_delta,
         )
