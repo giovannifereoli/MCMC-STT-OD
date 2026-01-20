@@ -563,7 +563,7 @@ def plot_bennu_scene(
 
 
 # ============================================================
-# MAIN SCRIPT
+# MAIN SCRIPT (corrected: uses tau = ET-ET0 for dynamics)
 # ============================================================
 
 if __name__ == "__main__":
@@ -586,14 +586,14 @@ if __name__ == "__main__":
     R_bennu = 0.290  # km
     R_ref = R_bennu
 
-    # Bennu spin + pole truth (use your preferred truth values)
-    alpha_true = np.deg2rad(85.65)  # rad (EDIT)
-    delta_true = np.deg2rad(-60.17)  # rad (EDIT)
-    spin_period = 4.296057 * 3600.0  # s (EDIT)
+    # Bennu spin + pole truth
+    alpha_true = np.deg2rad(85.65)  # rad
+    delta_true = np.deg2rad(-60.17)  # rad
+    spin_period = 4.296057 * 3600.0  # s
     omega_true = 2 * np.pi / spin_period  # rad/s
 
     # Dynamics / STT order
-    stt_order = 1  # can be 2,3,4,... (careful: symbolic cost grows fast)
+    stt_order = 1
 
     # Truth gravity params
     mu_true = 4.892e-9
@@ -634,25 +634,41 @@ if __name__ == "__main__":
     spherical_spread = 1e-2
 
     # --------------------------
-    # Load SPICE & spacecraft truth
+    # Load SPICE & spacecraft truth (SPICE remains in ET)
     # --------------------------
     _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
     et1 = spice.utc2et(utc1)
-    ets_full = np.linspace(et0, et1, n_obs)
+    ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
+    tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
 
     sc_state_full = np.zeros((n_obs, 6))
     for i, et in enumerate(ets_full):
-        st, _ = spice.spkezr(SC_NAME, float(et), FRAME_I, "NONE", CENTER)
+        st, _ = spice.spkezr(SC_NAME, float(et), FRAME_I, ABCORR, CENTER)
         sc_state_full[i, :] = np.array(st, dtype=float)
 
     # --------------------------
-    # Particle detach point on Bennu surface (use mesh point like your old script)
+    # Particle detach point on Bennu surface
     # --------------------------
     mesh_path = "ObjFiles/BennuRadar.obj"  # <-- EDIT if needed
     bennu_mesh = trimesh.load(mesh_path, force="mesh")
-    vertices = bennu_mesh.vertices
+    vertices = np.asarray(bennu_mesh.vertices)
+
+    # ---- mesh unit sanity check ----
+    rverts = np.linalg.norm(vertices, axis=1)
+    print(
+        "[Mesh] vertex radius stats (raw): min/mean/max =",
+        rverts.min(),
+        rverts.mean(),
+        rverts.max(),
+    )
+    # If mesh looks like meters (~300), scale to km:
+    if rverts.max() > 10.0:  # crude but effective for Bennu
+        print("[Mesh] Detected likely meters-scale OBJ; scaling mesh by 1e-3 to km.")
+        bennu_mesh = bennu_mesh.copy()
+        bennu_mesh.apply_scale(1e-3)
+        vertices = np.asarray(bennu_mesh.vertices)
 
     lat_desired = np.deg2rad(45.0)
     lon_desired = np.deg2rad(80.0)
@@ -665,22 +681,21 @@ if __name__ == "__main__":
     )
     dists = np.linalg.norm(vertices - pos_target, axis=1)
     closest_idx = np.argmin(dists)
-    pos_detach_bf = vertices[closest_idx]  # interpret as body-fixed coords at t0
+    pos_detach_bf = vertices[closest_idx]  # body-fixed at tau=0
 
     # surface normal (mesh)
     normal_bf = bennu_mesh.vertex_normals[closest_idx]
     normal_bf = normal_bf / np.linalg.norm(normal_bf)
 
-    # Convert detach position to inertial at start time using your rotation model:
+    # Convert detach position to inertial at start time using rotation at tau=0
     R_ib0 = make_bennu_rotation_matrix(
         alpha_true, delta_true, omega_true, t=0.0, w0=0.0
     )
-    R_bi0 = R_ib0.T
-    r0_true = R_bi0 @ pos_detach_bf
+    r0_true = R_ib0.T @ pos_detach_bf  # inertial
 
     # Outward initial velocity (random hemisphere w.r.t. r0_true)
     rng = np.random.default_rng(7)
-    vmag = 2e-5
+    vmag = 2e-4  # km/s
     u = rng.normal(size=3)
     u /= np.linalg.norm(u)
     if np.dot(u, r0_true) < 0:
@@ -691,7 +706,7 @@ if __name__ == "__main__":
     x0_true = np.hstack([r0_true, v0_true, params_true])
 
     # --------------------------
-    # Build STT functions + STTPropagator (YOUR propagator)
+    # Build STT functions + propagator (must accept t argument)
     # --------------------------
     f_func, A_func, B_funcs = generate_stt_functions_bennu_deg2(
         order=stt_order,
@@ -707,11 +722,11 @@ if __name__ == "__main__":
     )
 
     # --------------------------
-    # Propagate particle truth (numeric via your propagator)
+    # Propagate particle truth (DYNAMICS on tau_full)
     # --------------------------
     print("\nPropagating particle truth...")
     sol_true, stts_true = propagator.propagate(
-        x0_true, ets_full, rtol=1e-8, atol=1e-10, method="LSODA"
+        x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
     x_true_full = sol_true.y[:12, :].T  # (N,12)
 
@@ -720,14 +735,15 @@ if __name__ == "__main__":
     # --------------------------
     vis_mask = occultation_mask(sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu)
 
-    ets = ets_full[vis_mask]
+    ets = ets_full[vis_mask]  # ETs for labeling / plots
+    tau = tau_full[vis_mask]  # taus for propagation / residuals
     sc_state = sc_state_full[vis_mask, :]
     x_true = x_true_full[vis_mask, :]
 
     print(f"\nVisibility: {np.sum(vis_mask)}/{len(vis_mask)} epochs kept.")
 
     # --------------------------
-    # Generate noisy RA/DEC measurements
+    # Generate noisy RA/DEC measurements (uses SC state and particle truth at same indices)
     # --------------------------
     rng_meas = np.random.default_rng(123)
     y_obs = generate_opnav_measurements_from_sc(
@@ -739,9 +755,9 @@ if __name__ == "__main__":
     )
 
     # --------------------------
-    # Reference initial condition (perturb truth) and propagate reference + STTs
+    # Reference initial condition (perturb truth)
     # --------------------------
-    print("\nPropagating reference trajectory (12D) + STTs...")
+    print("\nBuilding reference initial state (12D)...")
 
     ref_dev = np.hstack(
         [
@@ -753,18 +769,108 @@ if __name__ == "__main__":
     )
     x0_ref = x0_true - ref_dev
 
-    # propagate reference about the visible arc
-    sol_ref, stts_ref = propagator.propagate(
-        x0=x0_ref, t_eval=ets, rtol=1e-8, atol=1e-10, method="LSODA"
+    # --------------------------
+    # Priors on 12D delta0 (about whichever reference you're optimizing around)
+    # --------------------------
+    prior_sigma = prior_looseness * np.array(
+        [
+            sig_r,
+            sig_r,
+            sig_r,
+            sig_v,
+            sig_v,
+            sig_v,
+            sig_mu,
+            sig_c20,
+            sig_c21s21,
+            sig_c21s21,
+            sig_c22s22,
+            sig_c22s22,
+        ],
+        dtype=float,
     )
-    x_ref = sol_ref.y[:12, :].T
+    priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
 
     # --------------------------
-    # Residual function (STT-based): delta(t) produced by propagate_deviation
+    # Stage 1: full nonlinear batch (NO STTs) on visible arc (tau grid)
+    # --------------------------
+    print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
+
+    def solve_batch_nonlinear_full(x0_ref, delta0_init, priors=None, max_nfev=20000):
+        if priors is None:
+            prior_mean = np.zeros_like(delta0_init)
+            prior_sigma_loc = np.full_like(delta0_init, np.inf)
+        else:
+            prior_mean = np.array([p.mean() for p in priors], dtype=float)
+            prior_sigma_loc = np.array([p.std() for p in priors], dtype=float)
+
+        def fun(delta):
+            # propagate full nonlinear, about x0_ref + delta, on tau grid
+            sol, _ = propagator.propagate(
+                x0=x0_ref + delta,
+                t_eval=tau,
+                rtol=1e-8,
+                atol=1e-10,
+                method="LSODA",
+            )
+            x_est = sol.y[:12, :].T
+
+            los = x_est[:, :3] - sc_state[:, :3]
+            ra_model, dec_model = radec_from_los(los)
+
+            y_model = np.empty_like(y_obs)
+            y_model[0::2] = ra_model
+            y_model[1::2] = dec_model
+
+            r = np.empty_like(y_obs)
+            r[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+            r[1::2] = y_obs[1::2] - y_model[1::2]
+
+            w = np.empty_like(y_obs)
+            w[0::2] = sigma_ra
+            w[1::2] = sigma_dec
+
+            r_meas = r / w
+            r_prior = (delta - prior_mean) / prior_sigma_loc
+            return np.hstack([r_meas, r_prior])
+
+        result = least_squares(
+            fun=fun,
+            x0=delta0_init,
+            method="trf",
+            jac="2-point",
+            max_nfev=max_nfev,
+            ftol=1e-12,
+            xtol=1e-12,
+            gtol=1e-12,
+            verbose=2,
+        )
+        J = result.jac
+        cov = np.linalg.inv(J.T @ J)
+        return result, cov
+
+    batch1, cov1 = solve_batch_nonlinear_full(
+        x0_ref=x0_ref,
+        delta0_init=np.zeros(12),
+        priors=priors,
+        max_nfev=20000,
+    )
+    delta_hat1 = batch1.x
+    x0_ref1 = x0_ref + delta_hat1
+    print("[Stage 1] delta_hat1 =", delta_hat1)
+
+    # --------------------------
+    # Stage 2: relinearize STTs about ref1 (propagate ref1 + STTs on tau grid)
+    # --------------------------
+    print("\n[Stage 2] Propagating ref1 and computing STTs about ref1...")
+    sol_ref, stts_ref = propagator.propagate(
+        x0=x0_ref1, t_eval=tau, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+
+    # --------------------------
+    # Residual function (STT-based)
     # --------------------------
     def residuals_normalized(delta0):
-        # Uses your STTPropagator deviation propagation
-        # (must support 12D)
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
 
         los = x_est[:, :3] - sc_state[:, :3]
@@ -784,32 +890,9 @@ if __name__ == "__main__":
         return res / w
 
     # --------------------------
-    # Priors on 12D delta0
+    # Stage 2: STT-based MAP
     # --------------------------
-    prior_sigma = prior_looseness * np.array(
-        [
-            sig_r,
-            sig_r,
-            sig_r,
-            sig_v,
-            sig_v,
-            sig_v,
-            sig_mu,
-            sig_c20,
-            sig_c21s21,
-            sig_c21s21,
-            sig_c22s22,
-            sig_c22s22,
-        ],
-        dtype=float,
-    )
-
-    priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
-
-    # --------------------------
-    # Stage-2 STM/STT-based MAP (fast)
-    # --------------------------
-    print("\n[Batch] STT-based MAP...")
+    print("\n[Stage 2] STT-based MAP...")
     batch_res, batch_cov = compute_STT_batch_solution(
         residuals_func=residuals_normalized,
         x0=np.zeros(12),
@@ -820,16 +903,16 @@ if __name__ == "__main__":
 
     chi2 = np.sum(residuals_normalized(delta_map) ** 2)
     dof = len(y_obs) - len(delta_map)
-    print(f"\n[Batch] chi2_red = {chi2/dof:.3f}  (chi2={chi2:.2f}, dof={dof})")
-    print("[Batch] delta_map:\n", delta_map)
+    print(f"\n[Stage 2] chi2_red = {chi2/dof:.3f}  (chi2={chi2:.2f}, dof={dof})")
+    print("[Stage 2] delta_map:\n", delta_map)
 
     # --------------------------
-    # MCMC (your existing MCMCModel)
+    # MCMC
     # --------------------------
     print("\n[MCMC] Running...")
     model = MCMCModel(
         residuals_func=residuals_normalized,
-        initial_params=np.zeros(12),
+        initial_params=np.zeros(12),  # delta about ref1
         param_priors=priors,
         observed_data=y_obs,
     )
@@ -846,24 +929,24 @@ if __name__ == "__main__":
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
 
-    # Truth delta about reference
-    true_delta = x0_true - x0_ref
+    # Truth delta about ref1
+    true_delta = x0_true - x0_ref1
 
     # --------------------------
     # Diagnostics
     # --------------------------
-
     model.plot_convergence()
-    model.plot_postfit_residuals_time(t_obs_used=ets, opnav_data=True)
+    model.plot_postfit_residuals_time(
+        t_obs_used=tau, opnav_data=True
+    )  # tau is the dynamics time
     model.plot_log_likelihood()
-
     model.summary()
     model.print_regression_diagnostics()
     model.gelman_rubin_diagnostic()
     model.plot_autocorrelation()
 
     # --------------------------
-    # Plot: Bennu sphere + SC truth + particle truth + particle MAP
+    # Plot scene
     # --------------------------
     _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, delta_map)
 
@@ -874,15 +957,15 @@ if __name__ == "__main__":
         x_map=x_map,
         ets_full=ets_full,
         vis_mask=vis_mask,
-        mesh_target_radius_km=R_bennu,  # optional but usually helpful
+        mesh_target_radius_km=R_bennu,
         mesh_scale_mode="rms",
         downsample=2,
     )
 
     # --------------------------
-    # Plot visibility mask
+    # Plot visibility mask (still labeled in ET-time since start, so tau is fine here too)
     # --------------------------
-    t_hr = (ets_full - ets_full[0]) / 3600.0
+    t_hr = tau_full / 3600.0
     plt.figure(figsize=(10, 2.6))
     plt.plot(t_hr, vis_mask.astype(int), "o-")
     plt.ylim(-0.1, 1.1)
@@ -894,7 +977,7 @@ if __name__ == "__main__":
     plt.show()
 
     # --------------------------
-    # Corner plot using your model samples (if your MCMCModel exposes `samples`)
+    # Corner plot
     # --------------------------
     try:
         labels = [
@@ -918,10 +1001,6 @@ if __name__ == "__main__":
             true_theta=true_delta,
         )
     except Exception as e:
-        print(
-            "\n[Corner] Skipped (your MCMCModel may not have plot_corner_with_batch here).",
-            e,
-        )
+        print("\n[Corner] Skipped.", e)
 
-    # Clean up SPICE
     spice.kclear()
