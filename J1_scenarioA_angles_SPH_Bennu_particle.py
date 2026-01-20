@@ -651,12 +651,12 @@ if __name__ == "__main__":
     stt_order = 1
 
     # Truth gravity params
-    mu_true = 4.892e-9
-    C20_true = -2.0e-5
-    C21_true = 3.0e-7
-    S21_true = -2.0e-7
-    C22_true = 1.0e-7
-    S22_true = 2.0e-7
+    mu_true = 4.89044967462e-09
+    C20_true = 6.09086686e-02
+    C21_true = -2.81206646e-14
+    S21_true = 3.87423500e-15
+    C22_true = 1.97844553e-03
+    S22_true = -7.06499291e-04
     params_true = np.array(
         [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
     )
@@ -665,28 +665,26 @@ if __name__ == "__main__":
     sigma_ra = np.deg2rad(0.005)
     sigma_dec = np.deg2rad(0.005)
 
-    # Reference perturbation scales (for x0_ref)
+    # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
-    ref_sigma_r = 0.05  # km
-    ref_sigma_v = 2e-5  # km/s
-    ref_sigma_mu = 5e-10
-    ref_sigma_c = 5e-6
+    ref_pct_r = 0.05  # 5% of each position component
+    ref_pct_v = 0.05  # 5% of each velocity component
+    ref_pct_mu = 0.10  # 10% of mu
+    ref_pct_c = 0.50  # 50% of each C/S coefficient
 
-    # Prior sigmas (on deltas about reference)
-    sig_r = 0.20
-    sig_v = 5e-4
-    sig_mu = 2e-9
-    sig_c20 = 2e-5
-    sig_c21s21 = 5e-6
-    sig_c22s22 = 5e-6
-    prior_looseness = 1e1
+    # priors (on deltas about the reference) are these fractions of |truth|
+    prior_pct_r = 0.20  # 20% of each position component
+    prior_pct_v = 0.50  # 50% of each velocity component
+    prior_pct_mu = 0.50  # 50% of mu
+    prior_pct_c = 1.00  # 100% of each C/S coefficient
+    prior_looseness = 1
 
     # MCMC settings
     n_walkers = 128
     n_samples = 2000
     burn_in = 300
     thin = 10
-    spherical_spread = 1e-2
+    spherical_spread = 1e-1
 
     # --------------------------
     # Load SPICE & spacecraft truth (SPICE remains in ET)
@@ -814,37 +812,34 @@ if __name__ == "__main__":
     # --------------------------
     print("\nBuilding reference initial state (12D)...")
 
+    sig_ref_r = np.abs(x0_true[0:3] * ref_pct_r)
+    sig_ref_v = np.abs(x0_true[3:6] * ref_pct_v)
+    sig_ref_mu = np.abs(x0_true[6:7] * ref_pct_mu)
+    sig_ref_c = np.abs(x0_true[7:12] * ref_pct_c)
+
     ref_dev = np.hstack(
         [
-            rng_ref.normal(scale=ref_sigma_r, size=3),
-            rng_ref.normal(scale=ref_sigma_v, size=3),
-            rng_ref.normal(scale=ref_sigma_mu, size=1),
-            rng_ref.normal(scale=ref_sigma_c, size=5),
+            rng_ref.normal(scale=sig_ref_r, size=3),
+            rng_ref.normal(scale=sig_ref_v, size=3),
+            rng_ref.normal(scale=sig_ref_mu, size=1),
+            rng_ref.normal(scale=sig_ref_c, size=5),
         ]
     )
     x0_ref = x0_true - ref_dev
 
     # --------------------------
-    # Priors on 12D delta0 (about whichever reference you're optimizing around)
+    # Priors on 12D delta0
     # --------------------------
-    prior_sigma = prior_looseness * np.array(
-        [
-            sig_r,
-            sig_r,
-            sig_r,
-            sig_v,
-            sig_v,
-            sig_v,
-            sig_mu,
-            sig_c20,
-            sig_c21s21,
-            sig_c21s21,
-            sig_c22s22,
-            sig_c22s22,
-        ],
-        dtype=float,
-    )
+    sig_prior_r = np.abs(x0_true[0:3] * prior_pct_r)
+    sig_prior_v = np.abs(x0_true[3:6] * prior_pct_v)
+    sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
+    sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
+
+    prior_sigma = np.hstack([sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c])
+
     priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
+
+    print("[Prior] sigmas:", prior_sigma)
 
     # --------------------------
     # Stage 1: full nonlinear batch (NO STTs) on visible arc (tau grid)
@@ -999,11 +994,10 @@ if __name__ == "__main__":
         priors=priors,  # match update_idx length
         max_iter=10,
         tol=1e-8,
-        rtol=1e-10,
-        atol=1e-12,
+        rtol=1e-8,
+        atol=1e-10,
         verbose=True,
     )
-    print("[Stage 1] delta_hat1 =", delta_hat1)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1 (propagate ref1 + STTs on tau grid)
@@ -1069,8 +1063,7 @@ if __name__ == "__main__":
         burn_in=burn_in,
         thin=thin,
         spherical_spread=spherical_spread,
-        method_optimize="Powell",
-        use_demoves=True,
+        method_optimize="lsq",
     )
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
