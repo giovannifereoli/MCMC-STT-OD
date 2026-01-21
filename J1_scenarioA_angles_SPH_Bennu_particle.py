@@ -43,17 +43,14 @@ Units:
 """
 
 # TODO: check all the math
-# TODO: corner plots is horrible now
-# TODO: particle trajectory straight line?
-# TODO: fix plots, add ground truth, labels
-# TODO: estimate wrong, covariance wrong
+# TODO: fix corner plot, spacing and label, legend
+# TODO: improve all plots in general...
 
-# TODO: fix isse If delta0 = 0 does not give you a trajectory/RADEC close to
-# the truth-generated measurements, then your “truth generator” and your “model evaluator”
-# are not the same system (frame/time/sign conventions mismatch), or you’re accidentally
-# evaluating measurements at different epochs / different states.
 
-# This massive chi-squared (should be ~1.0) means your model predictions are completely wrong at the true initial conditions!
+# NOTE to try:
+# 1) Add camera and camera mismodeling
+# 2) Add a spurious acceleration to the dynamics
+# 3) Shorten the observation arc
 
 import os
 import sys
@@ -244,7 +241,9 @@ def generate_stt_functions_bennu_deg2(
 # ============================================================
 
 
-def generate_opnav_measurements_from_sc(x_part, sc_state, sigma_ra, sigma_dec, rng):
+def generate_opnav_measurements_from_sc(
+    x_part, sc_state, sigma_ra, sigma_dec, rng, add_outliers=False
+):
     """
     x_part: (N,12) or (N,6) particle in inertial
     sc_state: (N,6) spacecraft inertial
@@ -254,6 +253,13 @@ def generate_opnav_measurements_from_sc(x_part, sc_state, sigma_ra, sigma_dec, r
 
     ra_meas = ra + rng.normal(0.0, sigma_ra, size=ra.shape)
     dec_meas = dec + rng.normal(0.0, sigma_dec, size=dec.shape)
+
+    if add_outliers:
+        p_out = 0.02
+        out_scale = 20 * sigma_angle
+        mask = rng.random(size=ra.shape) < p_out
+        ra_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
+        dec_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
 
     y = np.empty(2 * len(ra))
     y[0::2] = ra_meas
@@ -625,8 +631,8 @@ if __name__ == "__main__":
 
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T02:00:00"
-    n_obs = 50
+    utc1 = "2019-03-01T01:00:00"
+    n_obs = 100
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -663,10 +669,10 @@ if __name__ == "__main__":
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
-    ref_pct_r = 1e-24 * 0.01  # 1% of each position component
-    ref_pct_v = 1e-24 * 0.01  # 1% of each velocity component
-    ref_pct_mu = 1e-24 * 0.01  # 1% of mu
-    ref_pct_c = 1e-24 * 0.01  # 1% of each C/S coefficient
+    ref_pct_r = 0.25  # 1% of each position component
+    ref_pct_v = 0.25  # 1% of each velocity component
+    ref_pct_mu = 0.01  # 1% of mu
+    ref_pct_c = 0.01  # 1% of each C/S coefficient
 
     # priors (on deltas about the reference) are these fractions of |truth|
     # NOTE: ach component of the particle's position is assigned a 250 m a priori
@@ -674,11 +680,15 @@ if __name__ == "__main__":
     # Each component of the particle's velocity is assigned a 30 cm/s a priori
     # uncertainty, which is the same order of magnitude as the escape speeds on
     # Bennu's surface.
-    prior_pct_r = ref_pct_r  # 1% of each position component
-    prior_pct_v = ref_pct_v  # 1% of each velocity component
-    prior_pct_mu = ref_pct_mu  # 1% of mu
-    prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
-    prior_looseness = 1e1
+    # prior_pct_r = ref_pct_r  # 1% of each position component
+    # prior_pct_v = ref_pct_v  # 1% of each velocity component
+    # prior_pct_mu = ref_pct_mu  # 1% of mu
+    # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
+    sig_prior_r = np.full(3, 0.250)  # km
+    sig_prior_v = np.full(3, 3.0e-4)  # km/s
+    sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
+    prior_looseness = 1.0  # 1.1 * 1e2
 
     # MCMC settings
     n_walkers = 128
@@ -705,7 +715,7 @@ if __name__ == "__main__":
     # --------------------------
     # Particle detach point on Bennu surface
     # --------------------------
-    mesh_path = "ObjFiles/BennuRadar.obj"  # <-- EDIT if needed
+    mesh_path = "ObjFiles/BennuRadar.obj"
     bennu_mesh = trimesh.load(mesh_path, force="mesh")
     vertices = np.asarray(bennu_mesh.vertices)
 
@@ -718,7 +728,7 @@ if __name__ == "__main__":
         rverts.max(),
     )
     # If mesh looks like meters (~300), scale to km:
-    if rverts.max() > 10.0:  # crude but effective for Bennu
+    if rverts.max() > 10.0:
         print("[Mesh] Detected likely meters-scale OBJ; scaling mesh by 1e-3 to km.")
         bennu_mesh = bennu_mesh.copy()
         bennu_mesh.apply_scale(1e-3)
@@ -787,27 +797,45 @@ if __name__ == "__main__":
     # --------------------------
     # Observability mask (occultation by Bennu sphere proxy)
     # --------------------------
-    # vis_mask = occultation_mask(sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu)
-    vis_mask = np.ones(len(sc_state_full), dtype=bool)  # All True = all visible
+    # CRITICAL FIX: Computing visibility mask but NOT filtering the time grid.
+    # Filtering creates irregular time spacing which causes numerical issues
+    # in time-dependent dynamics. Instead, we propagate on the FULL uniform
+    # time grid and only exclude occulted observations from the cost function.
 
-    ets = ets_full[vis_mask]  # ETs for labeling / plots
-    tau = tau_full[vis_mask]  # taus for propagation / residuals
-    sc_state = sc_state_full[vis_mask, :]
-    x_true = x_true_full[vis_mask, :]
+    vis_mask_full = occultation_mask(
+        sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu
+    )
 
-    print(f"\nVisibility: {np.sum(vis_mask)}/{len(vis_mask)} epochs kept.")
+    # Use FULL time grid for propagation (uniform spacing required for time-dependent dynamics)
+    ets = ets_full
+    tau = tau_full
+    sc_state = sc_state_full
+    x_true = x_true_full
+    vis_mask = vis_mask_full  # Keep mask for plotting/diagnostics
+
+    print(f"\nVisibility: {np.sum(vis_mask)}/{len(vis_mask)} epochs visible.")
+    print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
-    # Generate noisy RA/DEC measurements (uses SC state and particle truth at same indices)
+    # Generate noisy RA/DEC measurements
     # --------------------------
+    # Generate measurements for ALL epochs (including occulted ones)
+    # We'll handle visibility in the residual weighting
     rng_meas = np.random.default_rng(123)
-    y_obs = generate_opnav_measurements_from_sc(
+    y_obs_full = generate_opnav_measurements_from_sc(
         x_part=x_true,
         sc_state=sc_state,
         sigma_ra=sigma_ra,
         sigma_dec=sigma_dec,
         rng=rng_meas,
     )
+
+    # Create a weight vector: zero weight for occulted observations
+    obs_weights = np.ones_like(y_obs_full)
+    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted RA
+    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted DEC
+
+    y_obs = y_obs_full  # Use all measurements, rely on weights
 
     # --------------------------
     # Reference initial condition (perturb truth)
@@ -833,12 +861,12 @@ if __name__ == "__main__":
     # --------------------------
     # Priors on 12D delta0
     # --------------------------
-    r_scale = np.linalg.norm(x0_true[0:3])
-    v_scale = np.linalg.norm(x0_true[3:6])
-    sig_prior_r = prior_pct_r * r_scale * np.ones(3)
-    sig_prior_v = prior_pct_v * v_scale * np.ones(3)
-    sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
-    sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
+    # r_scale = np.linalg.norm(x0_true[0:3])
+    # v_scale = np.linalg.norm(x0_true[3:6])
+    # sig_prior_r = prior_pct_r * r_scale * np.ones(3)
+    # sig_prior_v = prior_pct_v * v_scale * np.ones(3)
+    # sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
+    # sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
 
     prior_sigma = prior_looseness * np.hstack(
         [sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c]
@@ -849,7 +877,7 @@ if __name__ == "__main__":
     print("\n[Prior] sigmas:", prior_sigma)
 
     # --------------------------
-    # Stage 1: full nonlinear batch (NO STTs) on visible arc (tau grid)
+    # Stage 1: full nonlinear batch with visibility weighting
     # --------------------------
     print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
 
@@ -861,6 +889,7 @@ if __name__ == "__main__":
         y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
         sigma_ra,
         sigma_dec,
+        obs_weights,  # Pass visibility weights
         priors=None,  # list of scipy.stats.norm length n_update, OR None
         update_idx=None,  # indices of the 12D delta you're solving for (e.g. range(6) or range(12))
         max_iter=10,
@@ -926,7 +955,7 @@ if __name__ == "__main__":
             res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
             res[1::2] = y_obs[1::2] - y_model[1::2]
 
-            r = res / w  # normalized residual vector (2N,)
+            r = res / w * obs_weights  # normalized residual vector (2N,)
 
             # Jacobian J wrt update variables (2N x n_upd)
             J = np.zeros((2 * len(tau), n_upd), dtype=float)
@@ -948,6 +977,7 @@ if __name__ == "__main__":
             # normalize Jacobian rows by sigma
             J[0::2, :] /= sigma_ra
             J[1::2, :] /= sigma_dec
+            J = J * obs_weights[:, None]
 
             # linearized MAP solve: (J; W_prior) d = (r; r_prior)
             rows = [J]
@@ -1012,13 +1042,14 @@ if __name__ == "__main__":
     def solve_stage1_full_nonlinear_lsq(
         propagator,
         x0_ref,
-        tau,  # (N,) seconds since start
-        sc_state,  # (N,6)
-        y_obs,  # (2N,)
+        tau,
+        sc_state,
+        y_obs,
+        obs_weights,
         sigma_ra,
         sigma_dec,
-        priors=None,  # list of scipy.stats.norm for the UPDATE variables
-        update_idx=None,  # indices in 12D x0 to solve for
+        priors=None,
+        update_idx=None,
         rtol=1e-10,
         atol=1e-12,
         method="LSODA",
@@ -1027,17 +1058,13 @@ if __name__ == "__main__":
     ):
         """
         Full nonlinear batch (MAP) using SciPy least_squares.
-        - Decision variable is delta (len n_upd) applied to x0_ref[update_idx].
-        - For each evaluation: propagate with updated x0, compute RA/DEC, residuals, add priors.
-        - No STM used (this isolates whether STM/Jacobian is causing the bias).
+        Now includes observation weights to handle occultation.
         """
-
         if update_idx is None:
             update_idx = np.arange(12)
         update_idx = np.asarray(update_idx, dtype=int)
         n_upd = len(update_idx)
 
-        # Prior mean/sigma on delta in the UPDATE variable space
         if priors is None:
             prior_mean = np.zeros(n_upd)
             prior_sig = np.full(n_upd, np.inf)
@@ -1047,23 +1074,20 @@ if __name__ == "__main__":
 
         finite = np.isfinite(prior_sig)
 
-        # Measurement weights
+        # Measurement weights (sigma + visibility)
         w = np.empty_like(y_obs, dtype=float)
         w[0::2] = sigma_ra
         w[1::2] = sigma_dec
 
         def residual_vector(delta_upd):
-            # Build x0 candidate
             x0 = x0_ref.copy()
             x0[update_idx] = x0_ref[update_idx] + delta_upd
 
-            # Propagate (no STTs needed here)
             sol = propagator.propagate_state_only(
                 x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
             )
-            x = sol.y[:12, :].T  # (N,12)
+            x = sol.y[:12, :].T
 
-            # Model observables
             los = x[:, :3] - sc_state[:, :3]
             ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
 
@@ -1071,29 +1095,26 @@ if __name__ == "__main__":
             y_model[0::2] = ra_model
             y_model[1::2] = dec_model
 
-            # Residuals (wrap RA robustly)
             res = np.empty_like(y_obs)
-            # IMPORTANT: use wrap_to_pi; avoid modulo expressions that can be numerically touchy
             res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
             res[1::2] = y_obs[1::2] - y_model[1::2]
 
-            r_meas = res / w
+            # Apply both sigma weighting AND visibility weighting
+            r_meas = (res / w) * obs_weights
 
-            # Priors appended as additional residuals
             if np.any(finite):
                 r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
                 return np.hstack([r_meas, r_pri])
 
             return r_meas
 
-        # Initial guess: zero delta about x0_ref
         x0 = np.zeros(n_upd)
 
         result = least_squares(
             fun=residual_vector,
             x0=x0,
             method="trf",
-            jac="2-point",  # intentionally FD for the "full nonlinear check"
+            jac="2-point",
             max_nfev=max_nfev,
             ftol=1e-14,
             xtol=1e-14,
@@ -1101,13 +1122,12 @@ if __name__ == "__main__":
             verbose=verbose,
         )
 
-        # Build outputs in your same conventions
         delta_hat_upd = result.x
         delta_hat_full = np.zeros(12)
         delta_hat_full[update_idx] = delta_hat_upd
 
         x0_ref1 = x0_ref + delta_hat_full
-        # Covariance approximation from J^T J (posterior if priors included)
+
         J = result.jac
         try:
             cov_upd = np.linalg.inv(J.T @ J)
@@ -1121,7 +1141,6 @@ if __name__ == "__main__":
 
         return x0_ref1, delta_hat_full, cov_full, result
 
-    """
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,
         x0_ref=x0_ref,
@@ -1130,54 +1149,38 @@ if __name__ == "__main__":
         y_obs=y_obs,
         sigma_ra=sigma_ra,
         sigma_dec=sigma_dec,
+        obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
         max_iter=10,
         tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
-    )"""
-
+    )
+    """
     x0_ref1, delta_hat1, cov1, res_nl = solve_stage1_full_nonlinear_lsq(
         propagator=propagator,
         x0_ref=x0_ref,
         tau=tau,
         sc_state=sc_state,
         y_obs=y_obs,
+        obs_weights=obs_weights,  # Pass visibility weights
         sigma_ra=sigma_ra,
         sigma_dec=sigma_dec,
-        priors=priors,  # set to None to test "no priors"
+        priors=priors,
         update_idx=np.arange(12),
         rtol=1e-8,
         atol=1e-10,
         max_nfev=4000,
         verbose=2,
-    )
-
-    # Consistency of bookkeeping
-    err_ref_update = np.linalg.norm((x0_ref + delta_hat1) - x0_ref1)
-    print("\n[Check] ||(x0_ref + delta_hat1) - x0_ref1|| =", err_ref_update)
-
-    # Truth deltas
-    true_delta_ref = x0_true - x0_ref
-    true_delta_ref1 = x0_true - x0_ref1
-
-    print("[Check] true_delta about ref  (x0_true-x0_ref):", true_delta_ref)
-    print("[Check] true_delta about ref1 (x0_true-x0_ref1):", true_delta_ref1)
-
-    # Should be: true_delta_ref1 = true_delta_ref - delta_hat1
-    err_truth_relation = np.linalg.norm(true_delta_ref1 - (true_delta_ref - delta_hat1))
-    print(
-        "[Check] ||true_delta_ref1 - (true_delta_ref - delta_hat1)|| =",
-        err_truth_relation,
-    )
+    )"""
 
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
     print("[Stage 1] delta_hat1:\n", delta_hat1)
 
     # --------------------------
-    # Stage 2: relinearize STTs about ref1 (propagate ref1 + STTs on tau grid)
+    # Stage 2: relinearize STTs about ref1
     # --------------------------
     print("\n[Stage 2] Propagating ref1 and computing STTs about ref1...")
     sol_ref, stts_ref = propagator.propagate(
@@ -1185,7 +1188,7 @@ if __name__ == "__main__":
     )
 
     # --------------------------
-    # Residual function (STT-based)
+    # Residual function (STT-based) with visibility weighting
     # --------------------------
     def residuals_normalized(delta0):
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
@@ -1204,28 +1207,32 @@ if __name__ == "__main__":
         w = np.empty_like(y_obs)
         w[0::2] = sigma_ra
         w[1::2] = sigma_dec
-        return res / w
+
+        # Apply visibility weighting
+        return (res / w) * obs_weights
 
     # --------------------------
-    # Chi2 and Prior at ref1
+    # Chi2 at ref1
     # --------------------------
     chi2_at_ref = np.sum(residuals_normalized(np.zeros(12)) ** 2)
-    dof = len(y_obs) - 12
+    n_visible = np.sum(vis_mask)
+    dof = 2 * n_visible - 12  # Only count visible observations
     print(
-        f"\n[Stage 2] At ref1 (delta=0): chi2_red = {chi2_at_ref/dof:.3f}  (chi2={chi2_at_ref:.2f}, dof={dof})"
+        f"\n[Stage 2] At ref1 (delta=0): chi2_red = {chi2_at_ref/dof:.3f}  "
+        f"(chi2={chi2_at_ref:.2f}, dof={dof}, n_vis={n_visible})"
     )
 
-    # After stage-1:
-    delta_shift = x0_ref1 - x0_ref  # should equal delta_hat1
+    # Priors for MCMC
+    delta_shift = x0_ref1 - x0_ref
     priors_ref1 = [norm(loc=-ds, scale=s) for ds, s in zip(delta_shift, prior_sigma)]
 
     # --------------------------
-    # MCMC (no Stage 2 batch optimization)
+    # MCMC
     # --------------------------
     print("\n[MCMC] Running (starting from zeros about ref1)...")
     model = MCMCModel(
         residuals_func=residuals_normalized,
-        initial_params=np.zeros(12),  # delta about ref1
+        initial_params=np.zeros(12),
         param_priors=priors_ref1,
         observed_data=y_obs,
     )
@@ -1241,7 +1248,6 @@ if __name__ == "__main__":
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
 
-    # Compute chi2 at MCMC solution
     chi2_mcmc = np.sum(residuals_normalized(theta_hat) ** 2)
     print(
         f"\n[MCMC] At theta_hat: chi2_red = {chi2_mcmc/dof:.3f}  (chi2={chi2_mcmc:.2f}, dof={dof})"
@@ -1250,7 +1256,6 @@ if __name__ == "__main__":
     print("\n[MCMC] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(P_mcmc)))
 
-    # Truth delta about ref1
     true_delta = x0_true - x0_ref1
     print("\n[Truth] true_delta about ref1:\n", true_delta)
 
@@ -1258,9 +1263,7 @@ if __name__ == "__main__":
     # Diagnostics
     # --------------------------
     model.plot_convergence()
-    model.plot_postfit_residuals_time(
-        t_obs_used=tau, opnav_data=True
-    )  # tau is the dynamics time
+    model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
     model.plot_log_likelihood()
     model.summary()
     model.print_regression_diagnostics()
@@ -1303,7 +1306,7 @@ if __name__ == "__main__":
     plt.show()
 
     # --------------------------
-    # Corner plot (MCMC only, no batch comparison)
+    # Corner plot
     # --------------------------
     try:
         labels = [
@@ -1321,10 +1324,8 @@ if __name__ == "__main__":
             r"$\delta S_{22}$",
         ]
         model.plot_corner_with_batch(
-            batch_mean=np.zeros(
-                12
-            ),  # Stage 1 converged to ref1, so delta about ref1 is zero
-            batch_cov=cov1,  # Stage 1 covariance
+            batch_mean=np.zeros(12),
+            batch_cov=cov1,
             use_median_as_truth=False,
             true_theta=true_delta,
         )
