@@ -466,7 +466,7 @@ class MCMCModel:
         plot_contours_labels=False,  # keep off unless you really need it
         batch_sigma_levels=(1.0,),
         idx=None,  # NEW: list/array of parameter indices to plot
-        max_dims=10,  # NEW: auto-limit number of dims (readability)
+        max_dims=13,
         bins=40,
         quantile_range=(0.005, 0.995),  # NEW: robust axis limits
         title_digits=3,  # NEW: avoid long titles

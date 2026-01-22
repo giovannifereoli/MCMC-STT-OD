@@ -42,15 +42,12 @@ Units:
 - km, km/s, seconds (ET)
 """
 
+# TODO: WHY CORNER PLOT DOESNT HAVE ALL 12
+# TODO: read chelseay and make realistic
+# TODO: Put trajectory, maybe I can put attitude and particles spk!
 # TODO: check all the math
 # TODO: fix corner plot, spacing and label, legend
 # TODO: improve all plots in general...
-
-
-# NOTE to try:
-# 1) Add camera and camera mismodeling
-# 2) Add a spurious acceleration to the dynamics
-# 3) Shorten the observation arc
 
 import os
 import sys
@@ -615,7 +612,323 @@ def plot_bennu_scene_body_fixed(
 
 
 # ============================================================
-# MAIN SCRIPT (corrected: uses tau = ET-ET0 for dynamics)
+# Gauss-Newton batch solver with STMs
+# ============================================================
+
+
+def solve_stage1_gn_with_stm(
+    propagator,
+    x0_ref,
+    tau,  # (N,) seconds since start (NOT ET)
+    sc_state,  # (N,6) inertial, same epochs as tau
+    y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
+    sigma_ra,
+    sigma_dec,
+    obs_weights,  # Pass visibility weights
+    priors=None,  # list of scipy.stats.norm length n_update, OR None
+    update_idx=None,  # indices of the 12D delta you're solving for (e.g. range(6) or range(12))
+    max_iter=10,
+    tol=1e-12,
+    rtol=1e-12,
+    atol=1e-12,
+    method="LSODA",
+    verbose=True,
+):
+    """
+    Gauss-Newton outer loop. Each iteration:
+    1) propagate at current x0_ref
+    2) build residual vector r and Jacobian J using STM chain rule
+    3) solve linearized MAP: min ||r - J d||^2 + ||(d - m)/s||^2
+    4) update x0_ref += embed(d)
+    """
+    if update_idx is None:
+        update_idx = np.arange(12)
+    update_idx = np.asarray(update_idx, dtype=int)
+    n_upd = len(update_idx)
+
+    # prior mean/sigma on delta (about current ref) for the UPDATE variables
+    if priors is None:
+        prior_mean = np.zeros(n_upd)
+        prior_sig = np.full(n_upd, np.inf)
+    else:
+        prior_mean = np.array([p.mean() for p in priors], dtype=float)
+        prior_sig = np.array([p.std() for p in priors], dtype=float)
+
+    delta_total = np.zeros(12)
+
+    # weights
+    w = np.empty_like(y_obs, dtype=float)
+    w[0::2] = sigma_ra
+    w[1::2] = sigma_dec
+
+    for it in range(1, max_iter + 1):
+        # propagate ref (truth model) and obtain STM history
+        sol_ref, stts_ref = propagator.propagate(
+            x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
+        )
+        x_ref = sol_ref.y[:12, :].T  # (N,12)
+
+        # You need Phi(t,0) for each epoch.
+        # Below assumes your stts_ref contains order-1 STM as a flattened 12x12 for each epoch.
+        # Adjust if your STTPropagatorND stores it differently.
+        Phi_list = []
+        for k in range(len(tau)):
+            Phi_k = stts_ref[1][k]  # (n,n)
+            Phi_k = np.array(Phi_k, dtype=float).reshape(12, 12)
+            Phi_list.append(Phi_k)
+        Phi_list = np.array(Phi_list)  # (N,12,12)
+
+        # build residuals and Jacobian
+        los = x_ref[:, :3] - sc_state[:, :3]
+        ra_model, dec_model, d_ra_dr, d_dec_dr = radec_and_partials_from_los(los)
+
+        y_model = np.empty_like(y_obs)
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
+
+        res = np.empty_like(y_obs)
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[1::2] = y_obs[1::2] - y_model[1::2]
+
+        r = res / w * obs_weights  # normalized residual vector (2N,)
+
+        # Jacobian J wrt update variables (2N x n_upd)
+        J = np.zeros((2 * len(tau), n_upd), dtype=float)
+
+        # For each epoch: Hy = dy/dx_k, then chain with Phi_k wrt x0.
+        # dy/dx_k only depends on position components (x,y,z) of particle state.
+        for k in range(len(tau)):
+            # dy/dxk: 2x12
+            Hy = np.zeros((2, 12), dtype=float)
+            Hy[0, 0:3] = d_ra_dr[k, :]
+            Hy[1, 0:3] = d_dec_dr[k, :]
+
+            # chain to x0: 2x12
+            Hx0 = Hy @ Phi_list[k]
+
+            # select solve-for columns
+            J[2 * k : 2 * k + 2, :] = Hx0[:, update_idx]
+
+        # normalize Jacobian rows by sigma
+        J[0::2, :] /= sigma_ra
+        J[1::2, :] /= sigma_dec
+        J = J * obs_weights[:, None]
+
+        # linearized MAP solve: (J; W_prior) d = (r; r_prior)
+        rows = [J]
+        rhs = [r]
+
+        finite = np.isfinite(prior_sig)
+        if np.any(finite):
+            Wp = np.diag(1.0 / prior_sig[finite])
+            Jp = np.zeros((Wp.shape[0], n_upd))
+            Jp[:, finite] = Wp
+
+            # IMPORTANT: anchor to initial reference using the accumulated delta
+            rp = (
+                -(delta_total[update_idx][finite] - prior_mean[finite])
+                / prior_sig[finite]
+            )
+
+            rows.append(Jp)
+            rhs.append(rp)
+
+        A = np.vstack(rows)
+        b = np.hstack(rhs)
+
+        # Solve least squares
+        d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+        # Embed into 12D delta, update ref
+        d_full = np.zeros(12)
+        d_full[update_idx] = d_upd
+        x0_ref = x0_ref + d_full
+        delta_total = delta_total + d_full
+
+        step_norm = np.linalg.norm(d_upd)
+        rms = np.sqrt(np.mean(r**2))
+
+        if verbose:
+            print(
+                f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}"
+            )
+
+        if step_norm < tol:
+            break
+
+    # Compute covariance at convergence
+    # Cov = (A^T A)^{-1} for the update variables
+    # This is the covariance of the delta we solved for
+    try:
+        AtA = A.T @ A
+        cov_upd = np.linalg.inv(AtA)
+    except np.linalg.LinAlgError:
+        print("[WARNING] Covariance matrix is singular, using pseudoinverse")
+        cov_upd = np.linalg.pinv(A.T @ A)
+
+    # Embed into full 12x12 covariance (infinite variance for non-updated params)
+    cov_full = np.full((12, 12), np.inf)
+    for i, idx_i in enumerate(update_idx):
+        for j, idx_j in enumerate(update_idx):
+            cov_full[idx_i, idx_j] = cov_upd[i, j]
+
+    # ----------------------------
+    # Plot prefit vs postfit (Stage-1 GN)
+    # ----------------------------
+    if verbose:
+        # postfit residuals using the *updated* x0_ref (final)
+        sol_pf, _ = propagator.propagate(
+            x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
+        )
+        x_pf = sol_pf.y[:12, :].T
+
+        los_pf = x_pf[:, :3] - sc_state[:, :3]
+        ra_pf, dec_pf, _, _ = radec_and_partials_from_los(los_pf)
+
+        y_pf = np.empty_like(y_obs)
+        y_pf[0::2] = ra_pf
+        y_pf[1::2] = dec_pf
+
+        res_pf = np.empty_like(y_obs)
+        res_pf[0::2] = wrap_to_pi(y_obs[0::2] - y_pf[0::2])
+        res_pf[1::2] = y_obs[1::2] - y_pf[1::2]
+
+        postfit = (res_pf / w) * obs_weights
+
+        # reshape to (2,N) and plot
+        post_m = postfit.reshape(-1, 2).T
+        time_hr = np.asarray(tau) / 3600.0
+
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+
+        ax0.plot(time_hr, post_m[0], "o", ms=3.5, label="Postfit")
+        ax0.axhline(0, c="k", ls="--")
+        ax0.axhline(3, c="r", ls=":")
+        ax0.axhline(-3, c="r", ls=":")
+        ax0.set_ylabel(r"RA Residual [$\sigma$]")
+        ax0.grid(True)
+        ax0.legend()
+
+        ax1.plot(time_hr, post_m[1], "o", ms=3.5, label="Postfit")
+        ax1.axhline(0, c="k", ls="--")
+        ax1.axhline(3, c="r", ls=":")
+        ax1.axhline(-3, c="r", ls=":")
+        ax1.set_ylabel(r"DEC Residual [$\sigma$]")
+        ax1.set_xlabel("Time [hours since epoch]")
+        ax1.grid(True)
+        ax1.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    return x0_ref, delta_total, cov_full
+
+
+def solve_stage1_full_nonlinear_lsq(
+    propagator,
+    x0_ref,
+    tau,
+    sc_state,
+    y_obs,
+    obs_weights,
+    sigma_ra,
+    sigma_dec,
+    priors=None,
+    update_idx=None,
+    rtol=1e-10,
+    atol=1e-12,
+    method="LSODA",
+    max_nfev=2000,
+    verbose=2,
+):
+    """
+    Full nonlinear batch (MAP) using SciPy least_squares.
+    Now includes observation weights to handle occultation.
+    """
+    if update_idx is None:
+        update_idx = np.arange(12)
+    update_idx = np.asarray(update_idx, dtype=int)
+    n_upd = len(update_idx)
+
+    if priors is None:
+        prior_mean = np.zeros(n_upd)
+        prior_sig = np.full(n_upd, np.inf)
+    else:
+        prior_mean = np.array([p.mean() for p in priors], dtype=float)
+        prior_sig = np.array([p.std() for p in priors], dtype=float)
+
+    finite = np.isfinite(prior_sig)
+
+    # Measurement weights (sigma + visibility)
+    w = np.empty_like(y_obs, dtype=float)
+    w[0::2] = sigma_ra
+    w[1::2] = sigma_dec
+
+    def residual_vector(delta_upd):
+        x0 = x0_ref.copy()
+        x0[update_idx] = x0_ref[update_idx] + delta_upd
+
+        sol = propagator.propagate_state_only(
+            x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
+        )
+        x = sol.y[:12, :].T
+
+        los = x[:, :3] - sc_state[:, :3]
+        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
+
+        y_model = np.empty_like(y_obs)
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
+
+        res = np.empty_like(y_obs)
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[1::2] = y_obs[1::2] - y_model[1::2]
+
+        # Apply both sigma weighting AND visibility weighting
+        r_meas = (res / w) * obs_weights
+
+        if np.any(finite):
+            r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
+            return np.hstack([r_meas, r_pri])
+
+        return r_meas
+
+    x0 = np.zeros(n_upd)
+
+    result = least_squares(
+        fun=residual_vector,
+        x0=x0,
+        method="trf",
+        jac="2-point",
+        max_nfev=max_nfev,
+        ftol=1e-14,
+        xtol=1e-14,
+        gtol=1e-14,
+        verbose=verbose,
+    )
+
+    delta_hat_upd = result.x
+    delta_hat_full = np.zeros(12)
+    delta_hat_full[update_idx] = delta_hat_upd
+
+    x0_ref1 = x0_ref + delta_hat_full
+
+    J = result.jac
+    try:
+        cov_upd = np.linalg.inv(J.T @ J)
+    except np.linalg.LinAlgError:
+        cov_upd = np.linalg.pinv(J.T @ J)
+
+    cov_full = np.full((12, 12), np.inf)
+    for i, ii in enumerate(update_idx):
+        for j, jj in enumerate(update_idx):
+            cov_full[ii, jj] = cov_upd[i, j]
+
+    return x0_ref1, delta_hat_full, cov_full, result
+
+
+# ============================================================
+# MAIN SCRIPT
 # ============================================================
 
 if __name__ == "__main__":
@@ -629,10 +942,11 @@ if __name__ == "__main__":
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
+    # TODO: 7 days was a nightmare for batch, see where it's a better example. maybe look at the 20 particles of gravity
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T01:00:00"
-    n_obs = 100
+    utc1 = "2019-03-02T00:00:00"
+    n_obs = 43
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -669,8 +983,8 @@ if __name__ == "__main__":
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
-    ref_pct_r = 0.25  # 1% of each position component
-    ref_pct_v = 0.25  # 1% of each velocity component
+    ref_pct_r = 0.25  # 25% of each position component
+    ref_pct_v = 0.25  # 25% of each velocity component
     ref_pct_mu = 0.01  # 1% of mu
     ref_pct_c = 0.01  # 1% of each C/S coefficient
 
@@ -688,9 +1002,10 @@ if __name__ == "__main__":
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
     sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
     sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
-    prior_looseness = 1.0  # 1.1 * 1e2
+    prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
+    # NOTE: always do a run with burn_in and thin not activated 
     n_walkers = 128
     n_samples = 2000
     burn_in = 300
@@ -881,266 +1196,6 @@ if __name__ == "__main__":
     # --------------------------
     print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
 
-    def solve_stage1_gn_with_stm(
-        propagator,
-        x0_ref,
-        tau,  # (N,) seconds since start (NOT ET)
-        sc_state,  # (N,6) inertial, same epochs as tau
-        y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
-        sigma_ra,
-        sigma_dec,
-        obs_weights,  # Pass visibility weights
-        priors=None,  # list of scipy.stats.norm length n_update, OR None
-        update_idx=None,  # indices of the 12D delta you're solving for (e.g. range(6) or range(12))
-        max_iter=10,
-        tol=1e-12,
-        rtol=1e-12,
-        atol=1e-12,
-        method="LSODA",
-        verbose=True,
-    ):
-        """
-        Gauss-Newton outer loop. Each iteration:
-        1) propagate at current x0_ref
-        2) build residual vector r and Jacobian J using STM chain rule
-        3) solve linearized MAP: min ||r - J d||^2 + ||(d - m)/s||^2
-        4) update x0_ref += embed(d)
-        """
-        if update_idx is None:
-            update_idx = np.arange(12)
-        update_idx = np.asarray(update_idx, dtype=int)
-        n_upd = len(update_idx)
-
-        # prior mean/sigma on delta (about current ref) for the UPDATE variables
-        if priors is None:
-            prior_mean = np.zeros(n_upd)
-            prior_sig = np.full(n_upd, np.inf)
-        else:
-            prior_mean = np.array([p.mean() for p in priors], dtype=float)
-            prior_sig = np.array([p.std() for p in priors], dtype=float)
-
-        delta_total = np.zeros(12)
-
-        # weights
-        w = np.empty_like(y_obs, dtype=float)
-        w[0::2] = sigma_ra
-        w[1::2] = sigma_dec
-
-        for it in range(1, max_iter + 1):
-            # propagate ref (truth model) and obtain STM history
-            sol_ref, stts_ref = propagator.propagate(
-                x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
-            )
-            x_ref = sol_ref.y[:12, :].T  # (N,12)
-
-            # You need Phi(t,0) for each epoch.
-            # Below assumes your stts_ref contains order-1 STM as a flattened 12x12 for each epoch.
-            # Adjust if your STTPropagatorND stores it differently.
-            Phi_list = []
-            for k in range(len(tau)):
-                Phi_k = stts_ref[1][k]  # (n,n)
-                Phi_k = np.array(Phi_k, dtype=float).reshape(12, 12)
-                Phi_list.append(Phi_k)
-            Phi_list = np.array(Phi_list)  # (N,12,12)
-
-            # build residuals and Jacobian
-            los = x_ref[:, :3] - sc_state[:, :3]
-            ra_model, dec_model, d_ra_dr, d_dec_dr = radec_and_partials_from_los(los)
-
-            y_model = np.empty_like(y_obs)
-            y_model[0::2] = ra_model
-            y_model[1::2] = dec_model
-
-            res = np.empty_like(y_obs)
-            res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
-            res[1::2] = y_obs[1::2] - y_model[1::2]
-
-            r = res / w * obs_weights  # normalized residual vector (2N,)
-
-            # Jacobian J wrt update variables (2N x n_upd)
-            J = np.zeros((2 * len(tau), n_upd), dtype=float)
-
-            # For each epoch: Hy = dy/dx_k, then chain with Phi_k wrt x0.
-            # dy/dx_k only depends on position components (x,y,z) of particle state.
-            for k in range(len(tau)):
-                # dy/dxk: 2x12
-                Hy = np.zeros((2, 12), dtype=float)
-                Hy[0, 0:3] = d_ra_dr[k, :]
-                Hy[1, 0:3] = d_dec_dr[k, :]
-
-                # chain to x0: 2x12
-                Hx0 = Hy @ Phi_list[k]
-
-                # select solve-for columns
-                J[2 * k : 2 * k + 2, :] = Hx0[:, update_idx]
-
-            # normalize Jacobian rows by sigma
-            J[0::2, :] /= sigma_ra
-            J[1::2, :] /= sigma_dec
-            J = J * obs_weights[:, None]
-
-            # linearized MAP solve: (J; W_prior) d = (r; r_prior)
-            rows = [J]
-            rhs = [r]
-
-            finite = np.isfinite(prior_sig)
-            if np.any(finite):
-                Wp = np.diag(1.0 / prior_sig[finite])
-                Jp = np.zeros((Wp.shape[0], n_upd))
-                Jp[:, finite] = Wp
-
-                # IMPORTANT: anchor to initial reference using the accumulated delta
-                rp = (
-                    -(delta_total[update_idx][finite] - prior_mean[finite])
-                    / prior_sig[finite]
-                )
-
-                rows.append(Jp)
-                rhs.append(rp)
-
-            A = np.vstack(rows)
-            b = np.hstack(rhs)
-
-            # Solve least squares
-            d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
-
-            # Embed into 12D delta, update ref
-            d_full = np.zeros(12)
-            d_full[update_idx] = d_upd
-            x0_ref = x0_ref + d_full
-            delta_total = delta_total + d_full
-
-            step_norm = np.linalg.norm(d_upd)
-            rms = np.sqrt(np.mean(r**2))
-
-            if verbose:
-                print(
-                    f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}"
-                )
-
-            if step_norm < tol:
-                break
-
-        # Compute covariance at convergence
-        # Cov = (A^T A)^{-1} for the update variables
-        # This is the covariance of the delta we solved for
-        try:
-            AtA = A.T @ A
-            cov_upd = np.linalg.inv(AtA)
-        except np.linalg.LinAlgError:
-            print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-            cov_upd = np.linalg.pinv(A.T @ A)
-
-        # Embed into full 12x12 covariance (infinite variance for non-updated params)
-        cov_full = np.full((12, 12), np.inf)
-        for i, idx_i in enumerate(update_idx):
-            for j, idx_j in enumerate(update_idx):
-                cov_full[idx_i, idx_j] = cov_upd[i, j]
-
-        return x0_ref, delta_total, cov_full
-
-    def solve_stage1_full_nonlinear_lsq(
-        propagator,
-        x0_ref,
-        tau,
-        sc_state,
-        y_obs,
-        obs_weights,
-        sigma_ra,
-        sigma_dec,
-        priors=None,
-        update_idx=None,
-        rtol=1e-10,
-        atol=1e-12,
-        method="LSODA",
-        max_nfev=2000,
-        verbose=2,
-    ):
-        """
-        Full nonlinear batch (MAP) using SciPy least_squares.
-        Now includes observation weights to handle occultation.
-        """
-        if update_idx is None:
-            update_idx = np.arange(12)
-        update_idx = np.asarray(update_idx, dtype=int)
-        n_upd = len(update_idx)
-
-        if priors is None:
-            prior_mean = np.zeros(n_upd)
-            prior_sig = np.full(n_upd, np.inf)
-        else:
-            prior_mean = np.array([p.mean() for p in priors], dtype=float)
-            prior_sig = np.array([p.std() for p in priors], dtype=float)
-
-        finite = np.isfinite(prior_sig)
-
-        # Measurement weights (sigma + visibility)
-        w = np.empty_like(y_obs, dtype=float)
-        w[0::2] = sigma_ra
-        w[1::2] = sigma_dec
-
-        def residual_vector(delta_upd):
-            x0 = x0_ref.copy()
-            x0[update_idx] = x0_ref[update_idx] + delta_upd
-
-            sol = propagator.propagate_state_only(
-                x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
-            )
-            x = sol.y[:12, :].T
-
-            los = x[:, :3] - sc_state[:, :3]
-            ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
-
-            y_model = np.empty_like(y_obs)
-            y_model[0::2] = ra_model
-            y_model[1::2] = dec_model
-
-            res = np.empty_like(y_obs)
-            res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
-            res[1::2] = y_obs[1::2] - y_model[1::2]
-
-            # Apply both sigma weighting AND visibility weighting
-            r_meas = (res / w) * obs_weights
-
-            if np.any(finite):
-                r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
-                return np.hstack([r_meas, r_pri])
-
-            return r_meas
-
-        x0 = np.zeros(n_upd)
-
-        result = least_squares(
-            fun=residual_vector,
-            x0=x0,
-            method="trf",
-            jac="2-point",
-            max_nfev=max_nfev,
-            ftol=1e-14,
-            xtol=1e-14,
-            gtol=1e-14,
-            verbose=verbose,
-        )
-
-        delta_hat_upd = result.x
-        delta_hat_full = np.zeros(12)
-        delta_hat_full[update_idx] = delta_hat_upd
-
-        x0_ref1 = x0_ref + delta_hat_full
-
-        J = result.jac
-        try:
-            cov_upd = np.linalg.inv(J.T @ J)
-        except np.linalg.LinAlgError:
-            cov_upd = np.linalg.pinv(J.T @ J)
-
-        cov_full = np.full((12, 12), np.inf)
-        for i, ii in enumerate(update_idx):
-            for j, jj in enumerate(update_idx):
-                cov_full[ii, jj] = cov_upd[i, j]
-
-        return x0_ref1, delta_hat_full, cov_full, result
-
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,
         x0_ref=x0_ref,
@@ -1151,7 +1206,7 @@ if __name__ == "__main__":
         sigma_dec=sigma_dec,
         obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
-        max_iter=10,
+        max_iter=30,
         tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
