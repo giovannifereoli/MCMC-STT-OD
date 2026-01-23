@@ -42,12 +42,10 @@ Units:
 - km, km/s, seconds (ET)
 """
 
-# TODO: WHY CORNER PLOT DOESNT HAVE ALL 12
+# TODO: add SRP and attitude?
 # TODO: read chelseay and make realistic
-# TODO: Put trajectory, maybe I can put attitude and particles spk!
 # TODO: check all the math
-# TODO: fix corner plot, spacing and label, legend
-# TODO: improve all plots in general...
+# TODO: improve all plots in general
 
 import os
 import sys
@@ -1005,10 +1003,10 @@ if __name__ == "__main__":
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
-    # NOTE: always do a run with burn_in and thin not activated 
+    # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128
     n_samples = 2000
-    burn_in = 300
+    burn_in = 100
     thin = 10
     spherical_spread = 1e-1
 
