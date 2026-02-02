@@ -286,6 +286,87 @@ class STTPropagatorND:
             print("")
         return sol
 
+    def propagate_state_stm_only(self, x0, t_eval, show_progress=True, **options):
+        """
+        Integrate state + STM only.
+
+        This solves the augmented ODE:
+            xdot  = f(x,t)
+            Phidot = A(x,t) * Phi
+        with Phi(t0) = I.
+
+        Args:
+            x0 (array-like): initial state, shape (n,)
+            t_eval (array-like): times to output, must be increasing
+            show_progress (bool): print a progress bar
+            **options: forwarded to scipy.integrate.solve_ivp
+
+        Returns:
+            sol: solve_ivp solution with y containing [x; vec(Phi)]
+                sol.y shape = (n + n*n, n_steps)
+            stts: dict with stts[1] = Phi history, shape (n_steps, n, n)
+        """
+        t_eval = np.asarray(t_eval, dtype=float).reshape(-1)
+        if t_eval.size < 2:
+            raise ValueError("t_eval must have at least 2 points")
+
+        n = self._infer_n(x0)
+        x0 = np.asarray(x0, dtype=float).reshape(-1)
+        if x0.size != n:
+            raise ValueError(f"x0 length {x0.size} does not match n={n}")
+
+        # pack Y0 = [x0, vec(I)]
+        Y0 = np.empty(n + n * n, dtype=float)
+        Y0[:n] = x0
+        Y0[n:] = np.eye(n, dtype=float).reshape(-1)
+
+        t_start = float(t_eval[0])
+        t_end = float(t_eval[-1])
+        last_print = -1
+
+        def rhs_state_stm(t, Y):
+            nonlocal last_print
+
+            if show_progress:
+                denom = (t_end - t_start) if (t_end - t_start) != 0 else 1.0
+                progress = int(100 * (t - t_start) / denom)
+                if progress > last_print:
+                    bar = "█" * (progress // 2) + "-" * (50 - progress // 2)
+                    print(f"\rProgress |{bar}| {progress:.1f}% - t = {t:.2f}", end="")
+                    last_print = progress
+
+            x = Y[:n]
+            Phi = Y[n:].reshape(n, n)
+
+            dx = self._as_float_array(self.f_func(*x, t)).reshape(n)
+            A = self._as_float_array(self.A_func(*x, t)).reshape(n, n)
+            dPhi = A @ Phi
+
+            dY = np.empty_like(Y)
+            dY[:n] = dx
+            dY[n:] = dPhi.reshape(-1)
+            return dY
+
+        sol = solve_ivp(
+            fun=rhs_state_stm,
+            t_span=(t_start, t_end),
+            t_eval=t_eval,
+            y0=Y0,
+            **options,
+        )
+
+        if show_progress:
+            print("")
+
+        # unpack Phi(t)
+        n_steps = sol.y.shape[1]
+        phi_flat = sol.y[n : n + n * n, :]  # (n*n, n_steps)
+        phi_all = phi_flat.reshape(n, n, n_steps)  # (n, n, n_steps)
+        Phi_hist = np.transpose(phi_all, (2, 0, 1))  # (n_steps, n, n)
+
+        stts = {1: Phi_hist}
+        return sol, stts
+
     def propagate_deviation(self, sol, stts, delta_x0):
         """
         sol: output of propagate()

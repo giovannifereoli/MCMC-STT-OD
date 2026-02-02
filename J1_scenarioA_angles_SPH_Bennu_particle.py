@@ -164,7 +164,7 @@ def generate_stt_functions_bennu_deg2(
     R_ib = Rz(W) * Rx(sp.pi / 2 - delta) * Rz(alpha + sp.pi / 2)
     R_bi = R_ib.T
 
-    # ---- IMPORTANT FIX: define body-fixed coordinates as independent symbols ----
+    # define body-fixed coordinates as independent symbols
     xb_s, yb_s, zb_s = sp.symbols("xb yb zb", real=True)
     r_b_s = sp.Matrix([xb_s, yb_s, zb_s])
 
@@ -191,7 +191,7 @@ def generate_stt_functions_bennu_deg2(
     U_b = mu / r * (1 + (R2 / r2) * F2)
 
     # body-fixed acceleration as gradient wrt (xb_s, yb_s, zb_s) SYMBOLS (now SymPy is happy)
-    a_b_s = -sp.Matrix([sp.diff(U_b, xb_s), sp.diff(U_b, yb_s), sp.diff(U_b, zb_s)])
+    a_b_s = sp.Matrix([sp.diff(U_b, xb_s), sp.diff(U_b, yb_s), sp.diff(U_b, zb_s)])
 
     # now substitute actual r_b(t) = R_ib(t) * r_i into that acceleration
     r_b_expr = R_ib * r_i
@@ -398,6 +398,7 @@ def load_kernels(kernel_root: Path):
         str(kernel_root / "de424.bsp"),
         str(kernel_root / "gm_de440.tpc"),
         str(kernel_root / "bennu_v17.tpc"),
+        str(kernel_root / "particles_pub_03Mar2020.bsp"),
         str(kernel_root / "orex" / "bennu_refdrmc_v1.bsp"),
         str(
             kernel_root
@@ -943,8 +944,8 @@ if __name__ == "__main__":
     # TODO: 7 days was a nightmare for batch, see where it's a better example. maybe look at the 20 particles of gravity
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-02T00:00:00"
-    n_obs = 43
+    utc1 = "2019-03-01T01:30:00"
+    n_obs = 22 # NOTE: 22 batch not working, 23 is working!
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1006,8 +1007,8 @@ if __name__ == "__main__":
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128
     n_samples = 2000
-    burn_in = 100
-    thin = 10
+    burn_in = 300
+    thin = 20
     spherical_spread = 1e-1
 
     # --------------------------
@@ -1073,10 +1074,27 @@ if __name__ == "__main__":
     # Outward initial velocity (random hemisphere w.r.t. r0_true)
     rng = np.random.default_rng(7)
     vmag = 2e-4  # km/s
+    """"
     u = rng.normal(size=3)
     u /= np.linalg.norm(u)
     if np.dot(u, r0_true) < 0:
         u = -u
+    v0_true = vmag * u
+    """
+
+    # tangent launch direction (physically plausible: lofting off surface)
+    rhat = r0_true / np.linalg.norm(r0_true)
+
+    # pick random vector not parallel to rhat
+    u = rng.normal(size=3)
+    u -= np.dot(u, rhat) * rhat
+    u /= np.linalg.norm(u)
+
+    # add small radial component (+/-) to create two near-degenerate families
+    rad_frac = 0.10  # 10% radial, rest tangential
+    sign = 1.0  # <-- TRICK: if you set this wrong in the reference, batch may lock on wrong lobe
+    u = np.sqrt(1 - rad_frac**2) * u + sign * rad_frac * rhat
+
     v0_true = vmag * u
 
     # Full truth initial state (12)
