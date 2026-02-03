@@ -2,28 +2,22 @@
 """
 RCVO linearized residual model in dx0 using MATLAB SRIF prep file (v7.3 MAT).
 
-Core model (dx0 sampling + STM mapping):
+Model:
     dx_k = Phi0k @ dx0
     e_k(dx0) = r_k - H_k @ dx_k = r_k - (H_k @ Phi0k) @ dx0
+Whitening (optional, done block-by-block):
+    e_w = L^{-1} e,   where R = L L^T
 
-Key points:
-- MATLAB v7.3 MAT is HDF5. Reading with h5py requires careful deref of object refs.
-- VERY IMPORTANT: MATLAB arrays are column-major. When you read 2D arrays with h5py,
-  they commonly appear transposed relative to what you expect in Python.
-  This script applies a consistent "MATLAB->NumPy" fix:
-      for any 2D numeric matrix A: use A.T
+This script:
+- loads MATLAB v7.3 MAT (HDF5) robustly with deref
+- applies MATLAB->NumPy transpose fix for 2D arrays
+- builds stacked (r_w, A_w) where A_w stacks (Hk Phi0k) whitened by Rk^{-1/2}
+- exposes a picklable residual function for emcee multiprocessing
+- runs your MCMCModel (if importable)
+- plots prefit/postfit residuals (whitened units)
 
-Input MAT must contain (as saved by your MATLAB script):
-  - sorted_measurements: struct array with fields {time, residual, partials, covariance}
-      where partials.wrt_X is H_k wrt x_k at measurement epoch k
-  - trajectory_ref: struct array with fields {time, STM, ...} where STM is Phi0k
-  - P0: a priori covariance on dx0 (n_state x n_state)
-
-Dependencies:
-  pip install numpy scipy h5py matplotlib
-
-Optional:
-  your MCMC class must be importable: from MCMC import MCMCModel
+Deps:
+  pip install numpy scipy h5py matplotlib emcee
 """
 
 from __future__ import annotations
@@ -45,10 +39,10 @@ from scipy.stats import norm
 
 @dataclass
 class MeasBlock:
-    time: float  # seconds since t0 (MATLAB: t2 - t0)
+    time: float
     r: np.ndarray  # (Nk,)
-    Hk: np.ndarray  # (Nk, n_state) Jacobian wrt x_k at epoch k
-    R: np.ndarray  # (Nk, Nk) covariance
+    Hk: np.ndarray  # (Nk, n_state)
+    R: np.ndarray  # (Nk, Nk)
 
 
 @dataclass
@@ -63,7 +57,6 @@ class TrajNode:
 
 
 def _is_hdf5_ref_dtype(dtype) -> bool:
-    """True if dtype is an HDF5 object reference dtype."""
     try:
         return h5py.check_dtype(ref=dtype) is not None
     except Exception:
@@ -71,21 +64,11 @@ def _is_hdf5_ref_dtype(dtype) -> bool:
 
 
 def _deref(f: h5py.File, obj):
-    """
-    Robustly interpret MATLAB v7.3 fields:
-      - if obj is an HDF5 Dataset: read it (may yield numeric array OR refs)
-      - if obj is an HDF5 Group: return group
-      - if obj is a scalar HDF5 reference: dereference it
-      - if obj is an ndarray of references:
-          * if size==1: dereference scalar
-          * else: return list of dereferenced objects (cell-array style)
-      - if obj is numeric ndarray: return it directly
-    """
     if isinstance(obj, h5py.Group):
         return obj
 
     if isinstance(obj, h5py.Dataset):
-        obj = obj[()]  # numpy array or scalar (maybe refs)
+        obj = obj[()]
 
     if isinstance(obj, h5py.Reference):
         target = f[obj]
@@ -94,13 +77,10 @@ def _deref(f: h5py.File, obj):
         return target
 
     if isinstance(obj, np.ndarray):
-        # numeric directly
         if not _is_hdf5_ref_dtype(obj.dtype):
             return np.array(obj)
 
-        # array of refs
         arr = np.asarray(obj).squeeze()
-
         if arr.size == 1:
             ref = arr.reshape(()).item()
             target = f[ref]
@@ -200,43 +180,38 @@ def load_sorted_measurements_v73(mat_path: str) -> List[MeasBlock]:
             t = _read_scalar(f, time_refs[k])
 
             r = _read_array(f, res_refs[k], dtype=float, matlab_fix=True).reshape(-1)
+            Nk = r.size
 
             R = _read_array(f, cov_refs[k], dtype=float, matlab_fix=True)
             R = np.atleast_2d(R)
+            if R.shape != (Nk, Nk):
+                raise ValueError(
+                    f"Block {k}: R shape {R.shape} incompatible with Nk={Nk}."
+                )
 
             par_g = _deref(f, par_refs[k])
             if not isinstance(par_g, h5py.Group):
                 raise TypeError(f"partials[{k}] did not resolve to a group.")
-
             if "wrt_X" not in par_g:
                 raise KeyError(f"partials[{k}] missing 'wrt_X'.")
 
-            wrt_obj = par_g["wrt_X"]
-            Hk = _deref(f, wrt_obj)
+            Hk = _deref(f, par_g["wrt_X"])
             if isinstance(Hk, list):
-                if len(Hk) == 0:
-                    raise ValueError(f"partials[{k}].wrt_X is an empty ref list.")
+                if not Hk:
+                    raise ValueError(f"partials[{k}].wrt_X is empty.")
                 Hk = Hk[0]
 
             Hk = np.array(Hk, dtype=float)
-            Hk = _matlab_to_numpy_numeric(Hk)  # <-- critical transpose fix
+            Hk = _matlab_to_numpy_numeric(Hk)  # transpose fix
             Hk = np.atleast_2d(Hk)
 
-            Nk = r.size
-
-            # If it still came in as (n_state x Nk), fix by transpose (extra safety)
+            # extra safety: if still transposed, fix
             if Hk.shape[0] != Nk and Hk.shape[1] == Nk:
                 Hk = Hk.T
 
             if Hk.shape[0] != Nk:
                 raise ValueError(
-                    f"Block {k}: Hk shape {Hk.shape} incompatible with len(r) Nk={Nk}. "
-                    "This usually means MATLAB->NumPy orientation is still wrong."
-                )
-
-            if R.shape != (Nk, Nk):
-                raise ValueError(
-                    f"Block {k}: R shape {R.shape} incompatible with Nk={Nk}."
+                    f"Block {k}: Hk shape {Hk.shape} incompatible with Nk={Nk}."
                 )
 
             blocks.append(MeasBlock(time=t, r=r, Hk=Hk, R=R))
@@ -255,15 +230,11 @@ def load_trajectory_ref_v73(mat_path: str) -> List[TrajNode]:
 
         for k in range(M):
             t = _read_scalar(f, time_refs[k])
-
             Phi = _read_array(f, stm_refs[k], dtype=float, matlab_fix=True)
             Phi = np.atleast_2d(Phi)
 
-            # extra safety: must be square
             if Phi.shape[0] != Phi.shape[1]:
-                raise ValueError(
-                    f"trajectory_ref[{k}].STM not square: shape={Phi.shape}"
-                )
+                raise ValueError(f"trajectory_ref[{k}].STM not square: {Phi.shape}")
 
             nodes.append(TrajNode(time=t, Phi0k=Phi))
 
@@ -275,56 +246,47 @@ def load_P0_v73(mat_path: str) -> np.ndarray:
         if "P0" not in f:
             raise KeyError("Missing P0 in MAT.")
         P0 = np.array(f["P0"][()], dtype=float)
-        P0 = _matlab_to_numpy_numeric(P0)  # P0 is 2D -> transpose fix
+        P0 = _matlab_to_numpy_numeric(P0)  # transpose fix
         return P0
 
 
 # =========================
-# Whitening + mapping dx0 -> residuals
+# Whitening
 # =========================
 
 
 def whiten_block(
     r: np.ndarray, A: np.ndarray, R: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Return (r_w, A_w) such that:
-        r_w - A_w dx = L^{-1}(r - A dx),  with R = L L^T
-    Fast path if diagonal.
-    """
     R = np.atleast_2d(R)
-    diag = np.diag(R)
 
-    # diagonal fast-path
+    diag = np.diag(R)
     if np.allclose(R, np.diag(diag), rtol=0.0, atol=0.0):
         s = np.sqrt(np.maximum(diag, 1e-30))
         return r / s, A / s[:, None]
 
-    # SPD path
     try:
         L = np.linalg.cholesky(R)
         return np.linalg.solve(L, r), np.linalg.solve(L, A)
     except np.linalg.LinAlgError:
-        # fallback eigen-whitening
         w, V = np.linalg.eigh(R)
         w = np.maximum(w, 1e-30)
         Winvhalf = V @ np.diag(1.0 / np.sqrt(w)) @ V.T
         return Winvhalf @ r, Winvhalf @ A
 
 
-class LinearizedRCVODx0:
-    """
-    Residual model for sampling in dx0:
-        e(dx0) = r - (Hk Phi0k) dx0
-    Optionally whiten block-by-block with Rk^{-1/2}.
-    """
+# =========================
+# Linearized dx0 model -> stacked (r, A)
+# =========================
 
+
+class LinearizedRCVODx0:
     def __init__(
         self,
         blocks: List[MeasBlock],
         traj: List[TrajNode],
         whiten: bool = True,
-        time_tol: float = 1e-5,  # seconds
+        time_tol: float = 1e-5,
     ):
         if not blocks:
             raise ValueError("No measurement blocks loaded.")
@@ -340,7 +302,6 @@ class LinearizedRCVODx0:
         self._Phi = [n.Phi0k for n in traj]
         self.n_state = self._Phi[0].shape[0]
 
-        # Precompute stacked r and A = Hk Phi0k
         rs = []
         As = []
         ts = []
@@ -358,8 +319,8 @@ class LinearizedRCVODx0:
             As.append(Aw)
             ts.append(np.full(rw.size, b.time, dtype=float))
 
-        self.r = np.concatenate(rs, axis=0)  # (Ntot,)
-        self.A = np.vstack(As)  # (Ntot, n_state)
+        self.r = np.concatenate(rs, axis=0)
+        self.A = np.vstack(As)
         self.t_scalar = np.concatenate(ts, axis=0)
 
     def _get_Phi_at_time(self, t: float) -> np.ndarray:
@@ -372,29 +333,39 @@ class LinearizedRCVODx0:
             )
         Phi0k = self._Phi[j]
         if Phi0k.shape != (self.n_state, self.n_state):
-            raise ValueError(f"Phi0k has wrong shape {Phi0k.shape}")
+            raise ValueError(f"Phi0k wrong shape {Phi0k.shape}")
         return Phi0k
 
-    def residuals(
-        self, dx0: np.ndarray, idx_solve: Optional[np.ndarray] = None
-    ) -> np.ndarray:
-        """
-        Return e(dx0) in whitened units (if whiten=True):
-            e = r - A dx0
-        where A = stacked (Hk Phi0k).
-        """
-        dx0 = np.asarray(dx0, dtype=float).reshape(-1)
 
+# =========================
+# PICKLABLE residual callable (for multiprocessing emcee)
+# =========================
+
+
+class ResidualDx0:
+    """
+    Picklable callable: e(dx0) = r - A[:,idx] @ dx0
+
+    IMPORTANT: emcee multiprocessing requires the log_prob function to be picklable.
+    Closures / nested funcs capturing non-picklable objects often fail on macOS spawn.
+    This class holds only numpy arrays -> picklable.
+    """
+
+    def __init__(
+        self, r: np.ndarray, A: np.ndarray, idx_solve: Optional[np.ndarray] = None
+    ):
+        self.r = np.asarray(r, dtype=float).reshape(-1)
+        self.A = np.asarray(A, dtype=float)
         if idx_solve is None:
-            if dx0.size != self.n_state:
-                raise ValueError(f"dx0 size {dx0.size} != n_state {self.n_state}")
+            self.idx = None
+        else:
+            self.idx = np.asarray(idx_solve, dtype=int).reshape(-1)
+
+    def __call__(self, dx0: np.ndarray) -> np.ndarray:
+        dx0 = np.asarray(dx0, dtype=float).reshape(-1)
+        if self.idx is None:
             return self.r - self.A @ dx0
-
-        idx_solve = np.asarray(idx_solve, dtype=int).reshape(-1)
-        if dx0.size != idx_solve.size:
-            raise ValueError(f"dx0 size {dx0.size} != len(idx_solve) {idx_solve.size}")
-
-        return self.r - self.A[:, idx_solve] @ dx0
+        return self.r - self.A[:, self.idx] @ dx0
 
 
 # =========================
@@ -411,12 +382,6 @@ def plot_prefit_postfit(
     fontsize: int = 16,
     markersize: float = 3.0,
 ):
-    """
-    Two figures:
-      1) Prefit: time series + histogram
-      2) Postfit: time series + histogram
-    Residuals assumed already normalized/whitened (dimensionless).
-    """
     t_hr = np.asarray(t_scalar_s, dtype=float) / 3600.0
 
     def _make_fig(data: np.ndarray, label: str):
@@ -486,7 +451,7 @@ def main():
     SAVE_PREFIX = "results/rcvo_linear_dx0"
     TIME_TOL = 1e-5
 
-    # MCMC settings (edit freely)
+    # MCMC settings
     N_SAMPLES = 2000
     N_WALKERS = 128
     BURN_IN = 300
@@ -507,12 +472,11 @@ def main():
     print(f"[OK] blocks: {len(blocks)}")
     print(f"[OK] traj nodes: {len(traj)}")
 
-    # Quick STM sanity at start: Phi(t0) should be ~I
+    # STM sanity: Phi(t0) ~ I
     Phi0 = traj[0].Phi0k
     Ierr = np.linalg.norm(Phi0 - np.eye(Phi0.shape[0]))
     print(f"[CHECK] ||Phi(t0)-I|| = {Ierr:.3e}")
 
-    # Build dx0 model with STM mapping + whitening
     model_lin = LinearizedRCVODx0(blocks, traj, whiten=True, time_tol=TIME_TOL)
 
     n_state = P0.shape[0]
@@ -523,20 +487,20 @@ def main():
 
     idx_solve = np.arange(n_state, dtype=int)
 
+    # Build PICKLABLE residual callable (IMPORTANT for multiprocessing)
+    residual_callable = ResidualDx0(model_lin.r, model_lin.A, idx_solve=idx_solve)
+
     # Prefit at dx0=0
-    pre = model_lin.residuals(np.zeros(idx_solve.size), idx_solve=idx_solve)
+    pre = residual_callable(np.zeros(idx_solve.size))
     dof = pre.size - idx_solve.size
     chi2 = float(pre @ pre)
     print(f"[SANITY] chi2={chi2:.6e} dof={dof} chi2_red={chi2/max(dof,1):.6e}")
 
-    # Priors from P0 diagonal (independent normals; consistent with your whitening workflow)
+    # Priors from P0 diagonal
     sig0 = np.sqrt(np.maximum(np.diag(P0), 0.0))
     priors = [norm(loc=0.0, scale=(s if s > 0 else 1.0)) for s in sig0[idx_solve]]
 
-    def residuals_func(dx0_solve: np.ndarray) -> np.ndarray:
-        return model_lin.residuals(dx0_solve, idx_solve=idx_solve)
-
-    # ---- Run your MCMC ----
+    # Run your MCMC
     try:
         from MCMC import MCMCModel
     except Exception as e:
@@ -546,10 +510,10 @@ def main():
         ) from e
 
     mcmc = MCMCModel(
-        residuals_func=residuals_func,
+        residuals_func=residual_callable,  # <- picklable callable
         initial_params=np.zeros(idx_solve.size),
         param_priors=priors,
-        observed_data=np.zeros(1),  # placeholder
+        observed_data=np.zeros(1),
     )
     mcmc.setup_whitening_from_priors()
 
@@ -563,13 +527,12 @@ def main():
     )
 
     dx0_hat, P_mcmc = mcmc.get_estimate_and_covariance()
-    post = residuals_func(dx0_hat)
+    post = residual_callable(dx0_hat)
 
     chi2_post = float(post @ post)
     print(f"[MCMC] chi2_red @ dx0_hat = {chi2_post/max(dof,1):.6e}")
     print(f"[MCMC] ||dx0_hat|| = {np.linalg.norm(dx0_hat):.6e}")
 
-    # ---- Plots ----
     plot_prefit_postfit(
         t_scalar_s=model_lin.t_scalar,
         pre=pre,
@@ -587,6 +550,7 @@ def main():
         "plot_autocorrelation",
         "summary",
         "gelman_rubin_diagnostic",
+        "plot_corner",
     ]:
         try:
             getattr(mcmc, fn)()

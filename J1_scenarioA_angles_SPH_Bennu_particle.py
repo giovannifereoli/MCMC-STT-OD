@@ -42,10 +42,11 @@ Units:
 - km, km/s, seconds (ET)
 """
 
-# TODO: add SRP and attitude?
+# TODO: add SRP and attitude? maybe create measurement gaps
 # TODO: read chelseay and make realistic
 # TODO: check all the math
 # TODO: improve all plots in general
+# TODO: why burn-in shows multimodal than chain not converged?
 
 import os
 import sys
@@ -945,7 +946,7 @@ if __name__ == "__main__":
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
     utc1 = "2019-03-01T01:30:00"
-    n_obs = 22 # NOTE: 22 batch not working, 23 is working!
+    n_obs = 22  # NOTE: 22 batch not working, 23 is working!
 
     # Bennu physical
     R_bennu = 0.290  # km
