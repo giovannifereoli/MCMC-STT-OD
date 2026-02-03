@@ -454,10 +454,10 @@ def main():
     # MCMC settings
     N_SAMPLES = 2000
     N_WALKERS = 128
-    BURN_IN = 300
-    THIN = 20
+    BURN_IN = 1
+    THIN = 1
     SPHERICAL_SPREAD = 1e-1
-    METHOD_OPTIMIZE = "Powell"
+    METHOD_OPTIMIZE = "lsq"
 
     if not os.path.isfile(MAT_FILE):
         raise FileNotFoundError(f"MAT file not found: {MAT_FILE}")
