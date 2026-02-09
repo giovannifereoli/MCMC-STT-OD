@@ -830,6 +830,10 @@ class MCMCModel:
         if self.samples is None:
             raise RuntimeError("Run MCMC before computing Gelman-Rubin diagnostic.")
 
+        print(
+            "\n DANGER: This implementation assumes all walkers are independent chains. In EMCEE, this is not true. Use with caution. \n"
+        )
+
         # Reshape: (n_walkers, n_steps, ndim)
         chain = self.chain
         n_walkers, n_steps, ndim = chain.shape

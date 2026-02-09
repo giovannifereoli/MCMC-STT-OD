@@ -42,11 +42,10 @@ Units:
 - km, km/s, seconds (ET)
 """
 
-# TODO: add SRP and attitude? maybe create measurement gaps
-# TODO: read chelseay and make realistic
-# TODO: check all the math
-# TODO: improve all plots in general
-# TODO: why burn-in shows multimodal than chain not converged?
+# TODO: Add SRP and attitude? maybe create measurement gaps
+# TODO: Read chelseay and make realistic
+# TODO: Check all the math
+# TODO: Improve all plots in general (e.g., corner zoom out and put 3sig batch)
 
 import os
 import sys
@@ -120,6 +119,96 @@ def make_bennu_rotation_matrix(alpha, delta, omega, t, w0=0.0):
         return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
 
     return Rz(W) @ Rx(np.pi / 2 - delta) @ Rz(alpha + np.pi / 2)
+
+
+def occultation_mask_shape(
+    sc_pos_i,
+    part_pos_i,
+    bennu_mesh_bf,
+    alpha,
+    delta,
+    omega,
+    w0=0.0,
+    t0=0.0,
+    tau=None,
+    eps=1e-9,
+    use_embree=True,
+):
+    """
+    Shape-based visibility test using ray-mesh intersection.
+
+    Inputs
+    ------
+    sc_pos_i    : (N,3) spacecraft position in inertial (Bennu-centered, J2000)
+    part_pos_i  : (N,3) particle position in inertial (Bennu-centered, J2000)
+    bennu_mesh_bf : trimesh.Trimesh, Bennu shape in BODY-FIXED frame, centered at origin
+    alpha,delta,omega,w0 : Bennu pole/spin model used by make_bennu_rotation_matrix
+    tau         : (N,) seconds since start (same "tau" you use for dynamics); if None assumes t=0 for all
+    eps         : small margin to avoid classifying limb/touch as occulted
+    use_embree  : try to use pyembree for speed if available
+
+    Returns
+    -------
+    visible : (N,) bool
+        True if particle is visible (NOT occulted by the mesh).
+    """
+    sc_pos_i = np.asarray(sc_pos_i, dtype=float)
+    part_pos_i = np.asarray(part_pos_i, dtype=float)
+    N = sc_pos_i.shape[0]
+
+    if tau is None:
+        tau = np.zeros(N, dtype=float)
+    else:
+        tau = np.asarray(tau, dtype=float)
+        if tau.shape[0] != N:
+            raise ValueError("tau must have same length as sc_pos_i/part_pos_i")
+
+    # Build a ray intersector
+    if use_embree:
+        try:
+            from trimesh.ray.ray_pyembree import RayMeshIntersector
+
+            intersector = RayMeshIntersector(bennu_mesh_bf)
+        except Exception:
+            intersector = bennu_mesh_bf.ray
+    else:
+        intersector = bennu_mesh_bf.ray
+
+    # Rotate inertial -> body-fixed at each epoch
+    sc_b = np.zeros_like(sc_pos_i)
+    pt_b = np.zeros_like(part_pos_i)
+    for k in range(N):
+        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, t=t0 + tau[k], w0=w0)
+        sc_b[k] = R_ib @ sc_pos_i[k]
+        pt_b[k] = R_ib @ part_pos_i[k]
+
+    # Ray origins and directions in BODY-FIXED
+    d = pt_b - sc_b
+    rng = np.linalg.norm(d, axis=1)
+    # Handle degenerate SC==particle
+    good = rng > 0.0
+    dirs = np.zeros_like(d)
+    dirs[good] = d[good] / rng[good, None]
+
+    # Query first hit distance along each ray
+    # trimesh expects (M,3) origins and directions
+    # intersects_first returns distance; np.nan if no hit
+    dist_hit = intersector.intersects_first(ray_origins=sc_b, ray_directions=dirs)
+
+    # Visible if:
+    # - no hit at all   OR
+    # - first hit is beyond the particle range (with margin eps)
+    # Occulted if hit occurs before particle.
+    # Note: dist_hit is in same units as mesh coords (km if you scaled mesh).
+    visible = np.ones(N, dtype=bool)
+    # If intersects_first returns -1 sometimes depending on backend, treat as "no hit"
+    no_hit = np.isnan(dist_hit) | (dist_hit < 0.0)
+    visible[~no_hit] = dist_hit[~no_hit] >= (rng[~no_hit] - eps)
+
+    # Degenerate rays: if range==0, treat as visible (or set False; your choice)
+    visible[~good] = True
+
+    return visible
 
 
 # ============================================================
@@ -1006,10 +1095,10 @@ if __name__ == "__main__":
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
-    n_walkers = 128
-    n_samples = 2000
-    burn_in = 300
-    thin = 20
+    n_walkers = 10 * 128
+    n_samples = 5 * 2000
+    burn_in = 1
+    thin = 1
     spherical_spread = 1e-1
 
     # --------------------------
@@ -1339,7 +1428,6 @@ if __name__ == "__main__":
     model.plot_log_likelihood()
     model.summary()
     model.print_regression_diagnostics()
-    model.gelman_rubin_diagnostic()
     model.plot_autocorrelation()
 
     # --------------------------

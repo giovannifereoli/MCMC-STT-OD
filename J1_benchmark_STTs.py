@@ -319,28 +319,35 @@ def benchmark_orders_on_chain(
 
 def plot_chain_view_benchmark_latex(
     rows,
-    out_png="stt_chain_view_rms.png",
     out_pdf="stt_chain_view_rms.pdf",
 ):
     """
-    Fancy publication plot (LaTeX labels, RMS only).
-
-    Panels:
+    Publication-style plot with two panels:
       (a) Speedup vs FULL NL
-      (b) RMS(Δ log L) vs FULL NL
-      (c) RMS(Δ y / σ) vs FULL NL
+      (b) RMS(Δ y / σ) vs FULL NL
+
+    Figures are saved in ./results/
     """
+    import os
     import numpy as np
     import matplotlib.pyplot as plt
 
+    # -------------------------
+    # Prepare output directory
+    # -------------------------
+    out_dir = "results"
+    os.makedirs(out_dir, exist_ok=True)
+    out_pdf = os.path.join(out_dir, out_pdf)
+
+    # -------------------------
+    # Data unpacking
+    # -------------------------
     rows = np.asarray(rows, float)
 
     order = rows[:, 0].astype(int)
-    stt_ms = rows[:, 3]
-    nl_ms = rows[:, 4]
     speedup = rows[:, 5]
-    dlogL_rms = rows[:, 6]
-    dy_rms = rows[:, 8]
+    dy_rms = rows[:, 8]  # <-- RMS(Δy/σ)
+    nl_ms = rows[:, 4]
 
     # -------------------------
     # Global style (journal-like)
@@ -364,55 +371,39 @@ def plot_chain_view_benchmark_latex(
         }
     )
 
-    # Consistent color palette (colorblind-safe)
-    c_speed = "#1f77b4"  # blue
-    c_logl = "#d62728"  # red
-    c_meas = "#2ca02c"  # green
-    c_nl = "#7f7f7f"  # gray
+    c_speed = "#1f77b4"
+    c_resid = "#2ca02c"
 
-    fig = plt.figure(figsize=(11.5, 4.2))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.2))
 
-    # =========================
+    unique_orders = np.unique(order)
+
     # (a) Speedup
-    # =========================
-    ax1 = fig.add_subplot(1, 3, 1)
     ax1.plot(order, speedup, "-o", color=c_speed, lw=2.5, ms=6)
     ax1.set_yscale("log")
     ax1.set_xlabel(r"STT order")
     ax1.set_ylabel(r"Speedup $t_{\mathrm{NL}} / t_{\mathrm{STT}}$")
     ax1.set_title(r"(a) Computational gain")
+    ax1.set_xticks(unique_orders)
+    ax1.set_xlim(unique_orders.min() - 0.2, unique_orders.max() + 0.2)
     ax1.grid(True, which="both")
 
-    # =========================
-    # (b) Log-likelihood error
-    # =========================
-    ax2 = fig.add_subplot(1, 3, 2)
-    ax2.plot(order, dlogL_rms, "-o", color=c_logl, lw=2.5, ms=6)
+    # (b) Residual distortion
+    ax2.plot(order, dy_rms, "-o", color=c_resid, lw=2.5, ms=6)
     ax2.set_yscale("log")
     ax2.set_xlabel(r"STT order")
-    ax2.set_ylabel(r"$\mathrm{RMS}(\Delta \log \mathcal{L})$")
-    ax2.set_title(r"(b) Likelihood fidelity")
+    ax2.set_ylabel(r"$\mathrm{RMS}(\Delta y / \sigma)$")
+    ax2.set_title(r"(b) Residual distortion")
+    ax2.set_xticks(unique_orders)
+    ax2.set_xlim(unique_orders.min() - 0.2, unique_orders.max() + 0.2)
     ax2.grid(True, which="both")
 
-    # =========================
-    # (c) Measurement distortion
-    # =========================
-    ax3 = fig.add_subplot(1, 3, 3)
-    ax3.plot(order, dy_rms, "-o", color=c_meas, lw=2.5, ms=6)
-    ax3.set_yscale("log")
-    ax3.set_xlabel(r"STT order")
-    ax3.set_ylabel(r"$\mathrm{RMS}(\Delta y / \sigma)$")
-    ax3.set_title(r"(c) Measurement-space distortion")
-    ax3.grid(True, which="both")
-
-    # =========================
-    # Figure annotation
-    # =========================
+    # Annotation
     nl_ref = np.median(nl_ms)
     fig.text(
         0.5,
-        -0.02,
-        rf"All errors referenced to FULL nonlinear likelihood "
+        -0.03,
+        rf"Errors referenced to FULL nonlinear likelihood "
         rf"(median cost $t_{{\mathrm{{NL}}}}\approx {nl_ref:.2f}\,\mathrm{{ms/sample}}$).",
         ha="center",
         va="top",
@@ -420,9 +411,8 @@ def plot_chain_view_benchmark_latex(
     )
 
     fig.tight_layout()
-    # fig.savefig(out_png, bbox_inches="tight")
-    # fig.savefig(out_pdf, bbox_inches="tight")
-    plt.show()
+    fig.savefig(out_pdf, bbox_inches="tight")
+    plt.close(fig)
 
 
 # =========================
@@ -437,13 +427,18 @@ if __name__ == "__main__":
     mu = 4.89044967462e-09  # km^3/s^2 (kept from your Bennu script)
     sc_pos = np.array([0.0, 0.0, 5.0], dtype=float)  # km
 
-    T_hours = 6.0
+    T_hours = 1.0
     N_obs = 60
     t_grid = np.linspace(0.0, T_hours * 3600.0, N_obs)
 
-    # noise (rad)
-    sigma_ra = 1.0e-6
-    sigma_dec = 1.0e-6
+    # Measurement noise
+    sigma_pix = 0.1  # pixel noise (1-sigma)
+    fov_deg = 44.0  # full FOV [deg]  (e.g. NavCam ~44 deg)
+    n_pix = 2592  # pixels across FOV (e.g. NavCam)
+    fov_rad = np.deg2rad(fov_deg)
+    sigma_angle = sigma_pix * (fov_rad / n_pix)  # radians
+    sigma_ra = sigma_angle
+    sigma_dec = sigma_angle
 
     # truth initial state
     R0 = 0.290
@@ -464,8 +459,8 @@ if __name__ == "__main__":
     # reference x0_ref1 (nonzero deviation)
     # --------------------------
     rng = np.random.default_rng(42)
-    ref_sig_r = 0 * np.array([0.02, 0.02, 0.02])  # km
-    ref_sig_v = 0 * np.array([1e-5, 1e-5, 1e-5])  # km/s
+    ref_sig_r = np.array([1e-3, 1e-3, 1e-3])  # km
+    ref_sig_v = np.array([1e-6, 1e-6, 1e-6])  # km/s
     x0_ref1 = x0_true - np.hstack(
         [rng.normal(scale=ref_sig_r), rng.normal(scale=ref_sig_v)]
     )
@@ -586,6 +581,5 @@ if __name__ == "__main__":
 
     plot_chain_view_benchmark_latex(
         rows,
-        out_png="stt_chain_view_rms.png",
         out_pdf="stt_chain_view_rms.pdf",
     )
