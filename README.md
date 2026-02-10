@@ -34,3 +34,12 @@ If you use this code or reproduce results from the paper, please cite:
   year    = {2026},
   note    = {In Preparation}
 }
+```
+
+---
+
+## License
+
+Released under the **MIT License**.
+See the [LICENSE](LICENSE) file for details.
+
