@@ -10,10 +10,14 @@ from scipy.optimize import (
     differential_evolution,
 )
 from matplotlib.patches import Ellipse
+from matplotlib.lines import Line2D
 from statsmodels.tsa.stattools import acf
 from scipy.stats import gaussian_kde
 from scipy.optimize import least_squares
+from datetime import datetime
+import os
 
+# Publication-ish defaults
 plt.rcParams.update(
     {
         "text.usetex": True,
@@ -22,6 +26,14 @@ plt.rcParams.update(
         "grid.linestyle": ":",
         "grid.alpha": 0.7,
         "font.size": 12,
+        "axes.labelsize": 11,
+        "axes.titlesize": 12,
+        "xtick.labelsize": 9,
+        "ytick.labelsize": 9,
+        "legend.fontsize": 9,
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.linewidth": 0.8,
     }
 )
 
@@ -320,49 +332,223 @@ class MCMCModel:
                 self.whiten_L @ self.samples.T + self.whiten_mean[:, None]
             ).T  # shape (N, ndim)
 
-    def plot_convergence(self):
-        if self.samples is None:
+    def plot_convergence(
+        self,
+        idx=None,  # which parameters to plot (default: all)
+        max_dims: int = 12,  # cap number of panels for readability
+        thin: int = 1,  # plot every `thin` steps
+        discard: int = 0,  # discard first `discard` steps (per walker)
+        max_walkers_to_plot=None,  # cap number of walkers drawn
+        use_x_labels: bool = True,  # x_i instead of theta_i
+        save_folder: str = "results",
+        save_pdf: bool = True,
+        fname_prefix: str = "trace",
+    ):
+
+        if getattr(self, "samples", None) is None:
             print("Run MCMC first.")
             return
+        if getattr(self, "sampler", None) is None or not hasattr(
+            self.sampler, "nwalkers"
+        ):
+            raise AttributeError("self.sampler with attribute `nwalkers` is required.")
 
-        # Reshape the samples to (n_walkers, n_steps, ndim)
-        n_walkers = self.sampler.nwalkers
-        n_steps = self.samples.shape[0] // n_walkers
-        chain = self.samples.reshape(
-            n_walkers, n_steps, self.ndim
+        samples = np.asarray(self.samples)
+        if samples.ndim != 2:
+            raise ValueError("self.samples must be a 2D array (n_samples_total, ndim).")
+
+        n_walkers = int(self.sampler.nwalkers)
+        ndim = samples.shape[1]
+
+        if samples.shape[0] % n_walkers != 0:
+            raise ValueError(
+                f"Number of rows in samples ({samples.shape[0]}) is not divisible by n_walkers ({n_walkers})."
+            )
+
+        n_steps = samples.shape[0] // n_walkers
+
+        # emcee flatten is step-major -> reshape (n_steps, n_walkers, ndim) then transpose
+        chain = samples.reshape(n_steps, n_walkers, ndim).transpose(
+            1, 0, 2
         )  # (n_walkers, n_steps, ndim)
 
-        # Plot the chain for each parameter
-        fig, axes = plt.subplots(self.ndim, figsize=(10, 7), sharex=True)
-        for i in range(self.ndim):
-            ax = axes[i]
-            ax.plot(chain[:, :, i].T, alpha=0.5)
-            ax.set_ylabel(f"$\\theta_{{{i}}}$")
-            ax.grid(True)
-        axes[-1].set_xlabel("Step Number")
-        plt.tight_layout()
+        # select parameters
+        if idx is None:
+            idx = np.arange(min(ndim, max_dims))
+        else:
+            idx = np.asarray(idx, dtype=int)
+            if idx.size > max_dims:
+                idx = idx[:max_dims]
+
+        # discard + thin
+        discard = max(0, int(discard))
+        thin = max(1, int(thin))
+        chain = chain[:, discard:, :]
+        chain = chain[:, ::thin, :]
+
+        # cap walkers
+        if max_walkers_to_plot is None:
+            w_plot = n_walkers
+        else:
+            w_plot = min(n_walkers, int(max_walkers_to_plot))
+        chain_plot = chain[:w_plot, :, :]
+
+        n_panels = idx.size
+        x = np.arange(chain_plot.shape[1])
+
+        # Layout: compact but readable
+        fig_h = max(2.0, 1.25 * n_panels)
+        fig, axes = plt.subplots(n_panels, 1, figsize=(6.8, fig_h), sharex=True)
+        if n_panels == 1:
+            axes = [axes]
+
+        for row, p in enumerate(idx):
+            ax = axes[row]
+
+            # plot walker traces
+            for w in range(w_plot):
+                ax.plot(x, chain_plot[w, :, p], alpha=0.30, linewidth=0.8)
+
+            # overlay median and 16–84 band across ALL walkers (post discard/thin)
+            y_all = chain[:, :, p]
+            if y_all.shape[0] > 1:
+                med = np.median(y_all, axis=0)
+                q16, q84 = np.quantile(y_all, [0.16, 0.84], axis=0)
+                ax.plot(x, med, color="black", linewidth=1.4)
+                ax.fill_between(x, q16, q84, color="black", alpha=0.12)
+
+            label = rf"$x_{{{p}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
+            ax.set_ylabel(label)
+
+            # robust y-limits for each panel (avoid one crazy walker killing the zoom)
+            ylo, yhi = np.quantile(chain_plot[:, :, p], [0.01, 0.99])
+            if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
+                pad = 0.08 * (yhi - ylo)
+                ax.set_ylim(ylo - pad, yhi + pad)
+
+            ax.margins(x=0.01)
+
+        axes[-1].set_xlabel("MCMC step")
+
+        title = "MCMC trace plots"
+        if discard > 0:
+            title += f" (discard={discard})"
+        if thin > 1:
+            title += f" (thin={thin})"
+        if max_walkers_to_plot is not None and w_plot < n_walkers:
+            title += f" (showing {w_plot}/{n_walkers} walkers)"
+        fig.suptitle(title, y=0.995)
+
+        fig.tight_layout(rect=[0, 0, 1, 0.985])
+
+        if save_pdf:
+            os.makedirs(save_folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
+            fig.savefig(out, bbox_inches="tight", format="pdf")
+            print(f"Saved: {out}")
+
         plt.show()
 
-    def plot_log_likelihood(self):
-        if self.log_probs is None:
+    def plot_log_likelihood(
+        self,
+        save_folder: str = "results",
+        save_pdf: bool = True,
+        fname_prefix: str = "logposterior_trace",
+        dpi: int = 300,
+        alpha: float = 0.35,
+        lw: float = 0.8,
+        max_walkers_to_plot: int | None = None,
+        thin: int = 1,
+        discard: int = 0,  # extra discard (in steps) if you want, on top of any burn-in you already applied
+        show_summary: bool = True,
+    ):
+        if getattr(self, "log_probs", None) is None:
             print("Run MCMC first.")
             return
+        if getattr(self, "sampler", None) is None or not hasattr(
+            self.sampler, "nwalkers"
+        ):
+            raise AttributeError("self.sampler with attribute `nwalkers` is required.")
 
-        # Reshape the log_probs to (n_walkers, n_steps)
-        n_walkers = self.sampler.nwalkers
-        n_steps = self.log_probs.shape[0] // n_walkers
-        log_probs_chain = self.log_probs.reshape(n_walkers, n_steps)
+        log_probs = np.asarray(self.log_probs).ravel()
+        n_walkers = int(self.sampler.nwalkers)
 
-        # Plot the log posterior for each walker
-        plt.figure(figsize=(10, 5))
-        for i in range(n_walkers):
-            plt.plot(-log_probs_chain[i], alpha=0.6, linewidth=1)
+        if log_probs.size % n_walkers != 0:
+            raise ValueError(
+                f"log_probs length ({log_probs.size}) is not divisible by n_walkers ({n_walkers}). "
+                "Cannot reshape safely."
+            )
 
-        plt.xlabel("Step Number")
-        plt.ylabel(r"$-\log \mathcal{P}(\theta \mid y)$")
-        plt.title("Log-Posterior (Negative) per Walker After Burn-in")
-        plt.grid(True, linestyle=":")
-        plt.tight_layout()
+        n_steps = log_probs.size // n_walkers
+        # emcee-style: flatten is step-major, so reshape to (n_steps, n_walkers) then transpose
+        chain = log_probs.reshape(n_steps, n_walkers).T  # (n_walkers, n_steps)
+
+        # Optional discard + thinning for plotting
+        if discard < 0:
+            discard = 0
+        chain = chain[:, discard:]
+        chain = chain[:, :: max(1, int(thin))]
+
+        # You plotted negative log-posterior before; keep consistent
+        y = -chain
+
+        # optionally limit number of walkers drawn
+        plot_walkers = (
+            n_walkers
+            if max_walkers_to_plot is None
+            else min(n_walkers, int(max_walkers_to_plot))
+        )
+        y_plot = y[:plot_walkers, :]
+
+        x = np.arange(y_plot.shape[1])
+
+        fig, ax = plt.subplots(figsize=(6.8, 3.4))  # good single-column width-ish
+
+        # walker traces
+        for i in range(y_plot.shape[0]):
+            ax.plot(x, y_plot[i], alpha=alpha, linewidth=lw)
+
+        # Summary overlay: median + 16-84 band across walkers (using *all* walkers)
+        if show_summary and y.shape[0] > 1:
+            med = np.median(y, axis=0)
+            q16, q84 = np.quantile(y, [0.16, 0.84], axis=0)
+            ax.plot(x, med, linewidth=1.6, color="black", label="Median (all walkers)")
+            ax.fill_between(
+                x, q16, q84, color="black", alpha=0.12, label="16–84% (all walkers)"
+            )
+
+        ax.set_xlabel("MCMC step")
+        ax.set_ylabel(r"$-\log \mathcal{P}(\theta \mid y)$")
+
+        title = "Negative log-posterior trace"
+        if discard > 0:
+            title += f" (discard={discard})"
+        if thin > 1:
+            title += f" (thin={thin})"
+        if max_walkers_to_plot is not None and plot_walkers < n_walkers:
+            title += f" (showing {plot_walkers}/{n_walkers} walkers)"
+        ax.set_title(title)
+
+        # Robust y-limits so a single crazy walker doesn't ruin the view
+        ylo, yhi = np.quantile(y_plot, [0.01, 0.99])
+        if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
+            pad = 0.05 * (yhi - ylo)
+            ax.set_ylim(ylo - pad, yhi + pad)
+
+        ax.margins(x=0.01)
+        if show_summary and y.shape[0] > 1:
+            ax.legend(loc="upper right", frameon=True)
+
+        fig.tight_layout()
+
+        if save_pdf:
+            os.makedirs(save_folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
+            fig.savefig(out, bbox_inches="tight", format="pdf")  # vector PDF
+            print(f"Saved: {out}")
+
         plt.show()
 
     def plot_postfit_residuals(self):
@@ -380,57 +566,84 @@ class MCMCModel:
         plt.show()
 
     def plot_postfit_residuals_time(self, t_obs_used, opnav_data=False):
-        # 1) Compute median (more meaningful) or MAP (best residuals) parameters and post-fit residuals
+
+        if getattr(self, "samples", None) is None:
+            print("Run estimation first.")
+            return
+
+        # Compute MAP residuals
         best_params = self.get_map_estimate()
-        postfit = self.residuals_func(best_params)
+        if best_params is None:
+            raise RuntimeError("MAP estimate not available.")
 
-        # 2) Reshape: [r0, rr0, r1, rr1, ...] → (2, N)
-        residuals_matrix = postfit.reshape(-1, 2).T  # shape = (2, N)
+        postfit = np.asarray(self.residuals_func(best_params)).ravel()
 
-        # 3) Create subplots
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        if postfit.size % 2 != 0:
+            raise ValueError("Residual vector must be even-length (paired residuals).")
 
-        time_hr = t_obs_used / 3600.0
+        # Reshape [r0, rr0, r1, rr1, ...] -> (2, N)
+        residuals_matrix = postfit.reshape(-1, 2).T  # (2, N)
+
+        time_hr = np.asarray(t_obs_used).ravel() / 3600.0
+
+        if residuals_matrix.shape[1] != time_hr.size:
+            raise ValueError("Time vector length does not match residual count.")
+
+        # Remove zero residuals (both channels independently)
+        mask0 = residuals_matrix[0] != 0.0
+        mask1 = residuals_matrix[1] != 0.0
+
+        r0 = residuals_matrix[0, mask0]
+        r1 = residuals_matrix[1, mask1]
+        t0 = time_hr[mask0]
+        t1 = time_hr[mask1]
+        # Labels
         ylabels = (
             [r"RA Residual [$\sigma$]", r"DEC Residual [$\sigma$]"]
             if opnav_data
             else [r"Range Residual [$\sigma$]", r"Range-Rate Residual [$\sigma$]"]
         )
 
-        # 4) Top residual
-        ax0.plot(
-            time_hr,
-            residuals_matrix[0],
-            "o",
-            color="blue",
-            markersize=4,
-            label="Residual",
-        )
-        ax0.axhline(0, color="black", linestyle="--")
-        ax0.axhline(3, color="red", linestyle=":")
-        ax0.axhline(-3, color="red", linestyle=":")
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(6.8, 4.6), sharex=True)
+
+        # Top residual
+        ax0.scatter(t0, r0, s=14, alpha=0.85)
+        ax0.axhline(0, color="black", linestyle="--", linewidth=1.0)
+        ax0.axhline(3, color="red", linestyle=":", linewidth=1.2)
+        ax0.axhline(-3, color="red", linestyle=":", linewidth=1.2)
         ax0.set_ylabel(ylabels[0])
-        ax0.grid(True)
-        ax0.legend(loc="upper right")
+        ax0.grid(True, linestyle=":")
 
-        # 5) Bottom residual
-        ax1.plot(
-            time_hr,
-            residuals_matrix[1],
-            "o",
-            color="purple",
-            markersize=4,
-            label="Residual",
-        )
-        ax1.axhline(0, color="black", linestyle="--")
-        ax1.axhline(3, color="red", linestyle=":")
-        ax1.axhline(-3, color="red", linestyle=":")
+        # Symmetric y-limits
+        if r0.size > 0:
+            lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
+            lim = max(lim, 3.2)
+            ax0.set_ylim(-1.1 * lim, 1.1 * lim)
+
+        # Bottom residual
+        ax1.scatter(t1, r1, s=14, alpha=0.85)
+        ax1.axhline(0, color="black", linestyle="--", linewidth=1.0)
+        ax1.axhline(3, color="red", linestyle=":", linewidth=1.2)
+        ax1.axhline(-3, color="red", linestyle=":", linewidth=1.2)
         ax1.set_ylabel(ylabels[1])
-        ax1.set_xlabel("Time [hours since epoch]")
-        ax1.grid(True)
-        ax1.legend(loc="upper right")
+        ax1.set_xlabel("Time since epoch [hours]")
+        ax1.grid(True, linestyle=":")
 
-        plt.tight_layout()
+        if r1.size > 0:
+            lim = np.max(np.abs(np.quantile(r1, [0.01, 0.99])))
+            lim = max(lim, 3.2)
+            ax1.set_ylim(-1.1 * lim, 1.1 * lim)
+
+        fig.suptitle("Post-fit Residuals (MAP Estimate)", y=0.98)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        # Save vector PDF
+        os.makedirs("results", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"results/postfit_residuals_{timestamp}.pdf"
+        fig.savefig(fname, format="pdf", bbox_inches="tight")
+        print(f"Saved: {fname}")
+
         plt.show()
 
     def plot_corner(self, use_median_as_truth=True):
@@ -465,60 +678,125 @@ class MCMCModel:
         true_theta=None,
         plot_contours_labels=False,  # keep off unless you really need it
         batch_sigma_levels=(1.0,),
-        idx=None,  # NEW: list/array of parameter indices to plot
+        idx=None,  # list/array of parameter indices to plot
         max_dims=13,
         bins=40,
-        quantile_range=(0.005, 0.995),  # NEW: robust axis limits
-        title_digits=3,  # NEW: avoid long titles
+        quantile_range=(
+            0.005,
+            0.995,
+        ),  # robust axis limits (but we will ALSO include batch/MAP/truth)
+        title_digits=3,
+        legend_outside=True,
     ):
+        """
+        Corner plot for MCMC samples with optional overlays:
+        - Batch mean (red dot)
+        - Batch covariance ellipses (red)
+        - True value (green dot)
+        - MCMC MAP estimate (black x)
+
+        Improvements vs original:
+        1) Labels are x_i (not theta_i)
+        2) Axis limits always include: robust MCMC range + batch mean/ellipses + truth + MAP
+        3) One global legend placed outside the grid
+        4) Cleaner journal-style formatting and safer guards
+        """
         if self.samples is None:
             print("Run MCMC first.")
             return
 
         samples = np.asarray(self.samples)
+        if samples.ndim != 2 or samples.shape[0] < 2:
+            raise ValueError("self.samples must be a 2D array with at least 2 rows.")
 
         # ----------------------------
         # Choose dimensions to plot
         # ----------------------------
         ndim = samples.shape[1]
         if idx is None:
-            if ndim > max_dims:
-                idx = np.arange(max_dims)  # first max_dims by default
-            else:
-                idx = np.arange(ndim)
+            idx = np.arange(min(ndim, max_dims))
         else:
             idx = np.asarray(idx, dtype=int)
 
         s = samples[:, idx]
         d = s.shape[1]
 
-        # Truths & best params on the same subspace
+        # ----------------------------
+        # Truths & best params on same subspace
+        # ----------------------------
         best_params_full = self.get_map_estimate()
-        best_params = best_params_full[idx] if best_params_full is not None else None
+        best_params = (
+            np.asarray(best_params_full)[idx] if best_params_full is not None else None
+        )
 
         truths_full = np.median(samples, axis=0) if use_median_as_truth else true_theta
-        truths = truths_full[idx] if truths_full is not None else None
-
-        # Labels
-        labels = [f"$\\theta_{{{k}}}$" for k in idx]
+        truths = np.asarray(truths_full)[idx] if truths_full is not None else None
 
         # ----------------------------
-        # Robust range so outliers don't ruin scaling
+        # Labels: x_i
+        # ----------------------------
+        labels = [rf"$x_{{{k}}}$" for k in idx]
+
+        # ----------------------------
+        # Batch / True on same subspace
+        # ----------------------------
+        bm = np.asarray(batch_mean)[idx] if batch_mean is not None else None
+
+        bc = None
+        if batch_cov is not None:
+            batch_cov = np.asarray(batch_cov)
+            bc = batch_cov[np.ix_(idx, idx)]
+            if bc.shape != (d, d):
+                raise ValueError("batch_cov shape is inconsistent with selected idx.")
+
+        tt = np.asarray(true_theta)[idx] if true_theta is not None else None
+
+        # ----------------------------
+        # Robust range + ensure EVERYTHING is visible
+        # (include batch mean, ellipses, truth, MAP)
         # ----------------------------
         qlo, qhi = quantile_range
         ranges = []
+        ksig_max = float(np.max(batch_sigma_levels)) if len(batch_sigma_levels) else 0.0
+
         for j in range(d):
+            # robust from samples
             lo, hi = np.quantile(s[:, j], [qlo, qhi])
-            if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-                ranges.append((lo, hi))
-            else:
-                # fallback
-                mn, mx = np.min(s[:, j]), np.max(s[:, j])
-                ranges.append((mn, mx))
+
+            # fallback if quantiles degenerate
+            if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+                lo, hi = float(np.min(s[:, j])), float(np.max(s[:, j]))
+
+            # include point overlays
+            extras = []
+            if bm is not None and np.isfinite(bm[j]):
+                extras.append(float(bm[j]))
+            if tt is not None and np.isfinite(tt[j]):
+                extras.append(float(tt[j]))
+            if truths is not None and np.isfinite(truths[j]):
+                extras.append(float(truths[j]))
+            if best_params is not None and np.isfinite(best_params[j]):
+                extras.append(float(best_params[j]))
+
+            # include batch ellipse extent along axis (projection bound)
+            if bc is not None and np.isfinite(bc[j, j]) and bc[j, j] >= 0:
+                sig = ksig_max * float(np.sqrt(bc[j, j]))
+                if bm is not None and np.isfinite(bm[j]) and sig > 0:
+                    extras.extend([float(bm[j] - sig), float(bm[j] + sig)])
+
+            if extras:
+                lo = min(lo, np.min(extras))
+                hi = max(hi, np.max(extras))
+
+            # small padding so points/ellipses don't touch frame
+            span = hi - lo
+            if not np.isfinite(span) or span <= 0:
+                span = 1.0
+            pad = 0.03 * span
+            ranges.append((lo - pad, hi + pad))
 
         # ----------------------------
-        # Figure size that scales with d
-        # Rule of thumb: ~1.2–1.6 inch per dim
+        # Figure size scaling with d
         # ----------------------------
         inches_per_dim = 1.35
         fig_size = max(8.0, inches_per_dim * d)
@@ -538,63 +816,40 @@ class MCMCModel:
             fill_contours=False,
             smooth=1.0,
             smooth1d=1.0,
-            # avoid huge numbers of points making the plot slow:
-            # max_n_ticks=4,  # (older corner versions)
         )
 
-        # Corner returns a figure; axes are in row-major order
         axes = np.array(fig.axes).reshape((d, d))
 
         # ----------------------------
         # Overlay batch ellipses / points
         # ----------------------------
-        if batch_mean is not None:
-            batch_mean = np.asarray(batch_mean)
-            bm = batch_mean[idx]
-        else:
-            bm = None
-
-        if batch_cov is not None:
-            batch_cov = np.asarray(batch_cov)
-            bc = batch_cov[np.ix_(idx, idx)]
-        else:
-            bc = None
-
-        if true_theta is not None:
-            true_theta = np.asarray(true_theta)
-            tt = true_theta[idx]
-        else:
-            tt = None
-
+        # We'll avoid "label only on one axis" hacks and instead use a global legend with proxies.
         for i in range(d):
             for j in range(i):
                 ax = axes[i, j]
 
-                # batch mean + ellipses
+                # batch mean
                 if bm is not None:
-                    ax.plot(
-                        bm[j],
-                        bm[i],
-                        "ro",
-                        ms=4.5,
-                        label="Batch Mean" if (i == 1 and j == 0) else "",
-                    )
+                    ax.plot(bm[j], bm[i], "o", ms=4.5, color="red", zorder=6)
 
+                # batch ellipses
                 if bm is not None and bc is not None and np.all(np.isfinite(bc)):
                     cov_sub = bc[np.ix_([j, i], [j, i])]
                     mean_sub = [bm[j], bm[i]]
 
-                    # guard against singular / negative eigenvalues
+                    # symmetric guard
+                    cov_sub = 0.5 * (cov_sub + cov_sub.T)
+
                     vals, vecs = np.linalg.eigh(cov_sub)
                     vals = np.maximum(vals, 0.0)
-                    order = np.argsort(vals)[::-1]
-                    vals, vecs = vals[order], vecs[:, order]
 
-                    # if both eigenvalues are ~0, skip ellipse
                     if np.max(vals) > 0:
+                        order = np.argsort(vals)[::-1]
+                        vals, vecs = vals[order], vecs[:, order]
                         angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
+
                         for ksig in batch_sigma_levels:
-                            width, height = 2 * ksig * np.sqrt(vals)
+                            width, height = 2.0 * float(ksig) * np.sqrt(vals)
                             ell = Ellipse(
                                 xy=mean_sub,
                                 width=width,
@@ -602,87 +857,168 @@ class MCMCModel:
                                 angle=angle,
                                 edgecolor="red",
                                 facecolor="none",
-                                lw=1.4 if ksig == 1 else 1.0,
-                                linestyle="-" if ksig == 1 else "--",
+                                lw=1.4 if float(ksig) == 1.0 else 1.0,
+                                linestyle="-" if float(ksig) == 1.0 else "--",
                                 alpha=0.95,
-                                label=(
-                                    rf"Batch {ksig:g}$\sigma$"
-                                    if (i == 1 and j == 0)
-                                    else ""
-                                ),
+                                zorder=5,
                             )
                             ax.add_patch(ell)
 
                 # true value
                 if tt is not None:
-                    ax.plot(
-                        tt[j],
-                        tt[i],
-                        "go",
-                        ms=4.5,
-                        label="True Value" if (i == 1 and j == 0) else "",
-                    )
+                    ax.plot(tt[j], tt[i], "o", ms=4.5, color="green", zorder=7)
 
                 # MCMC MAP
                 if best_params is not None:
                     ax.plot(
                         best_params[j],
                         best_params[i],
-                        "kx",
+                        "x",
                         ms=6,
                         mew=1.6,
-                        label="MCMC MAP" if (i == 1 and j == 0) else "",
+                        color="black",
+                        zorder=8,
                     )
 
-                # Plot contour labels
+                # Optional contour labels (fixed to use the *selected* samples)
                 if plot_contours_labels:
-                    x = self.samples[:, j]
-                    y = self.samples[:, i]
+                    x = s[:, j]
+                    y = s[:, i]
                     data = np.vstack([x, y])
                     kde = gaussian_kde(data)
+
                     xi, yi = np.mgrid[
-                        x.min() : x.max() : 100j, y.min() : y.max() : 100j
+                        ranges[j][0] : ranges[j][1] : 100j,
+                        ranges[i][0] : ranges[i][1] : 100j,
                     ]
                     zi = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
 
-                    # Choose contour levels matching corner.corner defaults
-                    levels = [0.118, 0.393, 0.675, 0.864]  # ≈ 0.5σ, 1σ, 1.5σ, 2σ
-                    # Estimate actual values to pass to contour
+                    # same mass levels as you had (roughly)
+                    levels_mass = [0.118, 0.393, 0.675, 0.864]
                     sorted_zi = np.sort(zi.ravel())[::-1]
                     cdf = np.cumsum(sorted_zi)
                     cdf /= cdf[-1]
                     value_levels = []
-                    for lv in levels:
-                        idx = np.searchsorted(cdf, lv)
-                        value_levels.append(sorted_zi[idx])
-                    value_levels.sort()
+                    for lv in levels_mass:
+                        k = int(np.searchsorted(cdf, lv))
+                        k = np.clip(k, 0, len(sorted_zi) - 1)
+                        value_levels.append(sorted_zi[k])
+                    value_levels = sorted(set(value_levels))
 
-                    contour_set = ax.contour(
+                    cs = ax.contour(
                         xi, yi, zi, levels=value_levels, colors="black", linewidths=1
                     )
-                    fmt_dict = {
-                        l: f"{int(100 * lv)}\\%"
-                        for l, lv in zip(contour_set.levels, levels)
+                    fmt = {
+                        lvl: f"{int(100 * m)}\\%"
+                        for lvl, m in zip(cs.levels, levels_mass[: len(cs.levels)])
                     }
-                    ax.clabel(contour_set, fmt=fmt_dict, inline=True, fontsize=8)
+                    ax.clabel(cs, fmt=fmt, inline=True, fontsize=8)
 
         # ----------------------------
         # Global formatting tweaks
         # ----------------------------
         for ax in fig.get_axes():
             ax.tick_params(labelsize=8)
-            # reduce label padding a bit
             ax.xaxis.labelpad = 6
             ax.yaxis.labelpad = 6
 
-        # Single legend in one axis (if it exists)
-        if d >= 2:
-            axes[1, 0].legend(loc="upper right", fontsize=9, frameon=True)
+        # ----------------------------
+        # Global legend OUTSIDE the corner grid
+        # ----------------------------
+        # Proxy artists (clean, consistent)
+        proxies = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor="red",
+                markersize=6,
+                label="Batch Mean",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color="red",
+                lw=1.4,
+                linestyle="-",
+                label=(
+                    rf"Batch {float(batch_sigma_levels[0]):g}$\sigma$"
+                    if len(batch_sigma_levels)
+                    else "Batch 1$\\sigma$"
+                ),
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor="green",
+                markersize=6,
+                label="True Value",
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="x",
+                color="black",
+                markersize=7,
+                lw=0,
+                label="MCMC MAP",
+            ),
+        ]
+
+        # If multiple sigma levels, add them too
+        if len(batch_sigma_levels) > 1:
+            for ksig in batch_sigma_levels[1:]:
+                proxies.insert(
+                    2,  # after the 1-sigma line
+                    Line2D(
+                        [0],
+                        [0],
+                        color="red",
+                        lw=1.0,
+                        linestyle="--",
+                        label=rf"Batch {float(ksig):g}$\sigma$",
+                    ),
+                )
+
+        # Only show relevant entries (e.g., don't show batch if not provided)
+        filtered = []
+        for p in proxies:
+            if "Batch" in p.get_label():
+                if bm is not None:
+                    filtered.append(p)
+            elif p.get_label() == "True Value":
+                if tt is not None:
+                    filtered.append(p)
+            elif p.get_label() == "MCMC MAP":
+                if best_params is not None:
+                    filtered.append(p)
+            else:
+                filtered.append(p)
 
         fig.set_size_inches(fig_size, fig_size)
-        fig.subplots_adjust(
-            wspace=0.05, hspace=0.05
-        )  # better than tight_layout for corner
+
+        if legend_outside and len(filtered) > 0:
+            # reserve right margin for legend
+            fig.subplots_adjust(wspace=0.05, hspace=0.05, right=0.82)
+            fig.legend(
+                handles=filtered,
+                loc="upper left",
+                bbox_to_anchor=(0.84, 0.98),
+                frameon=True,
+                borderaxespad=0.0,
+            )
+        else:
+            fig.subplots_adjust(wspace=0.05, hspace=0.05)
+
+        os.makedirs("results", exist_ok=True)
+        fig.savefig(
+            f"results/corner_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            format="pdf",
+            bbox_inches="tight",
+        )
         plt.show()
 
     def summary(self):
@@ -917,25 +1253,82 @@ class MCMCModel:
 
         return ess
 
-    def plot_autocorrelation(self, max_lag=100):
-        if self.samples is None:
+    def plot_autocorrelation(
+        self,
+        idx=None,  # parameters to include (default: all, capped)
+        max_dims: int = 6,  # max number of parameters shown
+        max_lag: int = 200,
+        thin: int = 1,
+        discard: int = 0,
+        save_folder: str = "results",
+        save_pdf: bool = True,
+        fname_prefix: str = "acf",
+    ):
+
+        if getattr(self, "samples", None) is None:
             print("Run MCMC first.")
             return
+        if getattr(self, "sampler", None) is None:
+            raise AttributeError("self.sampler required.")
 
-        chain = self.samples
+        samples = np.asarray(self.samples)
+        n_walkers = int(self.sampler.nwalkers)
+        ndim = samples.shape[1]
 
-        fig, axes = plt.subplots(self.ndim, 1, figsize=(8, 2 * self.ndim))
-        if self.ndim == 1:
-            axes = [axes]
+        if samples.shape[0] % n_walkers != 0:
+            raise ValueError("Samples cannot be reshaped consistently.")
 
-        for i in range(self.ndim):
-            acf_vals = acf(chain[:, i], nlags=max_lag, fft=True)
-            axes[i].stem(range(max_lag + 1), acf_vals, basefmt=" ")
-            axes[i].set_ylabel(r"$\mathrm{{ACF}}[\theta_{{{}}}]$".format(i))
-            axes[i].grid(True)
+        n_steps = samples.shape[0] // n_walkers
 
-        plt.xlabel("Lag")
-        plt.tight_layout()
+        # Correct reshape (emcee step-major flattening)
+        chain = samples.reshape(n_steps, n_walkers, ndim).transpose(1, 0, 2)
+
+        discard = max(0, int(discard))
+        thin = max(1, int(thin))
+        chain = chain[:, discard:, :]
+        chain = chain[:, ::thin, :]
+
+        # Parameter selection
+        if idx is None:
+            idx = np.arange(min(ndim, max_dims))
+        else:
+            idx = np.asarray(idx, dtype=int)
+            if idx.size > max_dims:
+                idx = idx[:max_dims]
+
+        lags = np.arange(max_lag + 1)
+
+        fig, ax = plt.subplots(figsize=(6.8, 3.8))
+
+        for p in idx:
+            # Average ACF across walkers
+            acf_vals = []
+            for w in range(chain.shape[0]):
+                acf_vals.append(acf(chain[w, :, p], nlags=max_lag, fft=True))
+            acf_mean = np.mean(acf_vals, axis=0)
+
+            ax.plot(lags, acf_mean, linewidth=1.6, label=rf"$x_{{{p}}}$")
+
+            # Integrated autocorrelation time estimate
+            positive = acf_mean[acf_mean > 0]
+            tau_int = 1 + 2 * np.sum(positive[1:])
+            ax.axvline(tau_int, linestyle="--", linewidth=0.9, alpha=0.6)
+
+        ax.set_xlabel("Lag")
+        ax.set_ylabel("Autocorrelation")
+        ax.set_xlim(0, max_lag)
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(frameon=True)
+
+        fig.tight_layout()
+
+        if save_pdf:
+            os.makedirs(save_folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
+            fig.savefig(out, bbox_inches="tight", format="pdf")
+            print(f"Saved: {out}")
+
         plt.show()
 
     def get_estimate_and_covariance(self, method="map"):
@@ -953,230 +1346,3 @@ class MCMCModel:
 
         cov = np.cov(self.samples.T)
         return theta_hat, cov
-
-    '''
-        def run_hmc(
-            self,
-            n_samples=3000,
-            burn_in=500,
-            step_size=1e-3,
-            num_integration_steps=20,
-            print_every=10,
-            mass_matrix=None,  # Pass a full-rank positive-definite matrix or None for identity
-        ):
-            """
-            Run Hamiltonian Monte Carlo using NumPy with general mass matrix and momentum resampling.
-            """
-
-            # Default mass matrix = identity
-            M = np.eye(self.ndim) if mass_matrix is None else np.array(mass_matrix)
-            M_inv = np.linalg.inv(M)
-            L = np.linalg.cholesky(M)
-
-            def U(theta):
-                lp = self.log_prior(theta)
-                if not np.isfinite(lp):
-                    return np.inf
-                return -lp - self.log_likelihood(theta)
-
-            def grad_U(theta):
-                eps = 1e-6
-                grad = np.zeros_like(theta)
-                for i in range(len(theta)):
-                    d = np.zeros_like(theta)
-                    d[i] = eps
-                    grad[i] = (U(theta + d) - U(theta - d)) / (2 * eps)
-                return grad
-
-            def leapfrog(theta, p, step_size, num_steps):
-                theta_new = theta.copy()
-                p_new = p - 0.5 * step_size * grad_U(theta_new)
-
-                for _ in range(num_steps - 1):
-                    theta_new += step_size * M_inv @ p_new
-                    p_new -= step_size * grad_U(theta_new)
-
-                theta_new += step_size * M_inv @ p_new
-                p_new -= 0.5 * step_size * grad_U(theta_new)
-                return theta_new, -p_new
-
-            theta_current = np.array(self.initial_params)
-            samples = []
-            logps = []
-            accepted = 0
-            total_steps = n_samples + burn_in
-
-            print("Starting HMC sampling...")
-            for i in range(total_steps):
-                z = np.random.randn(self.ndim)
-                p_current = L @ z  # Now p ~ N(0, M)
-                theta_proposed, p_proposed = leapfrog(
-                    theta_current, p_current, step_size, num_integration_steps
-                )
-
-                U_current = U(theta_current)
-                U_proposed = U(theta_proposed)
-
-                K_current = 0.5 * p_current.T @ M_inv @ p_current
-                K_proposed = 0.5 * p_proposed.T @ M_inv @ p_proposed
-                log_accept_prob = U_current + K_current - U_proposed - K_proposed
-
-                accepted_flag = False
-                if np.log(np.random.rand()) < log_accept_prob:
-                    theta_current = theta_proposed
-                    accepted += 1
-                    accepted_flag = True
-
-                if i >= burn_in:
-                    samples.append(theta_current.copy())
-                    logps.append(-U(theta_current))
-
-                if i % print_every == 0 or i == total_steps - 1:
-                    phase = "Burn-in" if i < burn_in else "Sampling"
-                    print(
-                        f"[{i}/{total_steps}] {phase} | "
-                        f"Accepted: {accepted}/{i+1} ({(accepted/(i+1))*100:.1f}%)"
-                    )
-
-            self.samples = np.array(samples)
-            self.log_probs = np.array(logps)
-
-            print("HMC sampling completed.")
-            print(f"Final acceptance rate: {(accepted / total_steps):.2%}")
-    '''
-
-    '''
-        def find_candidates_de_one_shot(
-        self,
-        n_keep=30,              # how many candidates to keep from the DE population
-        top_k_optima=8,         # how many unique optima to return after dedup
-        popsize=60,
-        maxiter=250,
-        seed=42,
-        use_bounds_from_priors=True,
-        q_bounds=1e-6,
-        polish_local=True,
-        method_local="Powell",
-        maxiter_local=600,
-        dedup_tol=1e-2,
-        verbose=True,
-    ):
-        """
-        "One-shot" approach:
-        - Run differential evolution once (global search)
-        - Keep best candidates from its final population
-        - Optionally locally polish them
-        - De-duplicate and return top optima
-
-        Returns:
-            optima_theta: (K, ndim) unique optima in ORIGINAL space
-            optima_logp: (K,) log posterior values
-            candidates_theta: (M, ndim) raw kept candidates (ORIGINAL space)
-            candidates_logp: (M,) log posterior values
-        """
-        use_whitened = getattr(self, "is_whitened", False)
-        log_prob_func = self.log_prob_whitened if use_whitened else self.log_prob
-
-        def objective(theta):
-            lp = log_prob_func(theta)
-            if not np.isfinite(lp):
-                return 1e100
-            return -lp
-
-        if use_bounds_from_priors:
-            bounds = self._build_bounds_from_priors(use_whitened=use_whitened, q=q_bounds)
-        else:
-            raise ValueError("Provide bounds or set use_bounds_from_priors=True.")
-
-        # ---- run DE once
-        if verbose:
-            print(f"[OneShot-DE] popsize={popsize}, maxiter={maxiter}, n_keep={n_keep}")
-
-        res = differential_evolution(
-            objective,
-            bounds=bounds,
-            seed=seed,
-            popsize=popsize,
-            maxiter=maxiter,
-            polish=False,          # important: we want the population, we polish ourselves
-            tol=1e-10,
-            updating="deferred",
-            workers=1,             # deterministic
-            disp=False,
-        )
-
-        # ---- extract population (preferred)
-        if hasattr(res, "population") and res.population is not None:
-            pop = np.array(res.population)          # shape (NP, ndim)
-        else:
-            # Fallback for older SciPy: store population via callback
-            raise RuntimeError(
-                "SciPy result has no `.population`. "
-                "Upgrade SciPy or implement a callback-based collector."
-            )
-
-        # Evaluate objective for the whole final population
-        vals = np.array([objective(x) for x in pop])
-        idx = np.argsort(vals)[: min(n_keep, len(pop))]
-        cand = pop[idx]
-        cand_logp = -vals[idx]
-
-        # ---- optional local polishing of candidates
-        refined = []
-        if polish_local:
-            if verbose:
-                print(f"[OneShot-DE] Polishing {len(cand)} candidates with {method_local}...")
-            for i, x0 in enumerate(cand):
-                rloc = minimize(
-                    objective,
-                    x0,
-                    method=method_local,
-                    options={"maxiter": maxiter_local, "disp": False},
-                )
-                if np.isfinite(rloc.fun):
-                    refined.append((rloc.x, -rloc.fun))
-            if len(refined) == 0:
-                refined = [(cand[0], cand_logp[0])]
-        else:
-            refined = list(zip(cand, cand_logp))
-
-        # Sort refined by best logp
-        refined.sort(key=lambda t: -t[1])
-        thetas = np.array([t for (t, _) in refined])
-        logps = np.array([lp for (_, lp) in refined])
-
-        # ---- dedup in meaningful metric
-        if use_whitened:
-            thetas_metric = thetas.copy()
-        else:
-            stds = np.array([p.std() for p in self.param_priors])
-            stds = np.where(stds > 0, stds, 1.0)
-            thetas_metric = thetas / stds[None, :]
-
-        uniq = []
-        uniq_lp = []
-        uniq_metric = []
-        for t, lp, tm in zip(thetas, logps, thetas_metric):
-            if len(uniq) == 0:
-                uniq.append(t); uniq_lp.append(lp); uniq_metric.append(tm); continue
-            d = np.min(np.linalg.norm(np.array(uniq_metric) - tm, axis=1))
-            if d > dedup_tol:
-                uniq.append(t); uniq_lp.append(lp); uniq_metric.append(tm)
-            if len(uniq) >= top_k_optima:
-                break
-
-        optima = np.array(uniq)
-        optima_lp = np.array(uniq_lp)
-
-        # ---- map to original space if whitened
-        if use_whitened:
-            optima = (self.whiten_L @ optima.T + self.whiten_mean[:, None]).T
-            cand  = (self.whiten_L @ cand.T + self.whiten_mean[:, None]).T
-
-        if verbose:
-            print(f"[OneShot-DE] Unique optima: {len(optima)}")
-            for i, (t, lp) in enumerate(zip(optima, optima_lp), 1):
-                print(f"  #{i}: logp={lp:.3f}")
-
-        return optima, optima_lp, cand, cand_logp
-    '''

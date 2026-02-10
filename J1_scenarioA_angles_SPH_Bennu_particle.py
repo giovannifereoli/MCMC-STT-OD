@@ -50,6 +50,8 @@ Units:
 import os
 import sys
 from pathlib import Path
+from datetime import datetime
+
 
 import sympy as sp
 import numpy as np
@@ -590,24 +592,57 @@ def plot_bennu_scene_body_fixed(
     downsample=3,
 ):
     """
-    BODY-FIXED visualization.
+    BODY-FIXED visualization (publication-ready).
 
-    bennu_mesh: trimesh.Trimesh in Bennu body-fixed coordinates, centered at origin
-    sc_state_full: (N,6) inertial
-    x_true_full:   (N,12 or 6) inertial
-    x_map:         (N_vis,12 or 6) inertial
-    tau_full:      (N,) seconds since start for sc_state_full / x_true_full
-    tau_map:       (N_vis,) seconds since start for x_map
+    Notes
+    -----
+    - Assumes `bennu_mesh` is already in Bennu body-fixed frame and centered at origin.
+    - `make_bennu_rotation_matrix(alpha, delta, omega, t)` is assumed to return a DCM
+      that maps BODY->INERTIAL (R_bi) or INERTIAL->BODY (R_ib). Many implementations
+      return BODY->INERTIAL; in that common case, the correct inertial->body transform
+      is the transpose. We therefore apply the transpose by default below to make the
+      trajectories visibly body-fixed and consistent with the mesh.
     """
+
+    import numpy as np
+    import matplotlib.pyplot as plt
 
     # ------------------------------------------------------------
     # Downsample
     # ------------------------------------------------------------
     sl = slice(None, None, max(1, int(downsample)))
 
-    sc_i = sc_state_full[sl, :3]
-    pt_i = x_true_full[sl, :3]
-    tau_i = tau_full[sl]
+    sc_i = np.asarray(sc_state_full)[sl, :3]
+    pt_i = np.asarray(x_true_full)[sl, :3]
+    tau_i = np.asarray(tau_full)[sl]
+
+    x_map = np.asarray(x_map)
+    tau_map = np.asarray(tau_map)
+
+    # ------------------------------------------------------------
+    # Optional: scale mesh to a target radius for consistent visuals
+    # (does NOT change trajectories; purely a visualization scaling)
+    # ------------------------------------------------------------
+    mesh = bennu_mesh
+    if mesh_target_radius_km is not None:
+        # Estimate current mesh "radius"
+        v = np.asarray(mesh.vertices)
+        r = np.linalg.norm(v, axis=1)
+
+        if mesh_scale_mode.lower() == "rms":
+            r0 = float(np.sqrt(np.mean(r**2)))
+        elif mesh_scale_mode.lower() in ("mean", "avg"):
+            r0 = float(np.mean(r))
+        elif mesh_scale_mode.lower() in ("max", "peak"):
+            r0 = float(np.max(r))
+        else:
+            raise ValueError("mesh_scale_mode must be one of {'rms','mean','max'}")
+
+        if np.isfinite(r0) and r0 > 0:
+            scale = float(mesh_target_radius_km) / r0
+            # trimesh.Trimesh can be copied; keep it light
+            mesh = mesh.copy()
+            mesh.apply_scale(scale)
 
     # ------------------------------------------------------------
     # Rotate INERTIAL -> BODY-FIXED
@@ -615,38 +650,64 @@ def plot_bennu_scene_body_fixed(
     sc_b = np.zeros_like(sc_i)
     pt_b = np.zeros_like(pt_i)
 
+    # Key fix: use transpose so inertial trajectories become body-fixed wrt mesh
     for k, tk in enumerate(tau_i):
-        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, tk)
+        R = make_bennu_rotation_matrix(alpha, delta, omega, float(tk))
+        R_bi = np.asarray(R)
+        R_ib = R_bi.T  # <-- critical for typical "body->inertial" attitude models
         sc_b[k] = R_ib @ sc_i[k]
         pt_b[k] = R_ib @ pt_i[k]
 
-    # MAP arc (already visible-only, separate tau grid)
+    # MAP arc (separate tau grid)
     pt_map_b = np.zeros_like(x_map[:, :3])
     for k, tk in enumerate(tau_map):
-        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, tk)
+        R = make_bennu_rotation_matrix(alpha, delta, omega, float(tk))
+        R_bi = np.asarray(R)
+        R_ib = R_bi.T
         pt_map_b[k] = R_ib @ x_map[k, :3]
 
     # ------------------------------------------------------------
-    # Plot
+    # Plot (publication style)
     # ------------------------------------------------------------
-    fig = plt.figure(figsize=(11, 8))
+    plt.rcParams.update(
+        {
+            "axes.labelsize": 11,
+            "axes.titlesize": 12,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "legend.fontsize": 9,
+        }
+    )
+
+    fig = plt.figure(figsize=(7.2, 5.4))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Bennu mesh (already body-fixed)
-    add_trimesh_to_ax(ax, bennu_mesh, alpha=0.35, edge_alpha=0.10, max_faces=25000)
+    # Bennu mesh (body-fixed)
+    add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
 
-    # Spacecraft
-    ax.plot(sc_b[:, 0], sc_b[:, 1], sc_b[:, 2], linewidth=2.0, label="SC (body-fixed)")
-
-    # Particle truth
-    ax.plot(pt_b[:, 0], pt_b[:, 1], pt_b[:, 2], linewidth=2.0, label="Particle truth")
-
-    # Particle MAP
+    # Trajectories (use zorder-ish via plotting order; 3D ignores true zorder sometimes)
+    ax.plot(
+        sc_b[:, 0],
+        sc_b[:, 1],
+        sc_b[:, 2],
+        linewidth=1.8,
+        alpha=0.95,
+        label="Spacecraft",
+    )
+    ax.plot(
+        pt_b[:, 0],
+        pt_b[:, 1],
+        pt_b[:, 2],
+        linewidth=1.6,
+        alpha=0.95,
+        label="Particle truth",
+    )
     ax.plot(
         pt_map_b[:, 0],
         pt_map_b[:, 1],
         pt_map_b[:, 2],
-        linewidth=2.5,
+        linewidth=2.2,
+        alpha=0.95,
         label="Particle MAP (visible arc)",
     )
 
@@ -654,7 +715,13 @@ def plot_bennu_scene_body_fixed(
     # Optional: visible / occulted SC points
     # ------------------------------------------------------------
     if vis_mask is not None:
-        vis_mask_ds = vis_mask[sl]
+        vis_mask = np.asarray(vis_mask).astype(bool)
+        vis_mask_ds = (
+            vis_mask[sl]
+            if vis_mask.shape[0] >= (tau_full[sl].shape[0])
+            else vis_mask[: sc_b.shape[0]]
+        )
+
         sc_vis = sc_b[vis_mask_ds]
         sc_occ = sc_b[~vis_mask_ds]
 
@@ -663,40 +730,69 @@ def plot_bennu_scene_body_fixed(
                 sc_vis[:, 0],
                 sc_vis[:, 1],
                 sc_vis[:, 2],
-                s=18,
+                s=14,
                 marker="o",
-                label="SC visible epochs",
+                alpha=0.9,
+                label="SC visible",
             )
         if sc_occ.size:
             ax.scatter(
                 sc_occ[:, 0],
                 sc_occ[:, 1],
                 sc_occ[:, 2],
-                s=14,
+                s=12,
                 marker="x",
-                label="SC occulted epochs",
+                alpha=0.9,
+                label="SC occulted",
             )
 
     # ------------------------------------------------------------
-    # Axes / view
+    # Axes / view / limits (always show everything, incl. mesh)
     # ------------------------------------------------------------
-    ax.set_xlabel("X_b [km]")
-    ax.set_ylabel("Y_b [km]")
-    ax.set_zlabel("Z_b [km]")
+    ax.set_xlabel(r"$X_b$ [km]")
+    ax.set_ylabel(r"$Y_b$ [km]")
+    ax.set_zlabel(r"$Z_b$ [km]")
     ax.set_title(title)
 
-    ax.view_init(elev=25, azim=35)
+    # More “journal” camera: slightly higher elevation, not too oblique
+    ax.view_init(elev=28, azim=35)
 
-    all_xyz = np.vstack([sc_b, pt_b, pt_map_b])
-    pad = 0.2 * np.max(np.linalg.norm(all_xyz, axis=1))
+    # Include mesh bounds in autoscaling so you never "lose" Bennu or the batch arc
+    mesh_v = np.asarray(mesh.vertices)
+    all_xyz = np.vstack([mesh_v, sc_b, pt_b, pt_map_b])
 
-    ax.set_xlim(np.min(all_xyz[:, 0]) - pad, np.max(all_xyz[:, 0]) + pad)
-    ax.set_ylim(np.min(all_xyz[:, 1]) - pad, np.max(all_xyz[:, 1]) + pad)
-    ax.set_zlim(np.min(all_xyz[:, 2]) - pad, np.max(all_xyz[:, 2]) + pad)
+    mins = np.min(all_xyz, axis=0)
+    maxs = np.max(all_xyz, axis=0)
+    span = maxs - mins
+    span_max = float(np.max(span)) if np.all(np.isfinite(span)) else 1.0
+    pad = 0.08 * span_max
 
+    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
+    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
+    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
+
+    # Ensure equal aspect (your helper)
     set_axes_equal_3d(ax)
-    ax.legend(loc="upper right")
-    plt.tight_layout()
+
+    # Legend outside (cleaner for papers)
+    ax.legend(
+        loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=True, borderaxespad=0.0
+    )
+
+    # 3D + tight_layout is often flaky; use manual padding
+    fig.subplots_adjust(right=0.80, top=0.92, bottom=0.08, left=0.08)
+
+    # ------------------------------------------------------------
+    # Save figure (vector PDF, timestamped)
+    # ------------------------------------------------------------
+    os.makedirs("results", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fig.savefig(
+        f"results/bennu_scene_body_fixed_{timestamp}.pdf",
+        format="pdf",
+        bbox_inches="tight",
+    )
+
     plt.show()
 
 
@@ -1095,8 +1191,8 @@ if __name__ == "__main__":
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
-    n_walkers = 10 * 128
-    n_samples = 5 * 2000
+    n_walkers = 128  # 10 *
+    n_samples = 2000  # 5 *
     burn_in = 1
     thin = 1
     spherical_spread = 1e-1
