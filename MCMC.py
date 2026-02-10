@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 import corner
@@ -344,7 +345,6 @@ class MCMCModel:
         save_pdf: bool = True,
         fname_prefix: str = "trace",
     ):
-
         if getattr(self, "samples", None) is None:
             print("Run MCMC first.")
             return
@@ -370,7 +370,7 @@ class MCMCModel:
         # emcee flatten is step-major -> reshape (n_steps, n_walkers, ndim) then transpose
         chain = samples.reshape(n_steps, n_walkers, ndim).transpose(
             1, 0, 2
-        )  # (n_walkers, n_steps, ndim)
+        )  # (W, T, D)
 
         # select parameters
         if idx is None:
@@ -393,34 +393,48 @@ class MCMCModel:
             w_plot = min(n_walkers, int(max_walkers_to_plot))
         chain_plot = chain[:w_plot, :, :]
 
-        n_panels = idx.size
+        n_panels = int(idx.size)
         x = np.arange(chain_plot.shape[1])
 
-        # Layout: compact but readable
-        fig_h = max(2.0, 1.25 * n_panels)
-        fig, axes = plt.subplots(n_panels, 1, figsize=(6.8, fig_h), sharex=True)
-        if n_panels == 1:
-            axes = [axes]
+        # ------------------------------------------------------------
+        # AUTO GRID: choose near-square layout, but prefer more columns
+        # Example: 8 -> 2x4, 10 -> 2x5, 12 -> 3x4, 13 -> 3x5
+        # ------------------------------------------------------------
+        n_cols = int(math.ceil(math.sqrt(n_panels)))
+        n_rows = int(math.ceil(n_panels / n_cols))
 
-        for row, p in enumerate(idx):
-            ax = axes[row]
+        # If it’s “tall”, shift toward more columns (better for papers)
+        if n_rows > n_cols:
+            n_cols, n_rows = n_rows, n_cols
 
-            # plot walker traces
+        # Figure sizing per panel (tuned for publication)
+        per_col_w = 2.3
+        per_row_h = 1.8
+        fig_w = max(6.8, per_col_w * n_cols)
+        fig_h = max(2.6, per_row_h * n_rows)
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), sharex=True)
+        axes = np.atleast_1d(axes).ravel()
+
+        for i, p in enumerate(idx):
+            ax = axes[i]
+
+            # walker traces
             for w in range(w_plot):
-                ax.plot(x, chain_plot[w, :, p], alpha=0.30, linewidth=0.8)
+                ax.plot(x, chain_plot[w, :, p], alpha=0.30, linewidth=0.75)
 
-            # overlay median and 16–84 band across ALL walkers (post discard/thin)
+            # median + 16–84 band across ALL walkers (post discard/thin)
             y_all = chain[:, :, p]
             if y_all.shape[0] > 1:
                 med = np.median(y_all, axis=0)
                 q16, q84 = np.quantile(y_all, [0.16, 0.84], axis=0)
-                ax.plot(x, med, color="black", linewidth=1.4)
-                ax.fill_between(x, q16, q84, color="black", alpha=0.12)
+                ax.plot(x, med, color="black", linewidth=1.1)
+                ax.fill_between(x, q16, q84, color="black", alpha=0.10)
 
             label = rf"$x_{{{p}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
             ax.set_ylabel(label)
 
-            # robust y-limits for each panel (avoid one crazy walker killing the zoom)
+            # robust y-limits
             ylo, yhi = np.quantile(chain_plot[:, :, p], [0.01, 0.99])
             if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
                 pad = 0.08 * (yhi - ylo)
@@ -428,18 +442,19 @@ class MCMCModel:
 
             ax.margins(x=0.01)
 
-        axes[-1].set_xlabel("MCMC step")
+        # Hide unused axes
+        for j in range(n_panels, len(axes)):
+            axes[j].set_visible(False)
 
-        title = "MCMC trace plots"
-        if discard > 0:
-            title += f" (discard={discard})"
-        if thin > 1:
-            title += f" (thin={thin})"
-        if max_walkers_to_plot is not None and w_plot < n_walkers:
-            title += f" (showing {w_plot}/{n_walkers} walkers)"
-        fig.suptitle(title, y=0.995)
+        # Put x-label only on bottom row axes that are visible
+        for ax in axes[:n_panels]:
+            if ax.get_subplotspec().is_last_row():
+                ax.set_xlabel("MCMC Step [-]")
 
-        fig.tight_layout(rect=[0, 0, 1, 0.985])
+        # Align y-labels across the grid
+        fig.align_ylabels(axes[:n_panels])
+
+        fig.tight_layout()
 
         if save_pdf:
             os.makedirs(save_folder, exist_ok=True)
@@ -517,24 +532,22 @@ class MCMCModel:
             ax.fill_between(
                 x, q16, q84, color="black", alpha=0.12, label="16–84% (all walkers)"
             )
-
-        ax.set_xlabel("MCMC step")
-        ax.set_ylabel(r"$-\log \mathcal{P}(\theta \mid y)$")
-
-        title = "Negative log-posterior trace"
-        if discard > 0:
-            title += f" (discard={discard})"
-        if thin > 1:
-            title += f" (thin={thin})"
-        if max_walkers_to_plot is not None and plot_walkers < n_walkers:
-            title += f" (showing {plot_walkers}/{n_walkers} walkers)"
-        ax.set_title(title)
+        ax.set_xlabel("MCMC Step [-]")
+        ax.set_ylabel(r"$-\log \mathcal{P}(\theta \mid y)$ [-]")
 
         # Robust y-limits so a single crazy walker doesn't ruin the view
         ylo, yhi = np.quantile(y_plot, [0.01, 0.99])
         if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
             pad = 0.05 * (yhi - ylo)
             ax.set_ylim(ylo - pad, yhi + pad)
+
+        # Ensure strictly positive before log scale
+        if np.all(y_plot > 0):
+            ax.set_yscale("log")
+        else:
+            print(
+                "Cannot use log scale: negative log-posterior contains non-positive values."
+            )
 
         ax.margins(x=0.01)
         if show_summary and y.shape[0] > 1:
@@ -560,13 +573,12 @@ class MCMCModel:
         plt.axhline(3, color="r", linestyle=":")
         plt.axhline(-3, color="r", linestyle=":")
         plt.xlabel("Observation Index")
-        plt.ylabel("Residual Normalized")
+        plt.ylabel(r"Residual Normalized [$\sigma$]")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
 
     def plot_postfit_residuals_time(self, t_obs_used, opnav_data=False):
-
         if getattr(self, "samples", None) is None:
             print("Run estimation first.")
             return
@@ -585,28 +597,30 @@ class MCMCModel:
         residuals_matrix = postfit.reshape(-1, 2).T  # (2, N)
 
         time_hr = np.asarray(t_obs_used).ravel() / 3600.0
-
         if residuals_matrix.shape[1] != time_hr.size:
             raise ValueError("Time vector length does not match residual count.")
 
-        # Remove zero residuals (both channels independently)
+        # Remove zero residuals
         mask0 = residuals_matrix[0] != 0.0
         mask1 = residuals_matrix[1] != 0.0
 
-        r0 = residuals_matrix[0, mask0]
-        r1 = residuals_matrix[1, mask1]
-        t0 = time_hr[mask0]
-        t1 = time_hr[mask1]
-        # Labels
+        r0, t0 = residuals_matrix[0, mask0], time_hr[mask0]
+        r1, t1 = residuals_matrix[1, mask1], time_hr[mask1]
+
+        # Labels (explicitly whitened)
         ylabels = (
-            [r"RA Residual [$\sigma$]", r"DEC Residual [$\sigma$]"]
+            [r"Whitened RA Residual [$\sigma$]", r"Whitened DEC Residual [$\sigma$]"]
             if opnav_data
-            else [r"Range Residual [$\sigma$]", r"Range-Rate Residual [$\sigma$]"]
+            else [
+                r"Whitened Range Residual [$\sigma$]",
+                r"Whitened Range-Rate Residual [$\sigma$]",
+            ]
         )
 
+        # Figure
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(6.8, 4.6), sharex=True)
 
-        # Top residual
+        # Top panel
         ax0.scatter(t0, r0, s=14, alpha=0.85)
         ax0.axhline(0, color="black", linestyle="--", linewidth=1.0)
         ax0.axhline(3, color="red", linestyle=":", linewidth=1.2)
@@ -614,13 +628,12 @@ class MCMCModel:
         ax0.set_ylabel(ylabels[0])
         ax0.grid(True, linestyle=":")
 
-        # Symmetric y-limits
         if r0.size > 0:
             lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
             lim = max(lim, 3.2)
             ax0.set_ylim(-1.1 * lim, 1.1 * lim)
 
-        # Bottom residual
+        # Bottom panel
         ax1.scatter(t1, r1, s=14, alpha=0.85)
         ax1.axhline(0, color="black", linestyle="--", linewidth=1.0)
         ax1.axhline(3, color="red", linestyle=":", linewidth=1.2)
@@ -634,8 +647,33 @@ class MCMCModel:
             lim = max(lim, 3.2)
             ax1.set_ylim(-1.1 * lim, 1.1 * lim)
 
-        fig.suptitle("Post-fit Residuals (MAP Estimate)", y=0.98)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        # Single clean legend (shared)
+        legend_items = [
+            Line2D(
+                [0],
+                [0],
+                color="black",
+                linestyle="--",
+                linewidth=1.0,
+                label="Zero mean",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color="red",
+                linestyle=":",
+                linewidth=1.2,
+                label=r"$\pm 3\sigma$ (whitened)",
+            ),
+        ]
+
+        ax0.legend(
+            handles=legend_items,
+            loc="upper right",
+            frameon=True,
+        )
+
+        fig.tight_layout()
 
         # Save vector PDF
         os.makedirs("results", exist_ok=True)
@@ -679,7 +717,7 @@ class MCMCModel:
         plot_contours_labels=False,  # keep off unless you really need it
         batch_sigma_levels=(1.0,),
         idx=None,  # list/array of parameter indices to plot
-        max_dims=13,
+        max_dims=15,
         bins=40,
         quantile_range=(
             0.005,
@@ -1009,9 +1047,15 @@ class MCMCModel:
                 bbox_to_anchor=(0.84, 0.98),
                 frameon=True,
                 borderaxespad=0.0,
+                fontsize=11,
+                handlelength=2.2,
+                labelspacing=0.6,
             )
         else:
             fig.subplots_adjust(wspace=0.05, hspace=0.05)
+
+        fig.align_xlabels()
+        fig.align_ylabels()
 
         os.makedirs("results", exist_ok=True)
         fig.savefig(
@@ -1256,8 +1300,8 @@ class MCMCModel:
     def plot_autocorrelation(
         self,
         idx=None,  # parameters to include (default: all, capped)
-        max_dims: int = 6,  # max number of parameters shown
-        max_lag: int = 200,
+        max_dims: int = 15,  # max number of parameters shown
+        max_lag: int = 500,
         thin: int = 1,
         discard: int = 0,
         save_folder: str = "results",
@@ -1288,6 +1332,10 @@ class MCMCModel:
         chain = chain[:, discard:, :]
         chain = chain[:, ::thin, :]
 
+        # Cap max_lag to available steps
+        max_lag = min(int(max_lag), chain.shape[1] - 1)
+        lags = np.arange(max_lag + 1)
+
         # Parameter selection
         if idx is None:
             idx = np.arange(min(ndim, max_dims))
@@ -1296,12 +1344,12 @@ class MCMCModel:
             if idx.size > max_dims:
                 idx = idx[:max_dims]
 
-        lags = np.arange(max_lag + 1)
-
         fig, ax = plt.subplots(figsize=(6.8, 3.8))
 
+        tau_vals = []
+
+        # Plot ACF curves + tau lines
         for p in idx:
-            # Average ACF across walkers
             acf_vals = []
             for w in range(chain.shape[0]):
                 acf_vals.append(acf(chain[w, :, p], nlags=max_lag, fft=True))
@@ -1309,16 +1357,28 @@ class MCMCModel:
 
             ax.plot(lags, acf_mean, linewidth=1.6, label=rf"$x_{{{p}}}$")
 
-            # Integrated autocorrelation time estimate
+            # Integrated autocorrelation time estimate (simple positive-window)
             positive = acf_mean[acf_mean > 0]
-            tau_int = 1 + 2 * np.sum(positive[1:])
-            ax.axvline(tau_int, linestyle="--", linewidth=0.9, alpha=0.6)
+            tau_int = (
+                1.0 + 2.0 * float(np.sum(positive[1:])) if positive.size > 1 else 1.0
+            )
+            tau_vals.append(tau_int)
 
-        ax.set_xlabel("Lag")
-        ax.set_ylabel("Autocorrelation")
+            ax.axvline(tau_int, linestyle="--", linewidth=0.9, alpha=0.6, color="black")
+
+        ax.set_xlabel("Lag [-]")
+        ax.set_ylabel("Autocorrelation [-]")
         ax.set_xlim(0, max_lag)
         ax.set_ylim(-0.05, 1.05)
-        ax.legend(frameon=True)
+
+        # legend: keep parameter curves + ONE entry describing tau lines
+        handles, labels = ax.get_legend_handles_labels()
+
+        tau_handle = Line2D([0], [0], color="black", linestyle="--", linewidth=1.0)
+        handles.append(tau_handle)
+        labels.append(r"$\tau_{\mathrm{int}}$ (vertical dashed)")
+
+        ax.legend(handles, labels, loc="upper right", frameon=True)
 
         fig.tight_layout()
 
