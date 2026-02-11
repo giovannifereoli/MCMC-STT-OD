@@ -30,7 +30,9 @@ import time
 import numpy as np
 import sympy as sp
 from itertools import product
-
+import os
+import numpy as np
+import matplotlib.pyplot as plt
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
@@ -40,6 +42,31 @@ try:
     _HAS_TABULATE = True
 except Exception:
     _HAS_TABULATE = False
+
+
+# Publication-ish defaults
+plt.rcParams.update(
+    {
+        "text.usetex": True,
+        "font.family": "serif",
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.7,
+        "font.size": 12,
+        "axes.labelsize": 12,
+        "axes.titlesize": 13,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 11,
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.linewidth": 0.8,
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    }
+)
 
 
 # =========================
@@ -328,9 +355,6 @@ def plot_chain_view_benchmark_latex(
 
     Figures are saved in ./results/
     """
-    import os
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     # -------------------------
     # Prepare output directory
@@ -352,25 +376,6 @@ def plot_chain_view_benchmark_latex(
     # -------------------------
     # Global style (journal-like)
     # -------------------------
-    plt.rcParams.update(
-        {
-            "text.usetex": True,
-            "font.family": "serif",
-            "font.size": 12,
-            "axes.labelsize": 12,
-            "axes.titlesize": 13,
-            "legend.fontsize": 11,
-            "xtick.labelsize": 11,
-            "ytick.labelsize": 11,
-            "figure.dpi": 150,
-            "savefig.dpi": 300,
-            "axes.grid": True,
-            "grid.alpha": 0.25,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
-        }
-    )
-
     c_speed = "#1f77b4"
     c_resid = "#2ca02c"
 

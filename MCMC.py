@@ -26,15 +26,19 @@ plt.rcParams.update(
         "axes.grid": True,
         "grid.linestyle": ":",
         "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 11,
-        "axes.titlesize": 12,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "legend.fontsize": 9,
+        "font.size": 15,
+        "axes.labelsize": 15,
+        "axes.titlesize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
         "axes.grid": True,
         "grid.linestyle": ":",
         "grid.linewidth": 0.8,
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
     }
 )
 
@@ -336,7 +340,7 @@ class MCMCModel:
     def plot_convergence(
         self,
         idx=None,  # which parameters to plot (default: all)
-        max_dims: int = 12,  # cap number of panels for readability
+        max_dims: int = 15,  # cap number of panels for readability
         thin: int = 1,  # plot every `thin` steps
         discard: int = 0,  # discard first `discard` steps (per walker)
         max_walkers_to_plot=None,  # cap number of walkers drawn
@@ -344,6 +348,8 @@ class MCMCModel:
         save_folder: str = "results",
         save_pdf: bool = True,
         fname_prefix: str = "trace",
+        ylim_quantiles=(0.005, 0.995),
+        ylim_pad_frac: float = 0.12,
     ):
         if getattr(self, "samples", None) is None:
             print("Run MCMC first.")
@@ -413,7 +419,9 @@ class MCMCModel:
         fig_w = max(6.8, per_col_w * n_cols)
         fig_h = max(2.6, per_row_h * n_rows)
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), sharex=True)
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(fig_w, fig_h), sharex=True, constrained_layout=True
+        )
         axes = np.atleast_1d(axes).ravel()
 
         for i, p in enumerate(idx):
@@ -431,16 +439,18 @@ class MCMCModel:
                 ax.plot(x, med, color="black", linewidth=1.1)
                 ax.fill_between(x, q16, q84, color="black", alpha=0.10)
 
-            label = rf"$x_{{{p}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
+            label = rf"$x_{{{p+1}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
             ax.set_ylabel(label)
 
             # robust y-limits
-            ylo, yhi = np.quantile(chain_plot[:, :, p], [0.01, 0.99])
+            qlo, qhi = ylim_quantiles
+            ylo, yhi = np.quantile(chain_plot[:, :, p], [qlo, qhi])
+
             if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
-                pad = 0.08 * (yhi - ylo)
+                pad = float(ylim_pad_frac) * (yhi - ylo)
                 ax.set_ylim(ylo - pad, yhi + pad)
 
-            ax.margins(x=0.01)
+            ax.margins(x=0.01, y=0.02)
 
         # Hide unused axes
         for j in range(n_panels, len(axes)):
@@ -452,15 +462,16 @@ class MCMCModel:
                 ax.set_xlabel("MCMC Step [-]")
 
         # Align y-labels across the grid
+        fig.subplots_adjust(
+            left=0.06, right=0.99, bottom=0.07, top=0.98, wspace=0.25, hspace=0.25
+        )
         fig.align_ylabels(axes[:n_panels])
-
-        fig.tight_layout()
 
         if save_pdf:
             os.makedirs(save_folder, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
-            fig.savefig(out, bbox_inches="tight", format="pdf")
+            fig.savefig(out, format="pdf")  # bbox_inches="tight",
             print(f"Saved: {out}")
 
         plt.show()
@@ -475,7 +486,7 @@ class MCMCModel:
         lw: float = 0.8,
         max_walkers_to_plot: int | None = None,
         thin: int = 1,
-        discard: int = 0,  # extra discard (in steps) if you want, on top of any burn-in you already applied
+        discard: int = 0,
         show_summary: bool = True,
     ):
         if getattr(self, "log_probs", None) is None:
@@ -496,17 +507,26 @@ class MCMCModel:
             )
 
         n_steps = log_probs.size // n_walkers
-        # emcee-style: flatten is step-major, so reshape to (n_steps, n_walkers) then transpose
+
+        # emcee-style: flatten is step-major -> (n_steps, n_walkers) then transpose
         chain = log_probs.reshape(n_steps, n_walkers).T  # (n_walkers, n_steps)
 
-        # Optional discard + thinning for plotting
-        if discard < 0:
-            discard = 0
+        discard = max(0, int(discard))
+        thin = max(1, int(thin))
         chain = chain[:, discard:]
-        chain = chain[:, :: max(1, int(thin))]
+        chain = chain[:, ::thin]
 
-        # You plotted negative log-posterior before; keep consistent
-        y = -chain
+        # ------------------------------------------------------------
+        # Key improvement: plot ΔlogP relative to the best value
+        # This makes the plot readable even if absolute values span huge ranges.
+        # ΔlogP = logP - max(logP) <= 0
+        # ------------------------------------------------------------
+        finite = np.isfinite(chain)
+        if not np.any(finite):
+            raise ValueError("All log_probs are non-finite (NaN/Inf).")
+
+        best = np.max(chain[finite])
+        y = chain - best  # <= 0, best is 0
 
         # optionally limit number of walkers drawn
         plot_walkers = (
@@ -515,39 +535,32 @@ class MCMCModel:
             else min(n_walkers, int(max_walkers_to_plot))
         )
         y_plot = y[:plot_walkers, :]
-
         x = np.arange(y_plot.shape[1])
-
-        fig, ax = plt.subplots(figsize=(6.8, 3.4))  # good single-column width-ish
+        fig, ax = plt.subplots(figsize=(10, 5))
 
         # walker traces
         for i in range(y_plot.shape[0]):
             ax.plot(x, y_plot[i], alpha=alpha, linewidth=lw)
 
-        # Summary overlay: median + 16-84 band across walkers (using *all* walkers)
+        # Summary overlay: median + 16-84 band across walkers (all walkers)
         if show_summary and y.shape[0] > 1:
-            med = np.median(y, axis=0)
-            q16, q84 = np.quantile(y, [0.16, 0.84], axis=0)
+            med = np.nanmedian(y, axis=0)
+            q16, q84 = np.nanquantile(y, [0.16, 0.84], axis=0)
             ax.plot(x, med, linewidth=1.6, color="black", label="Median (all walkers)")
             ax.fill_between(
                 x, q16, q84, color="black", alpha=0.12, label="16–84% (all walkers)"
             )
-        ax.set_xlabel("MCMC Step [-]")
-        ax.set_ylabel(r"$-\log \mathcal{P}(\theta \mid y)$ [-]")
 
-        # Robust y-limits so a single crazy walker doesn't ruin the view
-        ylo, yhi = np.quantile(y_plot, [0.01, 0.99])
+        ax.set_xlabel("MCMC step [-]")
+        ax.set_ylabel(r"$\Delta \log \mathcal{P}(\theta \mid y)$  (shifted by $\max$)")
+
+        # Robust y-limits (keeps zoom reasonable)
+        ylo, yhi = np.nanquantile(y_plot, [0.01, 0.99])
         if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
-            pad = 0.05 * (yhi - ylo)
-            ax.set_ylim(ylo - pad, yhi + pad)
+            pad = 0.08 * (yhi - ylo)
+            ax.set_ylim(ylo - pad, min(0.02, yhi + pad))  # keep top near 0 (best)
 
-        # Ensure strictly positive before log scale
-        if np.all(y_plot > 0):
-            ax.set_yscale("log")
-        else:
-            print(
-                "Cannot use log scale: negative log-posterior contains non-positive values."
-            )
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
 
         ax.margins(x=0.01)
         if show_summary and y.shape[0] > 1:
@@ -559,7 +572,7 @@ class MCMCModel:
             os.makedirs(save_folder, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
-            fig.savefig(out, bbox_inches="tight", format="pdf")  # vector PDF
+            fig.savefig(out, bbox_inches="tight", format="pdf")
             print(f"Saved: {out}")
 
         plt.show()
@@ -621,10 +634,10 @@ class MCMCModel:
         fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(6.8, 4.6), sharex=True)
 
         # Top panel
-        ax0.scatter(t0, r0, s=14, alpha=0.85)
-        ax0.axhline(0, color="black", linestyle="--", linewidth=1.0)
-        ax0.axhline(3, color="red", linestyle=":", linewidth=1.2)
-        ax0.axhline(-3, color="red", linestyle=":", linewidth=1.2)
+        ax0.scatter(t0, r0, s=50, alpha=0.85)
+        ax0.axhline(0, color="black", linestyle="--", linewidth=3.0)
+        ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
+        ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
         ax0.set_ylabel(ylabels[0])
         ax0.grid(True, linestyle=":")
 
@@ -634,10 +647,10 @@ class MCMCModel:
             ax0.set_ylim(-1.1 * lim, 1.1 * lim)
 
         # Bottom panel
-        ax1.scatter(t1, r1, s=14, alpha=0.85)
-        ax1.axhline(0, color="black", linestyle="--", linewidth=1.0)
-        ax1.axhline(3, color="red", linestyle=":", linewidth=1.2)
-        ax1.axhline(-3, color="red", linestyle=":", linewidth=1.2)
+        ax1.scatter(t1, r1, s=50, alpha=0.85)
+        ax1.axhline(0, color="black", linestyle="--", linewidth=3.0)
+        ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
+        ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
         ax1.set_ylabel(ylabels[1])
         ax1.set_xlabel("Time since epoch [hours]")
         ax1.grid(True, linestyle=":")
@@ -654,7 +667,7 @@ class MCMCModel:
                 [0],
                 color="black",
                 linestyle="--",
-                linewidth=1.0,
+                linewidth=3.0,
                 label="Zero mean",
             ),
             Line2D(
@@ -662,7 +675,7 @@ class MCMCModel:
                 [0],
                 color="red",
                 linestyle=":",
-                linewidth=1.2,
+                linewidth=3.2,
                 label=r"$\pm 3\sigma$ (whitened)",
             ),
         ]
@@ -715,7 +728,7 @@ class MCMCModel:
         use_median_as_truth=True,
         true_theta=None,
         plot_contours_labels=False,  # keep off unless you really need it
-        batch_sigma_levels=(1.0,),
+        batch_sigma_levels=(3.0,),
         idx=None,  # list/array of parameter indices to plot
         max_dims=15,
         bins=40,
@@ -857,6 +870,10 @@ class MCMCModel:
         )
 
         axes = np.array(fig.axes).reshape((d, d))
+        # Lift diagonal titles so they don't overlap hist/contours
+        for k in range(d):
+            axes[k, k].title.set_y(1.10)  # move title upward inside axis
+            axes[k, k].title.set_fontsize(9)  # slightly smaller
 
         # ----------------------------
         # Overlay batch ellipses / points
@@ -895,8 +912,8 @@ class MCMCModel:
                                 angle=angle,
                                 edgecolor="red",
                                 facecolor="none",
-                                lw=1.4 if float(ksig) == 1.0 else 1.0,
-                                linestyle="-" if float(ksig) == 1.0 else "--",
+                                lw=1.4 if float(ksig) == 3.0 else 1.0,
+                                linestyle="-" if float(ksig) == 3.0 else "--",
                                 alpha=0.95,
                                 zorder=5,
                             )
@@ -956,9 +973,9 @@ class MCMCModel:
         # Global formatting tweaks
         # ----------------------------
         for ax in fig.get_axes():
-            ax.tick_params(labelsize=8)
-            ax.xaxis.labelpad = 6
-            ax.yaxis.labelpad = 6
+            ax.tick_params(labelsize=8, pad=2.5)  # <--- tick numbers away from axis
+            ax.xaxis.labelpad = 15  # <--- xlabel away from tick numbers
+            ax.yaxis.labelpad = 15  # <--- ylabel away from tick numbers
 
         # ----------------------------
         # Global legend OUTSIDE the corner grid
@@ -983,7 +1000,7 @@ class MCMCModel:
                 label=(
                     rf"Batch {float(batch_sigma_levels[0]):g}$\sigma$"
                     if len(batch_sigma_levels)
-                    else "Batch 1$\\sigma$"
+                    else "Batch 3$\\sigma$"
                 ),
             ),
             Line2D(
@@ -1036,26 +1053,27 @@ class MCMCModel:
             else:
                 filtered.append(p)
 
+        # Slightly more breathing room to avoid label/title overlaps
         fig.set_size_inches(fig_size, fig_size)
+        fig.subplots_adjust(wspace=0.05, hspace=0.05, right=0.82)
 
-        if legend_outside and len(filtered) > 0:
-            # reserve right margin for legend
-            fig.subplots_adjust(wspace=0.05, hspace=0.05, right=0.82)
-            fig.legend(
-                handles=filtered,
-                loc="upper left",
-                bbox_to_anchor=(0.84, 0.98),
-                frameon=True,
-                borderaxespad=0.0,
-                fontsize=11,
-                handlelength=2.2,
-                labelspacing=0.6,
-            )
-        else:
-            fig.subplots_adjust(wspace=0.05, hspace=0.05)
-
+        # Align all axis labels
         fig.align_xlabels()
         fig.align_ylabels()
+
+        # Legend inside the upper-right empty triangle
+        if len(filtered) > 0:
+            leg_ax = axes[0, d - 1]
+            leg_ax.axis("off")
+            leg_ax.legend(
+                handles=filtered,
+                loc="center",
+                frameon=True,
+                fontsize=13,
+                handlelength=2.6,
+                labelspacing=0.8,
+                borderpad=0.9,
+            )
 
         os.makedirs("results", exist_ok=True)
         fig.savefig(
@@ -1063,6 +1081,7 @@ class MCMCModel:
             format="pdf",
             bbox_inches="tight",
         )
+        print(f"Saved: results/corner_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
         plt.show()
 
     def summary(self):
@@ -1346,25 +1365,13 @@ class MCMCModel:
 
         fig, ax = plt.subplots(figsize=(6.8, 3.8))
 
-        tau_vals = []
-
         # Plot ACF curves + tau lines
         for p in idx:
             acf_vals = []
             for w in range(chain.shape[0]):
                 acf_vals.append(acf(chain[w, :, p], nlags=max_lag, fft=True))
             acf_mean = np.mean(acf_vals, axis=0)
-
-            ax.plot(lags, acf_mean, linewidth=1.6, label=rf"$x_{{{p}}}$")
-
-            # Integrated autocorrelation time estimate (simple positive-window)
-            positive = acf_mean[acf_mean > 0]
-            tau_int = (
-                1.0 + 2.0 * float(np.sum(positive[1:])) if positive.size > 1 else 1.0
-            )
-            tau_vals.append(tau_int)
-
-            ax.axvline(tau_int, linestyle="--", linewidth=0.9, alpha=0.6, color="black")
+            ax.plot(lags, acf_mean, linewidth=1.6, label=rf"$x_{{{p+1}}}$")
 
         ax.set_xlabel("Lag [-]")
         ax.set_ylabel("Autocorrelation [-]")
@@ -1373,13 +1380,7 @@ class MCMCModel:
 
         # legend: keep parameter curves + ONE entry describing tau lines
         handles, labels = ax.get_legend_handles_labels()
-
-        tau_handle = Line2D([0], [0], color="black", linestyle="--", linewidth=1.0)
-        handles.append(tau_handle)
-        labels.append(r"$\tau_{\mathrm{int}}$ (vertical dashed)")
-
         ax.legend(handles, labels, loc="upper right", frameon=True)
-
         fig.tight_layout()
 
         if save_pdf:

@@ -66,6 +66,30 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
+# Publication-ish defaults
+plt.rcParams.update(
+    {
+        "text.usetex": True,
+        "font.family": "serif",
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.alpha": 0.7,
+        "font.size": 12,
+        "axes.labelsize": 12,
+        "axes.titlesize": 13,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 11,
+        "axes.grid": True,
+        "grid.linestyle": ":",
+        "grid.linewidth": 0.8,
+        "figure.dpi": 150,
+        "savefig.dpi": 300,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    }
+)
+plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
 
 # ============================================================
 # Geometry / utility
@@ -600,12 +624,8 @@ def plot_bennu_scene_body_fixed(
     - `make_bennu_rotation_matrix(alpha, delta, omega, t)` is assumed to return a DCM
       that maps BODY->INERTIAL (R_bi) or INERTIAL->BODY (R_ib). Many implementations
       return BODY->INERTIAL; in that common case, the correct inertial->body transform
-      is the transpose. We therefore apply the transpose by default below to make the
-      trajectories visibly body-fixed and consistent with the mesh.
+      is the transpose.
     """
-
-    import numpy as np
-    import matplotlib.pyplot as plt
 
     # ------------------------------------------------------------
     # Downsample
@@ -618,31 +638,7 @@ def plot_bennu_scene_body_fixed(
 
     x_map = np.asarray(x_map)
     tau_map = np.asarray(tau_map)
-
-    # ------------------------------------------------------------
-    # Optional: scale mesh to a target radius for consistent visuals
-    # (does NOT change trajectories; purely a visualization scaling)
-    # ------------------------------------------------------------
     mesh = bennu_mesh
-    if mesh_target_radius_km is not None:
-        # Estimate current mesh "radius"
-        v = np.asarray(mesh.vertices)
-        r = np.linalg.norm(v, axis=1)
-
-        if mesh_scale_mode.lower() == "rms":
-            r0 = float(np.sqrt(np.mean(r**2)))
-        elif mesh_scale_mode.lower() in ("mean", "avg"):
-            r0 = float(np.mean(r))
-        elif mesh_scale_mode.lower() in ("max", "peak"):
-            r0 = float(np.max(r))
-        else:
-            raise ValueError("mesh_scale_mode must be one of {'rms','mean','max'}")
-
-        if np.isfinite(r0) and r0 > 0:
-            scale = float(mesh_target_radius_km) / r0
-            # trimesh.Trimesh can be copied; keep it light
-            mesh = mesh.copy()
-            mesh.apply_scale(scale)
 
     # ------------------------------------------------------------
     # Rotate INERTIAL -> BODY-FIXED
@@ -650,49 +646,30 @@ def plot_bennu_scene_body_fixed(
     sc_b = np.zeros_like(sc_i)
     pt_b = np.zeros_like(pt_i)
 
-    # Key fix: use transpose so inertial trajectories become body-fixed wrt mesh
     for k, tk in enumerate(tau_i):
-        R = make_bennu_rotation_matrix(alpha, delta, omega, float(tk))
-        R_bi = np.asarray(R)
-        R_ib = R_bi.T  # <-- critical for typical "body->inertial" attitude models
+        R_bi = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
+        R_ib = R_bi.T
         sc_b[k] = R_ib @ sc_i[k]
         pt_b[k] = R_ib @ pt_i[k]
 
-    # MAP arc (separate tau grid)
-    pt_map_b = np.zeros_like(x_map[:, :3])
-    for k, tk in enumerate(tau_map):
-        R = make_bennu_rotation_matrix(alpha, delta, omega, float(tk))
-        R_bi = np.asarray(R)
-        R_ib = R_bi.T
-        pt_map_b[k] = R_ib @ x_map[k, :3]
-
     # ------------------------------------------------------------
-    # Plot (publication style)
+    # Plot
     # ------------------------------------------------------------
-    plt.rcParams.update(
-        {
-            "axes.labelsize": 11,
-            "axes.titlesize": 12,
-            "xtick.labelsize": 9,
-            "ytick.labelsize": 9,
-            "legend.fontsize": 9,
-        }
-    )
 
     fig = plt.figure(figsize=(7.2, 5.4))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Bennu mesh (body-fixed)
     add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
 
-    # Trajectories (use zorder-ish via plotting order; 3D ignores true zorder sometimes)
+    # Trajectories: force colors explicitly
     ax.plot(
         sc_b[:, 0],
         sc_b[:, 1],
         sc_b[:, 2],
         linewidth=1.8,
         alpha=0.95,
-        label="Spacecraft",
+        color="tab:blue",
+        label="OSIRIS-REx (-64)",
     )
     ax.plot(
         pt_b[:, 0],
@@ -700,25 +677,18 @@ def plot_bennu_scene_body_fixed(
         pt_b[:, 2],
         linewidth=1.6,
         alpha=0.95,
+        color="tab:red",
         label="Particle truth",
-    )
-    ax.plot(
-        pt_map_b[:, 0],
-        pt_map_b[:, 1],
-        pt_map_b[:, 2],
-        linewidth=2.2,
-        alpha=0.95,
-        label="Particle MAP (visible arc)",
     )
 
     # ------------------------------------------------------------
-    # Optional: visible / occulted SC points
+    # Visible / occulted points (both black)
     # ------------------------------------------------------------
     if vis_mask is not None:
         vis_mask = np.asarray(vis_mask).astype(bool)
         vis_mask_ds = (
             vis_mask[sl]
-            if vis_mask.shape[0] >= (tau_full[sl].shape[0])
+            if vis_mask.shape[0] >= tau_full[sl].shape[0]
             else vis_mask[: sc_b.shape[0]]
         )
 
@@ -730,36 +700,39 @@ def plot_bennu_scene_body_fixed(
                 sc_vis[:, 0],
                 sc_vis[:, 1],
                 sc_vis[:, 2],
-                s=14,
+                s=16,
                 marker="o",
+                color="black",
                 alpha=0.9,
-                label="SC visible",
+                label="Particle Visible",
             )
         if sc_occ.size:
             ax.scatter(
                 sc_occ[:, 0],
                 sc_occ[:, 1],
                 sc_occ[:, 2],
-                s=12,
+                s=18,
                 marker="x",
+                color="black",
                 alpha=0.9,
-                label="SC occulted",
+                label="Particle Occulted",
             )
 
     # ------------------------------------------------------------
-    # Axes / view / limits (always show everything, incl. mesh)
+    # Axes / view / limits
     # ------------------------------------------------------------
-    ax.set_xlabel(r"$X_b$ [km]")
-    ax.set_ylabel(r"$Y_b$ [km]")
-    ax.set_zlabel(r"$Z_b$ [km]")
-    ax.set_title(title)
+    ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
+    ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
+    ax.set_zlabel(r"$Z_\mathscr{B}$ [km]", labelpad=10)
+    fig.canvas.draw()
 
-    # More “journal” camera: slightly higher elevation, not too oblique
+    # No title (caption-driven for papers)
+    # ax.set_title(title)
+
     ax.view_init(elev=28, azim=35)
 
-    # Include mesh bounds in autoscaling so you never "lose" Bennu or the batch arc
     mesh_v = np.asarray(mesh.vertices)
-    all_xyz = np.vstack([mesh_v, sc_b, pt_b, pt_map_b])
+    all_xyz = np.vstack([mesh_v, sc_b, pt_b])
 
     mins = np.min(all_xyz, axis=0)
     maxs = np.max(all_xyz, axis=0)
@@ -771,27 +744,29 @@ def plot_bennu_scene_body_fixed(
     ax.set_ylim(mins[1] - pad, maxs[1] + pad)
     ax.set_zlim(mins[2] - pad, maxs[2] + pad)
 
-    # Ensure equal aspect (your helper)
     set_axes_equal_3d(ax)
 
-    # Legend outside (cleaner for papers)
+    # Legend: bigger and closer (inside, not outside)
     ax.legend(
-        loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=True, borderaxespad=0.0
+        loc="upper right",
+        bbox_to_anchor=(0.98, 0.98),
+        frameon=True,
+        borderaxespad=0.2,
     )
 
-    # 3D + tight_layout is often flaky; use manual padding
-    fig.subplots_adjust(right=0.80, top=0.92, bottom=0.08, left=0.08)
+    fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
 
-    # ------------------------------------------------------------
-    # Save figure (vector PDF, timestamped)
-    # ------------------------------------------------------------
+    # Save figure with timestamp (won't overwrite previous)
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fig.canvas.draw()
     fig.savefig(
         f"results/bennu_scene_body_fixed_{timestamp}.pdf",
         format="pdf",
-        bbox_inches="tight",
+        # bbox_inches="tight",
+        pad_inches=0.20,
     )
+    print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
 
     plt.show()
 
@@ -1227,12 +1202,7 @@ if __name__ == "__main__":
         rverts.mean(),
         rverts.max(),
     )
-    # If mesh looks like meters (~300), scale to km:
-    if rverts.max() > 10.0:
-        print("[Mesh] Detected likely meters-scale OBJ; scaling mesh by 1e-3 to km.")
-        bennu_mesh = bennu_mesh.copy()
-        bennu_mesh.apply_scale(1e-3)
-        vertices = np.asarray(bennu_mesh.vertices)
+    vertices = np.asarray(bennu_mesh.vertices)
 
     lat_desired = np.deg2rad(45.0)
     lon_desired = np.deg2rad(80.0)
@@ -1521,7 +1491,7 @@ if __name__ == "__main__":
     # --------------------------
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
-    model.plot_log_likelihood()
+    # model.plot_log_likelihood()
     model.summary()
     model.print_regression_diagnostics()
     model.plot_autocorrelation()
