@@ -12,6 +12,8 @@ from scipy.optimize import (
 )
 from matplotlib.patches import Ellipse
 from matplotlib.lines import Line2D
+from matplotlib.ticker import ScalarFormatter
+from matplotlib.ticker import MaxNLocator
 from statsmodels.tsa.stattools import acf
 from scipy.stats import gaussian_kde
 from scipy.optimize import least_squares
@@ -339,17 +341,18 @@ class MCMCModel:
 
     def plot_convergence(
         self,
-        idx=None,  # which parameters to plot (default: all)
-        max_dims: int = 15,  # cap number of panels for readability
-        thin: int = 1,  # plot every `thin` steps
-        discard: int = 0,  # discard first `discard` steps (per walker)
-        max_walkers_to_plot=None,  # cap number of walkers drawn
-        use_x_labels: bool = True,  # x_i instead of theta_i
+        idx=None,
+        max_dims: int = 15,
+        thin: int = 1,
+        discard: int = 0,
+        max_walkers_to_plot=None,
+        use_x_labels: bool = True,
         save_folder: str = "results",
         save_pdf: bool = True,
         fname_prefix: str = "trace",
         ylim_quantiles=(0.005, 0.995),
         ylim_pad_frac: float = 0.12,
+        show_burnin_line: bool = True,
     ):
         if getattr(self, "samples", None) is None:
             print("Run MCMC first.")
@@ -365,7 +368,6 @@ class MCMCModel:
 
         n_walkers = int(self.sampler.nwalkers)
         ndim = samples.shape[1]
-
         if samples.shape[0] % n_walkers != 0:
             raise ValueError(
                 f"Number of rows in samples ({samples.shape[0]}) is not divisible by n_walkers ({n_walkers})."
@@ -373,10 +375,8 @@ class MCMCModel:
 
         n_steps = samples.shape[0] // n_walkers
 
-        # emcee flatten is step-major -> reshape (n_steps, n_walkers, ndim) then transpose
-        chain = samples.reshape(n_steps, n_walkers, ndim).transpose(
-            1, 0, 2
-        )  # (W, T, D)
+        # reshape to (W, T, D) using emcee flattening convention
+        chain = samples.reshape(n_steps, n_walkers, ndim).transpose(1, 0, 2)
 
         # select parameters
         if idx is None:
@@ -392,7 +392,7 @@ class MCMCModel:
         chain = chain[:, discard:, :]
         chain = chain[:, ::thin, :]
 
-        # cap walkers
+        # walkers to draw
         if max_walkers_to_plot is None:
             w_plot = n_walkers
         else:
@@ -400,70 +400,73 @@ class MCMCModel:
         chain_plot = chain[:w_plot, :, :]
 
         n_panels = int(idx.size)
-        x = np.arange(chain_plot.shape[1])
+        T = chain_plot.shape[1]
+        x = np.arange(T)
 
-        # ------------------------------------------------------------
-        # AUTO GRID: choose near-square layout, but prefer more columns
-        # Example: 8 -> 2x4, 10 -> 2x5, 12 -> 3x4, 13 -> 3x5
-        # ------------------------------------------------------------
-        n_cols = int(math.ceil(math.sqrt(n_panels)))
+        # grid: prefer more columns (paper-friendly)
+        n_cols = int(min(5, max(2, math.ceil(math.sqrt(n_panels) + 0.5))))
         n_rows = int(math.ceil(n_panels / n_cols))
 
-        # If it’s “tall”, shift toward more columns (better for papers)
-        if n_rows > n_cols:
-            n_cols, n_rows = n_rows, n_cols
+        # size: tuned for print
+        fig_w = max(7.0, 2.35 * n_cols)
+        fig_h = max(2.6, 1.55 * n_rows)
 
-        # Figure sizing per panel (tuned for publication)
-        per_col_w = 2.3
-        per_row_h = 1.8
-        fig_w = max(6.8, per_col_w * n_cols)
-        fig_h = max(2.6, per_row_h * n_rows)
-
-        fig, axes = plt.subplots(
-            n_rows, n_cols, figsize=(fig_w, fig_h), sharex=True, constrained_layout=True
-        )
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), sharex=True)
         axes = np.atleast_1d(axes).ravel()
+
+        # global style (minimal, professional)
+        for ax in axes:
+            ax.grid(False)
+            ax.tick_params(labelsize=8, pad=2.5)
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+
+        # compute burn-in line location in *thinned* coordinates
+        burnin_x = 0
+        if show_burnin_line and discard > 0:
+            burnin_x = 0  # after discard, the shown chain starts at post-burnin
+            # so the "burn-in" boundary is off-plot; instead show original discard in title
+            # (more honest for the displayed trace).
 
         for i, p in enumerate(idx):
             ax = axes[i]
 
-            # walker traces
+            # walker traces (very light)
             for w in range(w_plot):
-                ax.plot(x, chain_plot[w, :, p], alpha=0.30, linewidth=0.75)
+                ax.plot(x, chain_plot[w, :, p], alpha=0.18, linewidth=0.6)
 
             # median + 16–84 band across ALL walkers (post discard/thin)
-            y_all = chain[:, :, p]
-            if y_all.shape[0] > 1:
-                med = np.median(y_all, axis=0)
-                q16, q84 = np.quantile(y_all, [0.16, 0.84], axis=0)
-                ax.plot(x, med, color="black", linewidth=1.1)
-                ax.fill_between(x, q16, q84, color="black", alpha=0.10)
+            y_all = chain[:, :, p]  # (W, T)
+            med = np.median(y_all, axis=0)
+            q16, q84 = np.quantile(y_all, [0.16, 0.84], axis=0)
+            ax.fill_between(x, q16, q84, alpha=0.12)
+            ax.plot(x, med, color="black", linewidth=1.1, zorder=5)
 
-            label = rf"$x_{{{p+1}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
-            ax.set_ylabel(label)
+            # label
+            label = rf"$x_{{{p}}}$" if use_x_labels else rf"$\theta_{{{p}}}$"
+            ax.set_ylabel(label, fontsize=9)
 
             # robust y-limits
             qlo, qhi = ylim_quantiles
             ylo, yhi = np.quantile(chain_plot[:, :, p], [qlo, qhi])
-
             if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
                 pad = float(ylim_pad_frac) * (yhi - ylo)
                 ax.set_ylim(ylo - pad, yhi + pad)
 
-            ax.margins(x=0.01, y=0.02)
+            ax.margins(x=0.01)
 
-        # Hide unused axes
+        # hide unused axes
         for j in range(n_panels, len(axes)):
             axes[j].set_visible(False)
 
-        # Put x-label only on bottom row axes that are visible
+        # x-label only bottom visible row
         for ax in axes[:n_panels]:
             if ax.get_subplotspec().is_last_row():
-                ax.set_xlabel("MCMC Step [-]")
+                ax.set_xlabel("MCMC step", fontsize=9)
 
-        # Align y-labels across the grid
+        # layout
         fig.subplots_adjust(
-            left=0.06, right=0.99, bottom=0.07, top=0.98, wspace=0.25, hspace=0.25
+            left=0.09, right=0.99, bottom=0.10, top=0.92, wspace=0.45, hspace=0.35
         )
         fig.align_ylabels(axes[:n_panels])
 
@@ -471,7 +474,7 @@ class MCMCModel:
             os.makedirs(save_folder, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             out = os.path.join(save_folder, f"{fname_prefix}_{ts}.pdf")
-            fig.savefig(out, format="pdf")  # bbox_inches="tight",
+            fig.savefig(out, format="pdf")
             print(f"Saved: {out}")
 
         plt.show()
@@ -631,11 +634,10 @@ class MCMCModel:
         )
 
         # Figure
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(6.8, 4.6), sharex=True)
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
 
         # Top panel
         ax0.scatter(t0, r0, s=50, alpha=0.85)
-        ax0.axhline(0, color="black", linestyle="--", linewidth=3.0)
         ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
         ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
         ax0.set_ylabel(ylabels[0])
@@ -648,7 +650,6 @@ class MCMCModel:
 
         # Bottom panel
         ax1.scatter(t1, r1, s=50, alpha=0.85)
-        ax1.axhline(0, color="black", linestyle="--", linewidth=3.0)
         ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
         ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
         ax1.set_ylabel(ylabels[1])
@@ -665,18 +666,10 @@ class MCMCModel:
             Line2D(
                 [0],
                 [0],
-                color="black",
-                linestyle="--",
-                linewidth=3.0,
-                label="Zero mean",
-            ),
-            Line2D(
-                [0],
-                [0],
                 color="red",
                 linestyle=":",
                 linewidth=3.2,
-                label=r"$\pm 3\sigma$ (whitened)",
+                label=r"$\pm 3\sigma$",
             ),
         ]
 
@@ -732,26 +725,10 @@ class MCMCModel:
         idx=None,  # list/array of parameter indices to plot
         max_dims=15,
         bins=40,
-        quantile_range=(
-            0.005,
-            0.995,
-        ),  # robust axis limits (but we will ALSO include batch/MAP/truth)
+        quantile_range=(0.005, 0.995),
         title_digits=3,
         legend_outside=True,
     ):
-        """
-        Corner plot for MCMC samples with optional overlays:
-        - Batch mean (red dot)
-        - Batch covariance ellipses (red)
-        - True value (green dot)
-        - MCMC MAP estimate (black x)
-
-        Improvements vs original:
-        1) Labels are x_i (not theta_i)
-        2) Axis limits always include: robust MCMC range + batch mean/ellipses + truth + MAP
-        3) One global legend placed outside the grid
-        4) Cleaner journal-style formatting and safer guards
-        """
         if self.samples is None:
             print("Run MCMC first.")
             return
@@ -773,7 +750,7 @@ class MCMCModel:
         d = s.shape[1]
 
         # ----------------------------
-        # Truths & best params on same subspace
+        # Truths & MAP on same subspace
         # ----------------------------
         best_params_full = self.get_map_estimate()
         best_params = (
@@ -804,21 +781,16 @@ class MCMCModel:
 
         # ----------------------------
         # Robust range + ensure EVERYTHING is visible
-        # (include batch mean, ellipses, truth, MAP)
         # ----------------------------
         qlo, qhi = quantile_range
         ranges = []
         ksig_max = float(np.max(batch_sigma_levels)) if len(batch_sigma_levels) else 0.0
 
         for j in range(d):
-            # robust from samples
             lo, hi = np.quantile(s[:, j], [qlo, qhi])
-
-            # fallback if quantiles degenerate
             if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
                 lo, hi = float(np.min(s[:, j])), float(np.max(s[:, j]))
 
-            # include point overlays
             extras = []
             if bm is not None and np.isfinite(bm[j]):
                 extras.append(float(bm[j]))
@@ -829,7 +801,6 @@ class MCMCModel:
             if best_params is not None and np.isfinite(best_params[j]):
                 extras.append(float(best_params[j]))
 
-            # include batch ellipse extent along axis (projection bound)
             if bc is not None and np.isfinite(bc[j, j]) and bc[j, j] >= 0:
                 sig = ksig_max * float(np.sqrt(bc[j, j]))
                 if bm is not None and np.isfinite(bm[j]) and sig > 0:
@@ -839,7 +810,6 @@ class MCMCModel:
                 lo = min(lo, np.min(extras))
                 hi = max(hi, np.max(extras))
 
-            # small padding so points/ellipses don't touch frame
             span = hi - lo
             if not np.isfinite(span) or span <= 0:
                 span = 1.0
@@ -855,7 +825,8 @@ class MCMCModel:
         fig = corner.corner(
             s,
             labels=labels,
-            truths=truths,
+            # truths=truths,
+            # truth_color="green",  # Change truth lines to green instead of blue
             range=ranges,
             bins=bins,
             show_titles=True,
@@ -870,31 +841,29 @@ class MCMCModel:
         )
 
         axes = np.array(fig.axes).reshape((d, d))
-        # Lift diagonal titles so they don't overlap hist/contours
+
+        # ----------------------------
+        # Titles: position below the top edge to avoid overlap with plot above
+        # ----------------------------
         for k in range(d):
-            axes[k, k].title.set_y(1.10)  # move title upward inside axis
-            axes[k, k].title.set_fontsize(9)  # slightly smaller
+            axes[k, k].title.set_y(1.15)  # reduced from 1.30 - rely on hspace instead
+            axes[k, k].title.set_fontsize(9)
 
         # ----------------------------
         # Overlay batch ellipses / points
         # ----------------------------
-        # We'll avoid "label only on one axis" hacks and instead use a global legend with proxies.
         for i in range(d):
             for j in range(i):
                 ax = axes[i, j]
 
-                # batch mean
                 if bm is not None:
                     ax.plot(bm[j], bm[i], "o", ms=4.5, color="red", zorder=6)
 
-                # batch ellipses
                 if bm is not None and bc is not None and np.all(np.isfinite(bc)):
                     cov_sub = bc[np.ix_([j, i], [j, i])]
                     mean_sub = [bm[j], bm[i]]
 
-                    # symmetric guard
                     cov_sub = 0.5 * (cov_sub + cov_sub.T)
-
                     vals, vecs = np.linalg.eigh(cov_sub)
                     vals = np.maximum(vals, 0.0)
 
@@ -919,11 +888,9 @@ class MCMCModel:
                             )
                             ax.add_patch(ell)
 
-                # true value
                 if tt is not None:
-                    ax.plot(tt[j], tt[i], "o", ms=4.5, color="green", zorder=7)
+                    ax.plot(tt[j], tt[i], "o", ms=4.5, color="purple", zorder=7)
 
-                # MCMC MAP
                 if best_params is not None:
                     ax.plot(
                         best_params[j],
@@ -935,7 +902,6 @@ class MCMCModel:
                         zorder=8,
                     )
 
-                # Optional contour labels (fixed to use the *selected* samples)
                 if plot_contours_labels:
                     x = s[:, j]
                     y = s[:, i]
@@ -948,39 +914,38 @@ class MCMCModel:
                     ]
                     zi = kde(np.vstack([xi.ravel(), yi.ravel()])).reshape(xi.shape)
 
-                    # same mass levels as you had (roughly)
                     levels_mass = [0.118, 0.393, 0.675, 0.864]
                     sorted_zi = np.sort(zi.ravel())[::-1]
                     cdf = np.cumsum(sorted_zi)
                     cdf /= cdf[-1]
                     value_levels = []
                     for lv in levels_mass:
-                        k = int(np.searchsorted(cdf, lv))
-                        k = np.clip(k, 0, len(sorted_zi) - 1)
-                        value_levels.append(sorted_zi[k])
+                        k0 = int(np.searchsorted(cdf, lv))
+                        k0 = np.clip(k0, 0, len(sorted_zi) - 1)
+                        value_levels.append(sorted_zi[k0])
                     value_levels = sorted(set(value_levels))
 
                     cs = ax.contour(
                         xi, yi, zi, levels=value_levels, colors="black", linewidths=1
                     )
                     fmt = {
-                        lvl: f"{int(100 * m)}\\%"
+                        lvl: f"{int(100*m)}\\%"
                         for lvl, m in zip(cs.levels, levels_mass[: len(cs.levels)])
                     }
                     ax.clabel(cs, fmt=fmt, inline=True, fontsize=8)
 
         # ----------------------------
-        # Global formatting tweaks
+        # Global formatting:
+        # Increase spacing to prevent overlaps
         # ----------------------------
+
         for ax in fig.get_axes():
-            ax.tick_params(labelsize=8, pad=2.5)  # <--- tick numbers away from axis
-            ax.xaxis.labelpad = 15  # <--- xlabel away from tick numbers
-            ax.yaxis.labelpad = 15  # <--- ylabel away from tick numbers
+            # Increase tick label size and padding significantly
+            ax.tick_params(labelsize=8, pad=8.0)  # tick numbers away from axis
 
         # ----------------------------
-        # Global legend OUTSIDE the corner grid
+        # Legend proxies
         # ----------------------------
-        # Proxy artists (clean, consistent)
         proxies = [
             Line2D(
                 [0],
@@ -997,18 +962,14 @@ class MCMCModel:
                 color="red",
                 lw=1.4,
                 linestyle="-",
-                label=(
-                    rf"Batch {float(batch_sigma_levels[0]):g}$\sigma$"
-                    if len(batch_sigma_levels)
-                    else "Batch 3$\\sigma$"
-                ),
+                label=rf"Batch {float(batch_sigma_levels[0]):g}$\sigma$",
             ),
             Line2D(
                 [0],
                 [0],
                 marker="o",
                 color="none",
-                markerfacecolor="green",
+                markerfacecolor="purple",
                 markersize=6,
                 label="True Value",
             ),
@@ -1023,11 +984,10 @@ class MCMCModel:
             ),
         ]
 
-        # If multiple sigma levels, add them too
         if len(batch_sigma_levels) > 1:
             for ksig in batch_sigma_levels[1:]:
                 proxies.insert(
-                    2,  # after the 1-sigma line
+                    2,
                     Line2D(
                         [0],
                         [0],
@@ -1038,31 +998,48 @@ class MCMCModel:
                     ),
                 )
 
-        # Only show relevant entries (e.g., don't show batch if not provided)
         filtered = []
         for p in proxies:
-            if "Batch" in p.get_label():
+            lab = p.get_label()
+            if "Batch" in lab:
                 if bm is not None:
                     filtered.append(p)
-            elif p.get_label() == "True Value":
+            elif lab == "True Value":
                 if tt is not None:
                     filtered.append(p)
-            elif p.get_label() == "MCMC MAP":
+            elif lab == "MCMC MAP":
                 if best_params is not None:
                     filtered.append(p)
             else:
                 filtered.append(p)
 
-        # Slightly more breathing room to avoid label/title overlaps
+        # More breathing room with significantly increased spacing between plots
         fig.set_size_inches(fig_size, fig_size)
-        fig.subplots_adjust(wspace=0.05, hspace=0.05, right=0.82)
+        fig.subplots_adjust(
+            wspace=0.20, hspace=0.30, right=0.82, top=0.93, bottom=0.12, left=0.12
+        )  # margins back to 0.12
 
-        # Align all axis labels
-        fig.align_xlabels()
-        fig.align_ylabels()
+        # Force a draw so text objects have final positions/sizes
+        fig.canvas.draw()
 
-        # Legend inside the upper-right empty triangle
-        if len(filtered) > 0:
+        # Move ONLY the labels that exist in a corner plot:
+        #   x-labels: bottom row
+        #   y-labels: left column
+        x_y = -0.70  # more negative -> farther down
+        y_x = -0.70  # more negative -> farther left
+
+        for j in range(d):
+            ax = axes[d - 1, j]  # bottom row
+            if ax.get_xlabel():
+                ax.xaxis.set_label_coords(0.5, x_y)  # (x in [0,1], y in axes coords)
+
+        for i in range(d):
+            ax = axes[i, 0]  # left column
+            if ax.get_ylabel():
+                ax.yaxis.set_label_coords(y_x, 0.5)
+
+        # Legend in upper-right empty triangle
+        if legend_outside and len(filtered) > 0:
             leg_ax = axes[0, d - 1]
             leg_ax.axis("off")
             leg_ax.legend(
@@ -1076,12 +1053,11 @@ class MCMCModel:
             )
 
         os.makedirs("results", exist_ok=True)
-        fig.savefig(
-            f"results/corner_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            format="pdf",
-            bbox_inches="tight",
-        )
-        print(f"Saved: results/corner_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = f"results/corner_{ts}.pdf"
+        fig.savefig(out, format="pdf", bbox_inches="tight", pad_inches=0.25)
+        print(f"Saved: {out}")
+
         plt.show()
 
     def summary(self):
