@@ -519,17 +519,11 @@ class MCMCModel:
         chain = chain[:, discard:]
         chain = chain[:, ::thin]
 
-        # ------------------------------------------------------------
-        # Key improvement: plot ΔlogP relative to the best value
-        # This makes the plot readable even if absolute values span huge ranges.
-        # ΔlogP = logP - max(logP) <= 0
-        # ------------------------------------------------------------
         finite = np.isfinite(chain)
         if not np.any(finite):
             raise ValueError("All log_probs are non-finite (NaN/Inf).")
 
-        best = np.max(chain[finite])
-        y = chain - best  # <= 0, best is 0
+        y = chain
 
         # optionally limit number of walkers drawn
         plot_walkers = (
@@ -545,25 +539,19 @@ class MCMCModel:
         for i in range(y_plot.shape[0]):
             ax.plot(x, y_plot[i], alpha=alpha, linewidth=lw)
 
-        # Summary overlay: median + 16-84 band across walkers (all walkers)
+        # Summary overlay: median
         if show_summary and y.shape[0] > 1:
             med = np.nanmedian(y, axis=0)
-            q16, q84 = np.nanquantile(y, [0.16, 0.84], axis=0)
             ax.plot(x, med, linewidth=1.6, color="black", label="Median (all walkers)")
-            ax.fill_between(
-                x, q16, q84, color="black", alpha=0.12, label="16–84% (all walkers)"
-            )
 
         ax.set_xlabel("MCMC step [-]")
-        ax.set_ylabel(r"$\Delta \log \mathcal{P}(\theta \mid y)$  (shifted by $\max$)")
+        ax.set_ylabel(r"$\log \mathcal{P}(x \mid y)$")
 
-        # Robust y-limits (keeps zoom reasonable)
-        ylo, yhi = np.nanquantile(y_plot, [0.01, 0.99])
+        # Robust y-limits for raw log-posterior values
+        ylo, yhi = np.nanquantile(y_plot[np.isfinite(y_plot)], [0.01, 0.99])
         if np.isfinite(ylo) and np.isfinite(yhi) and yhi > ylo:
             pad = 0.08 * (yhi - ylo)
-            ax.set_ylim(ylo - pad, min(0.02, yhi + pad))  # keep top near 0 (best)
-
-        ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
+            ax.set_ylim(ylo - pad, yhi + pad)
 
         ax.margins(x=0.01)
         if show_summary and y.shape[0] > 1:
@@ -821,6 +809,7 @@ class MCMCModel:
         # ----------------------------
         inches_per_dim = 1.35
         fig_size = max(8.0, inches_per_dim * d)
+        # levels_2d_sigma = [0.393, 0.865, 0.989]  # 1σ,2σ,3σ in 2D (Gaussian-equivalent)
 
         fig = corner.corner(
             s,
@@ -836,6 +825,7 @@ class MCMCModel:
             color="tab:blue",
             plot_contours=True,
             fill_contours=False,
+            # levels=levels_2d_sigma,
             smooth=1.0,
             smooth1d=1.0,
         )
@@ -1158,7 +1148,7 @@ class MCMCModel:
         self.setup_whitening(cov=cov)
 
     def setup_whitening(self, cov=None):
-        self.whiten_mean = np.array(self.initial_params)
+        self.whiten_mean = np.array([p.mean() for p in self.param_priors], dtype=float)
         self.whiten_L = np.linalg.cholesky(cov)
         self.whiten_Linv = np.linalg.inv(self.whiten_L)
         self.is_whitened = True

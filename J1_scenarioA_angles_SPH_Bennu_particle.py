@@ -45,7 +45,11 @@ Units:
 # TODO: Add SRP and attitude? maybe create measurement gaps
 # TODO: Read chelseay and make realistic
 # TODO: Check all the math
-# TODO: Improve all plots in general (e.g., corner zoom out and put 3sig batch)
+# TODO: Implement ADS? To improve performance and correctness
+
+# NOTE: For second order, you generally need tighter tolerances, use `RK45`,
+# and call `propagate_state` or `propagate_state_stm_only` instead of `propagate`.
+
 
 import os
 import sys
@@ -1143,8 +1147,8 @@ if __name__ == "__main__":
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
-    ref_pct_r = 0.25  # 25% of each position component
-    ref_pct_v = 0.25  # 25% of each velocity component
+    ref_pct_r = 0.2  # 20% of each position component
+    ref_pct_v = 0.2  # 20% of each velocity component
     ref_pct_mu = 0.01  # 1% of mu
     ref_pct_c = 0.01  # 1% of each C/S coefficient
 
@@ -1495,6 +1499,7 @@ if __name__ == "__main__":
     model.summary()
     model.print_regression_diagnostics()
     model.plot_autocorrelation()
+    model.plot_log_likelihood()
 
     # --------------------------
     # Plot scene (using MCMC mean estimate)
