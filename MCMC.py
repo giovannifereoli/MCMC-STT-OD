@@ -167,7 +167,7 @@ class MCMCModel:
                 popsize=100,  # larger population helps refine exploration
                 tol=1e-12,  # tighter tolerance for stopping
             )
-        elif method == "lsq":
+        elif method == "LSQ":
             print(f"[Optimization] Using least squares: least_squares(method='trf')")
 
             def residuals_map(theta_white):
@@ -218,9 +218,15 @@ class MCMCModel:
         spherical_spread=1e-4,
         method_optimize="Powell",
         use_demoves=False,
+        stretch_a=2.0,
+        use_optimize=True,
     ):
         # Use optimization for better initial guess
-        optimized_guess = self.optimize_initial_guess(method=method_optimize)
+        if use_optimize:
+            optimized_guess = self.optimize_initial_guess(method=method_optimize)
+        else:
+            print("[Run] Skipping optimization. Using initial parameters.")
+            optimized_guess = self.initial_params.copy()
 
         if getattr(self, "is_whitened", False):
             # Whiten the optimized guess
@@ -252,7 +258,7 @@ class MCMCModel:
                 (emcee.moves.DESnookerMove(), 0.3),
             ]
         else:
-            moves = emcee.moves.StretchMove()
+            moves = emcee.moves.StretchMove(a=stretch_a)
 
         # Run MCMC using emcee
         print("")
@@ -1084,7 +1090,7 @@ class MCMCModel:
         # Warn if acceptance rate is outside optimal range
         if mean_acceptance < 0.2 or mean_acceptance > 0.5:
             print(
-                "Acceptance rate outside optimal range (0.2-0.5). Consider tuning initialization step size."
+                "Acceptance rate outside optimal range (0.2-0.5). Consider tuning initialization step size and stretch_a."
             )
 
         print("Parameter estimates:")
