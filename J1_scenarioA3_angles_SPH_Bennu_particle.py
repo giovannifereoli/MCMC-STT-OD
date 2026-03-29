@@ -2,9 +2,9 @@
 Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 
 - Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
-- Particle detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
+- GravityPopper detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
 - Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
-- Particle dynamics uses degree-2 gravity potential in body-fixed:
+- GravityPopper dynamics uses degree-2 gravity potential in body-fixed:
     U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
   Acceleration is computed as a = -∇U in body-fixed, then rotated to inertial.
 
@@ -12,12 +12,12 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
     theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
   about a reference x0_ref (also 12D state).
 
-- Measurements: RA/DEC from spacecraft to particle, with occultation mask (sphere proxy).
+- Measurements: RADIOMETRIC from spacecraft to GravityPopper, with occultation mask (sphere proxy).
 
 Pipeline:
-  1) Propagate truth particle with truth params.
+  1) Propagate truth GravityPopper with truth params.
   2) Query SPICE for spacecraft truth at the same epochs.
-  3) Generate noisy RA/DEC on visible epochs only.
+  3) Generate noisy RADIOMETRIC on visible epochs only.
   4) Build reference (perturb truth) and propagate ref + STTs with STTPropagator.
   5) Stage-1 full nonlinear MAP (optional, slow): re-propagate each evaluation.
   6) Stage-2 STT-based MAP: use propagate_deviation with your STTPropagator.
@@ -65,7 +65,6 @@ from itertools import product
 import spiceypy as spice
 import trimesh
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 from scipy.optimize import least_squares
 from scipy.stats import norm
 
@@ -102,13 +101,9 @@ plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
 # ============================================================
 
 
-def wrap_to_pi(a):
-    return (a + np.pi) % (2 * np.pi) - np.pi
-
-
 def occultation_mask(sc_pos, part_pos, R_body):
     """
-    Visibility test: does the segment SC->particle intersect sphere of radius R_body at origin?
+    Visibility test: does the segment SC->GravityPopper intersect sphere of radius R_body at origin?
     sc_pos:   (N,3)
     part_pos: (N,3)
     returns: mask True if visible
@@ -172,7 +167,7 @@ def occultation_mask_shape(
     Inputs
     ------
     sc_pos_i    : (N,3) spacecraft position in inertial (Bennu-centered, J2000)
-    part_pos_i  : (N,3) particle position in inertial (Bennu-centered, J2000)
+    part_pos_i  : (N,3) GravityPopper position in inertial (Bennu-centered, J2000)
     bennu_mesh_bf : trimesh.Trimesh, Bennu shape in BODY-FIXED frame, centered at origin
     alpha,delta,omega,w0 : Bennu pole/spin model used by make_bennu_rotation_matrix
     tau         : (N,) seconds since start (same "tau" you use for dynamics); if None assumes t=0 for all
@@ -182,7 +177,7 @@ def occultation_mask_shape(
     Returns
     -------
     visible : (N,) bool
-        True if particle is visible (NOT occulted by the mesh).
+        True if GravityPopper is visible (NOT occulted by the mesh).
     """
     sc_pos_i = np.asarray(sc_pos_i, dtype=float)
     part_pos_i = np.asarray(part_pos_i, dtype=float)
@@ -217,7 +212,7 @@ def occultation_mask_shape(
     # Ray origins and directions in BODY-FIXED
     d = pt_b - sc_b
     rng = np.linalg.norm(d, axis=1)
-    # Handle degenerate SC==particle
+    # Handle degenerate SC==GravityPopper
     good = rng > 0.0
     dirs = np.zeros_like(d)
     dirs[good] = d[good] / rng[good, None]
@@ -229,8 +224,8 @@ def occultation_mask_shape(
 
     # Visible if:
     # - no hit at all   OR
-    # - first hit is beyond the particle range (with margin eps)
-    # Occulted if hit occurs before particle.
+    # - first hit is beyond the GravityPopper range (with margin eps)
+    # Occulted if hit occurs before GravityPopper.
     # Note: dist_hit is in same units as mesh coords (km if you scaled mesh).
     visible = np.ones(N, dtype=bool)
     # If intersects_first returns -1 sometimes depending on backend, treat as "no hit"
@@ -354,79 +349,103 @@ def generate_stt_functions_bennu_deg2(
 
 
 # ============================================================
-# Measurement generation (RA/DEC from SPICE SC to particle)
+# Measurement generation (Range / Range-rate from SPICE SC to GravityPopper)
 # ============================================================
 
 
-def generate_opnav_measurements_from_sc(
-    x_part, sc_state, sigma_ra, sigma_dec, rng, add_outliers=False
+def generate_radio_measurements_from_sc(
+    x_part, sc_state, sigma_range, sigma_range_rate, rng, add_outliers=False
 ):
     """
-    x_part: (N,12) or (N,6) particle in inertial
-    sc_state: (N,6) spacecraft inertial
-    """
-    los = x_part[:, :3] - sc_state[:, :3]
-    ra, dec, _, _ = radec_and_partials_from_los(los)
+    x_part:   (N,12) or (N,6) GravityPopper inertial state
+    sc_state: (N,6) spacecraft inertial state
 
-    ra_meas = ra + rng.normal(0.0, sigma_ra, size=ra.shape)
-    dec_meas = dec + rng.normal(0.0, sigma_dec, size=dec.shape)
+    returns:
+      y = [range_0, range_rate_0, range_1, range_rate_1, ...]
+    """
+    rel_state = x_part[:, :6] - sc_state[:, :6]
+    rho, rhodot, _, _ = range_rate_and_partials_from_rel_state(rel_state)
+
+    rho_meas = rho + rng.normal(0.0, sigma_range, size=rho.shape)
+    rhodot_meas = rhodot + rng.normal(0.0, sigma_range_rate, size=rhodot.shape)
 
     if add_outliers:
         p_out = 0.02
-        out_scale = 20 * sigma_angle
-        mask = rng.random(size=ra.shape) < p_out
-        ra_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
-        dec_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
+        out_scale_rho = 20.0 * sigma_range
+        out_scale_rhodot = 20.0 * sigma_range_rate
+        mask = rng.random(size=rho.shape) < p_out
+        rho_meas[mask] += rng.normal(0.0, out_scale_rho, size=np.sum(mask))
+        rhodot_meas[mask] += rng.normal(0.0, out_scale_rhodot, size=np.sum(mask))
 
-    y = np.empty(2 * len(ra))
-    y[0::2] = ra_meas
-    y[1::2] = dec_meas
+    y = np.empty(2 * len(rho))
+    y[0::2] = rho_meas
+    y[1::2] = rhodot_meas
     return y
 
 
-def radec_and_partials_from_los(los):
+def range_rate_and_partials_from_rel_state(rel_state):
     """
-    los: (N,3) from SC to particle
-    returns:
-      ra, dec: (N,)
-      d_ra_d_r, d_dec_d_r: (N,3) wrt particle position (same as wrt los)
-    """
-    x = los[:, 0]
-    y = los[:, 1]
-    z = los[:, 2]
+    rel_state: (N,6) = [dx, dy, dz, dvx, dvy, dvz]
+               relative state from SC to GravityPopper
 
-    rxy2 = x * x + y * y
-    rxy = np.sqrt(np.maximum(rxy2, 1e-30))
-    rho2 = rxy2 + z * z
+    returns:
+      rho:           (N,)   range
+      rhodot:        (N,)   range rate
+      d_rho_d_r:     (N,3)  partial of range wrt relative position
+      d_rhodot_d_x:  (N,6)  partial of range rate wrt relative state
+                            [d/dx, d/dy, d/dz, d/dvx, d/dvy, d/dvz]
+    """
+    r = rel_state[:, :3]
+    v = rel_state[:, 3:6]
+
+    x = r[:, 0]
+    y = r[:, 1]
+    z = r[:, 2]
+
+    vx = v[:, 0]
+    vy = v[:, 1]
+    vz = v[:, 2]
+
+    rho2 = x * x + y * y + z * z
     rho = np.sqrt(np.maximum(rho2, 1e-30))
 
-    # RA: use raw atan2, NO modulo
-    ra = np.arctan2(y, x)  # (-pi, pi]
-    denom_ra = np.maximum(rxy2, 1e-30)
-    d_ra_dx = -y / denom_ra
-    d_ra_dy = x / denom_ra
-    d_ra_dz = 0.0 * z
+    rv = x * vx + y * vy + z * vz
+    rhodot = rv / rho
 
-    # -DEC: use atan2(z, rxy)
-    dec = np.arctan2(z, rxy)
+    # ---- range partial wrt position ----
+    d_rho_dx = x / rho
+    d_rho_dy = y / rho
+    d_rho_dz = z / rho
+    d_rho_d_r = np.stack([d_rho_dx, d_rho_dy, d_rho_dz], axis=1)
 
-    # ddec/dx, ddec/dy, ddec/dz
-    # dec = atan2(z, rxy)
-    # ddec/dz = rxy / (rxy^2 + z^2) = rxy / rho^2
-    # ddec/drxy = -z / (rxy^2 + z^2) = -z / rho^2
-    # drxy/dx = x/rxy, drxy/dy = y/rxy
-    denom_dec = np.maximum(rho2, 1e-30)
+    # ---- range-rate partial wrt state ----
+    # rhodot = (r·v)/rho
+    # d(rhodot)/dr = v/rho - (r·v) r / rho^3
+    # d(rhodot)/dv = r/rho
 
-    d_dec_dz = rxy / denom_dec
-    d_dec_drxy = -z / denom_dec
+    rho3 = np.maximum(rho**3, 1e-30)
 
-    d_dec_dx = d_dec_drxy * (x / rxy)
-    d_dec_dy = d_dec_drxy * (y / rxy)
+    d_rhodot_dx = vx / rho - rv * x / rho3
+    d_rhodot_dy = vy / rho - rv * y / rho3
+    d_rhodot_dz = vz / rho - rv * z / rho3
 
-    d_ra_d_r = np.stack([d_ra_dx, d_ra_dy, d_ra_dz], axis=1)
-    d_dec_d_r = np.stack([d_dec_dx, d_dec_dy, d_dec_dz], axis=1)
+    d_rhodot_dvx = x / rho
+    d_rhodot_dvy = y / rho
+    d_rhodot_dvz = z / rho
 
-    return ra, dec, d_ra_d_r, d_dec_d_r
+    d_rhodot_d_x = np.stack(
+        [
+            d_rhodot_dx,
+            d_rhodot_dy,
+            d_rhodot_dz,
+            d_rhodot_dvx,
+            d_rhodot_dvy,
+            d_rhodot_dvz,
+        ],
+        axis=1,
+    )
+
+    return rho, rhodot, d_rho_d_r, d_rhodot_d_x
 
 
 # ============================================================
@@ -616,7 +635,7 @@ def plot_bennu_scene_body_fixed(
     delta,
     omega,
     vis_mask=None,
-    title="OSIRIS-REx + Particle around Bennu (BODY-FIXED)",
+    title="OSIRIS-REx + GravityPopper around Bennu (BODY-FIXED)",
     mesh_target_radius_km=None,
     mesh_scale_mode="rms",
     downsample=3,
@@ -684,7 +703,7 @@ def plot_bennu_scene_body_fixed(
         linewidth=1.6,
         alpha=0.95,
         color="tab:red",
-        label="Particle truth",
+        label="GravityPopper truth",
     )
 
     # ------------------------------------------------------------
@@ -710,7 +729,7 @@ def plot_bennu_scene_body_fixed(
                 marker="o",
                 color="black",
                 alpha=0.9,
-                label="Particle Visible",
+                label="GravityPopper Visible",
             )
         if sc_occ.size:
             ax.scatter(
@@ -721,7 +740,7 @@ def plot_bennu_scene_body_fixed(
                 marker="x",
                 color="black",
                 alpha=0.9,
-                label="Particle Occulted",
+                label="GravityPopper Occulted",
             )
 
     # ------------------------------------------------------------
@@ -787,9 +806,9 @@ def solve_stage1_gn_with_stm(
     x0_ref,
     tau,  # (N,) seconds since start (NOT ET)
     sc_state,  # (N,6) inertial, same epochs as tau
-    y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
-    sigma_ra,
-    sigma_dec,
+    y_obs,  # (2N,) stacked [range0,range_rate0, range1,range_rate1,...]
+    sigma_range,
+    sigma_range_rate,
     obs_weights,  # Pass visibility weights
     priors=None,  # list of scipy.stats.norm length n_update, OR None
     update_idx=None,  # indices of the 12D delta you're solving for (e.g. range(6) or range(12))
@@ -824,8 +843,8 @@ def solve_stage1_gn_with_stm(
 
     # weights
     w = np.empty_like(y_obs, dtype=float)
-    w[0::2] = sigma_ra
-    w[1::2] = sigma_dec
+    w[0::2] = sigma_range
+    w[1::2] = sigma_range_rate
 
     for it in range(1, max_iter + 1):
         # propagate ref (truth model) and obtain STM history
@@ -845,15 +864,17 @@ def solve_stage1_gn_with_stm(
         Phi_list = np.array(Phi_list)  # (N,12,12)
 
         # build residuals and Jacobian
-        los = x_ref[:, :3] - sc_state[:, :3]
-        ra_model, dec_model, d_ra_dr, d_dec_dr = radec_and_partials_from_los(los)
+        rel_state = x_ref[:, :6] - sc_state[:, :6]
+        range_model, range_rate_model, d_range_dx, d_range_rate_dx = (
+            range_rate_and_partials_from_rel_state(rel_state)
+        )
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = ra_model
-        y_model[1::2] = dec_model
+        y_model[0::2] = range_model
+        y_model[1::2] = range_rate_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[0::2] = y_obs[0::2] - y_model[0::2]
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         r = res / w * obs_weights  # normalized residual vector (2N,)
@@ -862,12 +883,12 @@ def solve_stage1_gn_with_stm(
         J = np.zeros((2 * len(tau), n_upd), dtype=float)
 
         # For each epoch: Hy = dy/dx_k, then chain with Phi_k wrt x0.
-        # dy/dx_k only depends on position components (x,y,z) of particle state.
+        # dy/dx_k only depends on position components (x,y,z) of GravityPopper state.
         for k in range(len(tau)):
             # dy/dxk: 2x12
             Hy = np.zeros((2, 12), dtype=float)
-            Hy[0, 0:3] = d_ra_dr[k, :]
-            Hy[1, 0:3] = d_dec_dr[k, :]
+            Hy[0, 0:3] = d_range_dx[k, :]
+            Hy[1, 0:6] = d_range_rate_dx[k, :]
 
             # chain to x0: 2x12
             Hx0 = Hy @ Phi_list[k]
@@ -876,8 +897,8 @@ def solve_stage1_gn_with_stm(
             J[2 * k : 2 * k + 2, :] = Hx0[:, update_idx]
 
         # normalize Jacobian rows by sigma
-        J[0::2, :] /= sigma_ra
-        J[1::2, :] /= sigma_dec
+        J[0::2, :] /= sigma_range
+        J[1::2, :] /= sigma_range_rate
         J = J * obs_weights[:, None]
 
         # linearized MAP solve: (J; W_prior) d = (r; r_prior)
@@ -925,15 +946,12 @@ def solve_stage1_gn_with_stm(
     # Compute covariance at convergence
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
-    if max_iter == 0:
-        cov_upd = prior_sig[update_idx] ** 2 * np.eye(n_upd)
-    else:
-        try:
-            AtA = A.T @ A
-            cov_upd = np.linalg.inv(AtA)
-        except np.linalg.LinAlgError:
-            print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-            cov_upd = np.linalg.pinv(A.T @ A)
+    try:
+        AtA = A.T @ A
+        cov_upd = np.linalg.inv(AtA)
+    except np.linalg.LinAlgError:
+        print("[WARNING] Covariance matrix is singular, using pseudoinverse")
+        cov_upd = np.linalg.pinv(A.T @ A)
 
     # Embed into full 12x12 covariance (infinite variance for non-updated params)
     cov_full = np.full((12, 12), np.inf)
@@ -951,80 +969,46 @@ def solve_stage1_gn_with_stm(
         )
         x_pf = sol_pf.y[:12, :].T
 
-        los_pf = x_pf[:, :3] - sc_state[:, :3]
-        ra_pf, dec_pf, _, _ = radec_and_partials_from_los(los_pf)
+        rel_state_pf = x_pf[:, :6] - sc_state[:, :6]
+        range_pf, range_rate_pf, _, _ = range_rate_and_partials_from_rel_state(
+            rel_state_pf
+        )
 
         y_pf = np.empty_like(y_obs)
-        y_pf[0::2] = ra_pf
-        y_pf[1::2] = dec_pf
+        y_pf[0::2] = range_pf
+        y_pf[1::2] = range_rate_pf
 
         res_pf = np.empty_like(y_obs)
-        res_pf[0::2] = wrap_to_pi(y_obs[0::2] - y_pf[0::2])
+        res_pf[0::2] = y_obs[0::2] - y_pf[0::2]
         res_pf[1::2] = y_obs[1::2] - y_pf[1::2]
 
         postfit = (res_pf / w) * obs_weights
 
-        # Reshape [r0, r1, r2, r3, ...] -> (2, N)
-        residuals_matrix = postfit.reshape(-1, 2).T
-        time_hr = np.asarray(tau).ravel() / 3600.0
+        # reshape to (2,N) and plot
+        post_m = postfit.reshape(-1, 2).T
+        time_hr = np.asarray(tau) / 3600.0
 
-        # Remove zero residuals
-        mask0 = residuals_matrix[0] != 0.0
-        mask1 = residuals_matrix[1] != 0.0
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
 
-        r0, t0 = residuals_matrix[0, mask0], time_hr[mask0]
-        r1, t1 = residuals_matrix[1, mask1], time_hr[mask1]
+        ax0.plot(time_hr, post_m[0], "o", ms=3.5, label="Postfit")
+        ax0.axhline(0, c="k", ls="--")
+        ax0.axhline(3, c="r", ls=":")
+        ax0.axhline(-3, c="r", ls=":")
+        ax0.set_ylabel(r"Range Residual [$\sigma$]")
+        ax0.grid(True)
+        ax0.legend()
 
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+        ax1.plot(time_hr, post_m[1], "o", ms=3.5, label="Postfit")
+        ax1.axhline(0, c="k", ls="--")
+        ax1.axhline(3, c="r", ls=":")
+        ax1.axhline(-3, c="r", ls=":")
+        ax1.set_ylabel(r"Range Rate Residual [$\sigma$]")
+        ax1.set_xlabel("Time [hours since epoch]")
+        ax1.grid(True)
+        ax1.legend()
 
-        # Top panel
-        ax0.scatter(t0, r0, s=50, alpha=0.85)
-        ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax0.set_ylabel(r"Whitened RA Residual [$\sigma$]")
-        ax0.grid(True, linestyle=":")
-
-        if r0.size > 0:
-            lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax0.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        # Bottom panel
-        ax1.scatter(t1, r1, s=50, alpha=0.85)
-        ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax1.set_ylabel(r"Whitened DEC Residual [$\sigma$]")
-        ax1.set_xlabel("Time since epoch [hours]")
-        ax1.grid(True, linestyle=":")
-
-        if r1.size > 0:
-            lim = np.max(np.abs(np.quantile(r1, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax1.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        legend_items = [
-            Line2D(
-                [0],
-                [0],
-                color="red",
-                linestyle=":",
-                linewidth=3.2,
-                label=r"$\pm 3\sigma$",
-            ),
-        ]
-
-        ax0.legend(
-            handles=legend_items,
-            loc="upper right",
-            frameon=True,
-        )
-
-        os.makedirs("results", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"results/postfit_residuals_{timestamp}.pdf"
-        fig.savefig(fname, format="pdf", bbox_inches="tight")
-        fig.tight_layout()
-        plt.show()
+        plt.tight_layout()
+        # plt.show()
 
     return x0_ref, delta_total, cov_full
 
@@ -1078,15 +1062,17 @@ def solve_stage1_full_nonlinear_lsq(
         )
         x = sol.y[:12, :].T
 
-        los = x[:, :3] - sc_state[:, :3]
-        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
+        rel_state = x[:, :6] - sc_state[:, :6]
+        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(
+            rel_state
+        )
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = ra_model
-        y_model[1::2] = dec_model
+        y_model[0::2] = range_model
+        y_model[1::2] = range_rate_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[0::2] = y_obs[0::2] - y_model[0::2]
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         # Apply both sigma weighting AND visibility weighting
@@ -1147,11 +1133,10 @@ if __name__ == "__main__":
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
-    # TODO: 7 days was a nightmare for batch, see where it's a better example. maybe look at the 20 particles of gravity
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T01:30:00"
-    n_obs = 22  # NOTE: 22 batch not working, 23 is working!
+    utc1 = "2019-03-01T00:20:00"
+    n_obs = 20  # NOTE: 22 batch not working, 23 is working!
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1178,13 +1163,10 @@ if __name__ == "__main__":
     )
 
     # Measurement noise
-    sigma_pix = 0.1  # pixel noise (1-sigma)
-    fov_deg = 44.0  # full FOV [deg]  (e.g. NavCam ~44 deg)
-    n_pix = 2592  # pixels across FOV (e.g. NavCam)
-    fov_rad = np.deg2rad(fov_deg)
-    sigma_angle = sigma_pix * (fov_rad / n_pix)  # radians
-    sigma_ra = sigma_angle
-    sigma_dec = sigma_angle
+    sigma_range = 1 * 1e-3  # km  (50 cm, typical 60-sec integration ranging, HERA-ISL)
+    sigma_range_rate = (
+        1 * 1e-5
+    )  # km/s  (0.05 mm/s, typical 60-sec integration Doppler, HERA-ISL)
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
@@ -1194,9 +1176,9 @@ if __name__ == "__main__":
     ref_pct_c = 0.01  # 1% of each C/S coefficient
 
     # priors (on deltas about the reference) are these fractions of |truth|
-    # NOTE: ach component of the particle's position is assigned a 250 m a priori
+    # NOTE: ach component of the GravityPopper's position is assigned a 250 m a priori
     # uncertainty, which in three dimensions roughly equates to Bennu's volume.
-    # Each component of the particle's velocity is assigned a 30 cm/s a priori
+    # Each component of the GravityPopper's velocity is assigned a 30 cm/s a priori
     # uncertainty, which is the same order of magnitude as the escape speeds on
     # Bennu's surface.
     # prior_pct_r = ref_pct_r  # 1% of each position component
@@ -1205,17 +1187,17 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 1e-4  # 0.1% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 0.5  # 50% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 2000  # 5 *
+    n_samples = 5000  # 5 *
     burn_in = 1
     thin = 1
-    spherical_spread = 1e-1
+    spherical_spread = 1e-4
 
     # --------------------------
     # Load SPICE & spacecraft truth (SPICE remains in ET)
@@ -1233,7 +1215,7 @@ if __name__ == "__main__":
         sc_state_full[i, :] = np.array(st, dtype=float)
 
     # --------------------------
-    # Particle detach point on Bennu surface
+    # GravityPopper detach point on Bennu surface
     # --------------------------
     mesh_path = "ObjFiles/BennuRadar.obj"
     bennu_mesh = trimesh.load(mesh_path, force="mesh")
@@ -1318,9 +1300,9 @@ if __name__ == "__main__":
     )
 
     # --------------------------
-    # Propagate particle truth (DYNAMICS on tau_full)
+    # Propagate GravityPopper truth (DYNAMICS on tau_full)
     # --------------------------
-    print("\nPropagating particle truth...")
+    print("\nPropagating GravityPopper truth...")
     sol_true, stts_true = propagator.propagate(
         x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
@@ -1349,23 +1331,23 @@ if __name__ == "__main__":
     print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
-    # Generate noisy RA/DEC measurements
+    # Generate noisy RADIOMETRIC measurements
     # --------------------------
     # Generate measurements for ALL epochs (including occulted ones)
     # We'll handle visibility in the residual weighting
     rng_meas = np.random.default_rng(123)
-    y_obs_full = generate_opnav_measurements_from_sc(
+    y_obs_full = generate_radio_measurements_from_sc(
         x_part=x_true,
         sc_state=sc_state,
-        sigma_ra=sigma_ra,
-        sigma_dec=sigma_dec,
+        sigma_range=sigma_range,
+        sigma_range_rate=sigma_range_rate,
         rng=rng_meas,
     )
 
     # Create a weight vector: zero weight for occulted observations
     obs_weights = np.ones_like(y_obs_full)
-    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted RA
-    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted DEC
+    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted range
+    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted range rate
 
     y_obs = y_obs_full  # Use all measurements, rely on weights
 
@@ -1419,11 +1401,11 @@ if __name__ == "__main__":
         tau=tau,  # seconds since start
         sc_state=sc_state,
         y_obs=y_obs,
-        sigma_ra=sigma_ra,
-        sigma_dec=sigma_dec,
+        sigma_range=sigma_range,
+        sigma_range_rate=sigma_range_rate,
         obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
-        max_iter=30,
+        max_iter=15,
         tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
@@ -1465,20 +1447,22 @@ if __name__ == "__main__":
     def residuals_normalized(delta0):
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
 
-        los = x_est[:, :3] - sc_state[:, :3]
-        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
+        rel_state = x_est[:, :6] - sc_state[:, :6]
+        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(
+            rel_state
+        )
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = ra_model
-        y_model[1::2] = dec_model
+        y_model[0::2] = range_model
+        y_model[1::2] = range_rate_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[0::2] = y_obs[0::2] - y_model[0::2]
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         w = np.empty_like(y_obs)
-        w[0::2] = sigma_ra
-        w[1::2] = sigma_dec
+        w[0::2] = sigma_range
+        w[1::2] = sigma_range_rate
 
         # Apply visibility weighting
         return (res / w) * obs_weights
@@ -1515,7 +1499,9 @@ if __name__ == "__main__":
         burn_in=burn_in,
         thin=thin,
         spherical_spread=spherical_spread,
-        method_optimize="Powell",
+        method_optimize="LSQ",
+        # use_demoves=True,
+        stretch_a=1.25,
     )
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
