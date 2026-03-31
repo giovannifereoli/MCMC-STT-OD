@@ -19,6 +19,8 @@ from scipy.stats import gaussian_kde
 from scipy.optimize import least_squares
 from datetime import datetime
 import os
+import dynesty
+from dynesty import utils as dyfunc
 
 # Publication-ish defaults
 plt.rcParams.update(
@@ -1379,3 +1381,312 @@ class MCMCModel:
 
         cov = np.cov(self.samples.T)
         return theta_hat, cov
+
+    '''
+    def run_multinest(
+        self,
+        n_live_points=1000,
+        evidence_tolerance=0.1,
+        sampling_efficiency=0.3,
+        outputfiles_basename="chains/multinest_",
+        resume=False,
+        verbose=True,
+        multimodal=True,
+        importance_nested_sampling=True,
+        max_modes=100,
+        use_MPI=False,
+    ):
+        """
+        Run nested sampling with PyMultiNest.
+
+        Notes
+        -----
+        - Assumes priors are proper scipy.stats distributions with .ppf().
+        - Unlike emcee, there is no burn-in / thinning / walkers concept.
+        - Stores:
+            self.samples   -> equal-weight posterior samples, shape (Ns, ndim)
+            self.log_probs -> recomputed log-posterior on self.samples
+            self.logZ      -> global log-evidence
+            self.logZerr   -> evidence uncertainty
+            self.multinest_stats -> full stats dict from Analyzer
+        """
+        try:
+            import pymultinest
+        except ImportError as e:
+            raise ImportError(
+                "PyMultiNest is not installed. Install pymultinest and the MultiNest "
+                "library first."
+            ) from e
+
+        os.makedirs(os.path.dirname(outputfiles_basename) or ".", exist_ok=True)
+
+        # -------- prior transform: unit cube -> physical parameter space --------
+        def prior_transform(cube, ndim, nparams):
+            for i, p in enumerate(self.param_priors):
+                u = float(cube[i])
+
+                # keep away from exact 0/1 for bounded/infinite-tail priors
+                u = min(max(u, 1e-12), 1.0 - 1e-12)
+
+                try:
+                    cube[i] = p.ppf(u)
+                except Exception as e:
+                    raise ValueError(
+                        f"Prior {i} does not support a valid .ppf() transform required "
+                        f"by PyMultiNest. Define a custom transform for that prior."
+                    ) from e
+
+                if not np.isfinite(cube[i]):
+                    raise ValueError(
+                        f"Prior transform produced non-finite value for parameter {i}."
+                    )
+
+        # -------- log-likelihood in physical parameter space --------
+        def loglike(cube, ndim, nparams):
+            theta = np.array([cube[i] for i in range(self.ndim)], dtype=float)
+            ll = self.log_likelihood(theta)
+
+            # MultiNest expects a very small finite value, not -inf/nan
+            if not np.isfinite(ll):
+                return -1e100
+            return float(ll)
+
+        print("")
+        print(
+            f"[RunMultiNest] Starting PyMultiNest with "
+            f"{n_live_points} live points..."
+        )
+
+        pymultinest.run(
+            LogLikelihood=loglike,
+            Prior=prior_transform,
+            n_dims=self.ndim,
+            n_params=self.ndim,
+            outputfiles_basename=outputfiles_basename,
+            resume=resume,
+            verbose=verbose,
+            multimodal=multimodal,
+            importance_nested_sampling=importance_nested_sampling,
+            n_live_points=n_live_points,
+            evidence_tolerance=evidence_tolerance,
+            sampling_efficiency=sampling_efficiency,
+            max_modes=max_modes,
+            use_MPI=use_MPI,
+        )
+
+        # -------- read results back --------
+        analyzer = pymultinest.Analyzer(
+            n_params=self.ndim,
+            outputfiles_basename=outputfiles_basename,
+        )
+
+        stats = analyzer.get_stats()
+        posterior = analyzer.get_equal_weighted_posterior()
+
+        # PyMultiNest returns samples with one extra column in this output.
+        # Keep only parameter columns.
+        self.samples = np.asarray(posterior[:, : self.ndim], dtype=float)
+
+        # Recompute log-posterior so downstream methods (MAP, corner overlays, etc.)
+        # continue to work with your existing class design.
+        self.log_probs = np.array(
+            [self.log_posterior(theta) for theta in self.samples],
+            dtype=float,
+        )
+
+        self.logZ = stats["nested sampling global log-evidence"]
+        self.logZerr = stats["nested sampling global log-evidence error"]
+        self.multinest_stats = stats
+        self.sampler = None
+        self.chain = None
+
+        print(f"[RunMultiNest] Finished.")
+        print(f"[RunMultiNest] logZ    = {self.logZ:.6f}")
+        print(f"[RunMultiNest] logZerr = {self.logZerr:.6f}")
+        print(f"[RunMultiNest] posterior samples: {self.samples.shape[0]}")
+
+        # Optional summary similar to your emcee printout
+        print("Parameter estimates:")
+        for i in range(self.ndim):
+            q16, q50, q84 = np.percentile(self.samples[:, i], [16, 50, 84])
+            print(
+                f"θ_{i}: {q50:+.10e}  "
+                f"(+{q84 - q50:.1e} / -{q50 - q16:.1e})"
+            )
+
+
+    def run_dynesty(
+        self,
+        nlive=500,
+        dlogz=0.1,
+        maxiter=None,
+        maxcall=None,
+        sample="rwalk",
+        bound="multi",
+        bootstrap=0,
+        enlarge=None,
+        walks=25,
+        slices=5,
+        update_interval=None,
+        wt_kwargs=None,
+        use_dynamic=False,
+        dynamic_kwargs=None,
+        resample_equal=True,
+        print_progress=True,
+    ):
+        """
+        Run nested sampling with dynesty.
+
+        Parameters
+        ----------
+        nlive : int
+            Number of live points.
+        dlogz : float
+            Stopping criterion on remaining evidence.
+        maxiter, maxcall : int or None
+            Optional hard limits passed to dynesty.
+        sample : str
+            dynesty sampling method, e.g. 'rwalk', 'rslice', 'slice', 'unif'.
+        bound : str
+            Bounding method, e.g. 'multi', 'single', 'balls', 'none'.
+        bootstrap : int
+            dynesty bootstrap setting for bounding.
+        enlarge : float or None
+            Optional enlargement factor for bounds.
+        walks : int
+            Number of walks for rwalk.
+        slices : int
+            Number of slices for slice/rslice.
+        update_interval : int/float or None
+            dynesty update interval.
+        wt_kwargs : dict or None
+            Passed to dynesty.utils.resample_equal if needed later.
+        use_dynamic : bool
+            If True, use DynamicNestedSampler. Otherwise NestedSampler.
+        dynamic_kwargs : dict or None
+            Extra kwargs for DynamicNestedSampler.run_nested().
+        resample_equal : bool
+            If True, convert weighted posterior samples into equal-weight samples.
+        print_progress : bool
+            Show dynesty progress bar.
+        """
+
+        print("")
+        print(
+            f"[Dynesty] Starting {'dynamic ' if use_dynamic else ''}nested sampling "
+            f"with nlive={nlive}, sample='{sample}', bound='{bound}'"
+        )
+
+        if wt_kwargs is None:
+            wt_kwargs = {}
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
+
+        # -------- Prior transform --------
+        # dynesty samples u in [0,1]^ndim and maps to theta through the prior inverse CDF
+        def prior_transform(u):
+            theta = np.empty(self.ndim)
+            for i, prior in enumerate(self.param_priors):
+                val = prior.ppf(u[i])
+                if not np.isfinite(val):
+                    raise ValueError(
+                        f"Prior {i} returned non-finite value in ppf at u={u[i]:.6e}"
+                    )
+                theta[i] = val
+            return theta
+
+        # -------- Log-likelihood --------
+        # dynesty expects ONLY log-likelihood; priors are handled by prior_transform
+        def dynesty_loglike(theta):
+            return self.log_likelihood(theta)
+
+        sampler_kwargs = dict(
+            loglikelihood=dynesty_loglike,
+            prior_transform=prior_transform,
+            ndim=self.ndim,
+            sample=sample,
+            bound=bound,
+            bootstrap=bootstrap,
+        )
+
+        if enlarge is not None:
+            sampler_kwargs["enlarge"] = enlarge
+        if update_interval is not None:
+            sampler_kwargs["update_interval"] = update_interval
+
+        # Method-specific tuning
+        if sample == "rwalk":
+            sampler_kwargs["walks"] = walks
+        elif sample in ("slice", "rslice"):
+            sampler_kwargs["slices"] = slices
+
+        # -------- Build sampler --------
+        if use_dynamic:
+            self.sampler = dynesty.DynamicNestedSampler(**sampler_kwargs)
+            self.sampler.run_nested(
+                print_progress=print_progress,
+                maxiter=maxiter,
+                maxcall=maxcall,
+                dlogz_init=dlogz,
+                **dynamic_kwargs,
+            )
+        else:
+            sampler_kwargs["nlive"] = nlive
+            self.sampler = dynesty.NestedSampler(**sampler_kwargs)
+            self.sampler.run_nested(
+                dlogz=dlogz,
+                print_progress=print_progress,
+                maxiter=maxiter,
+                maxcall=maxcall,
+            )
+
+        # -------- Store results --------
+        self.results = self.sampler.results
+
+        # Raw weighted nested-sampling outputs
+        raw_samples = np.asarray(self.results.samples)  # (nsamps, ndim)
+        logwt = np.asarray(self.results.logwt)  # log-weights
+        logz_final = float(self.results.logz[-1])  # final log-evidence
+        logzerr_final = float(self.results.logzerr[-1])  # evidence error
+        logl = np.asarray(self.results.logl)  # log-likelihoods
+
+        # Normalized posterior weights
+        weights = np.exp(logwt - logz_final)
+
+        self.logz = logz_final
+        self.logzerr = logzerr_final
+        self.posterior_weights = weights
+        self.raw_ns_samples = raw_samples
+        self.raw_ns_logl = logl
+
+        # Equal-weight posterior resampling if requested
+        if resample_equal:
+            self.samples = dyfunc.resample_equal(raw_samples, weights, **wt_kwargs)
+            # Posterior "log probs" only up to a constant unless priors are recomputed
+            self.log_probs = np.array(
+                [self.log_posterior(theta) for theta in self.samples]
+            )
+        else:
+            self.samples = raw_samples
+            self.log_probs = np.array(
+                [self.log_posterior(theta) for theta in self.samples]
+            )
+
+        # dynesty does not have walkers/chains like emcee
+        self.chain = None
+        self.log_prob_chain = None
+
+        # Simple posterior summaries
+        mean = np.average(raw_samples, axis=0, weights=weights)
+        cov = np.cov(raw_samples.T, aweights=weights)
+
+        self.posterior_mean = mean
+        self.posterior_cov = cov
+
+        print(f"[Dynesty] Done.")
+        print(f"[Dynesty] logZ  = {self.logz:.6f}")
+        print(f"[Dynesty] logZerr = {self.logzerr:.6f}")
+        print(f"[Dynesty] Posterior mean = {self.posterior_mean}")
+
+        return self.results
+    '''

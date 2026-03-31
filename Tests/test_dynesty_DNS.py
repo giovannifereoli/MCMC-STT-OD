@@ -774,7 +774,7 @@ def plot_bennu_scene_body_fixed(
     )
     print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
 
-    plt.show()
+    # plt.show()
 
 
 # ============================================================
@@ -1024,7 +1024,7 @@ def solve_stage1_gn_with_stm(
         fname = f"results/postfit_residuals_batch_{timestamp}.pdf"
         fig.savefig(fname, format="pdf", bbox_inches="tight")
         fig.tight_layout()
-        plt.show()
+        # plt.show()
 
     return x0_ref, delta_total, cov_full
 
@@ -1509,6 +1509,7 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
+    """
     model.run(
         n_samples=n_samples,
         n_walkers=n_walkers,
@@ -1530,17 +1531,39 @@ if __name__ == "__main__":
 
     true_delta = x0_true - x0_ref1
     print("\n[Truth] true_delta about ref1:\n", true_delta)
+    """
+    true_delta = x0_true - x0_ref1
+    dynamic_kwargs = dict(
+        nlive_init=1000,  # or 500 if expensive
+        nlive_batch=500,  # 250-1000 typical
+        n_effective=10000,  # posterior-focused stopping
+        wt_kwargs={"pfrac": 0.9},
+        maxbatch=10,  # optional safety cap
+        use_stop=True,
+    )
+    model.run_dynesty(
+        nlive=6000,
+        dlogz=0.01,
+        sample="rwalk",  # good default
+        bound="single",  # good default
+        use_dynamic=True,
+        dynamic_kwargs=dynamic_kwargs,
+    )
+
+    theta_hat = model.get_map_estimate()
+    print("MAP:", theta_hat)
+    print("logZ:", model.logz, "+/-", model.logzerr)
 
     # --------------------------
     # Diagnostics
     # --------------------------
-    model.plot_convergence()
+    # model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
     # model.plot_log_likelihood()
-    model.summary()
-    model.print_regression_diagnostics()
-    model.plot_autocorrelation()
-    model.plot_log_likelihood()
+    # model.summary()
+    # model.print_regression_diagnostics()
+    # model.plot_autocorrelation()
+    # model.plot_log_likelihood()
 
     # --------------------------
     # Plot scene (using MCMC mean estimate)
@@ -1575,7 +1598,7 @@ if __name__ == "__main__":
     plt.title("Occultation / Visibility Mask (sphere proxy)")
     plt.grid(True, linestyle=":")
     plt.tight_layout()
-    plt.show()
+    # plt.show()
 
     # --------------------------
     # Corner plot
