@@ -6,7 +6,7 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 - Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
 - Particle dynamics uses degree-2 gravity potential in body-fixed:
     U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
-  Acceleration is computed as a = -∇U in body-fixed, then rotated to inertial.
+  Acceleration is computed as a = ∇U in body-fixed, then rotated to inertial.
 
 - You estimate:
     theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
@@ -619,7 +619,7 @@ def plot_bennu_scene_body_fixed(
     title="OSIRIS-REx + Particle around Bennu (BODY-FIXED)",
     mesh_target_radius_km=None,
     mesh_scale_mode="rms",
-    downsample=3,
+    downsample=1,
 ):
     """
     BODY-FIXED visualization (publication-ready).
@@ -653,8 +653,7 @@ def plot_bennu_scene_body_fixed(
     pt_b = np.zeros_like(pt_i)
 
     for k, tk in enumerate(tau_i):
-        R_bi = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
-        R_ib = R_bi.T
+        R_ib = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
         sc_b[k] = R_ib @ sc_i[k]
         pt_b[k] = R_ib @ pt_i[k]
 
@@ -684,7 +683,7 @@ def plot_bennu_scene_body_fixed(
         linewidth=1.6,
         alpha=0.95,
         color="tab:red",
-        label="Particle truth",
+        label="Particle Truth",
     )
 
     # ------------------------------------------------------------
@@ -710,7 +709,7 @@ def plot_bennu_scene_body_fixed(
                 marker="o",
                 color="black",
                 alpha=0.9,
-                label="Particle Visible",
+                label="Measurement Included",
             )
         if sc_occ.size:
             ax.scatter(
@@ -721,7 +720,7 @@ def plot_bennu_scene_body_fixed(
                 marker="x",
                 color="black",
                 alpha=0.9,
-                label="Particle Occulted",
+                label="Measurement Unavailable",
             )
 
     # ------------------------------------------------------------
@@ -735,7 +734,7 @@ def plot_bennu_scene_body_fixed(
     # No title (caption-driven for papers)
     # ax.set_title(title)
 
-    ax.view_init(elev=28, azim=35)
+    ax.view_init(elev=10, azim=-120)
 
     mesh_v = np.asarray(mesh.vertices)
     all_xyz = np.vstack([mesh_v, sc_b, pt_b])
@@ -904,6 +903,15 @@ def solve_stage1_gn_with_stm(
 
         # Solve least squares
         d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+
+        # Solve least squares
+        # Normal equations
+        # ATA = A.T @ A
+        # ATb = A.T @ b
+        # Damping parameter
+        # lam = 1e-3  # tune this!
+        # Damped solve
+        # d_upd = np.linalg.solve(ATA + lam * np.eye(ATA.shape[0]), ATb)
 
         # Embed into 12D delta, update ref
         d_full = np.zeros(12)
@@ -1560,7 +1568,7 @@ if __name__ == "__main__":
         vis_mask=vis_mask,
         mesh_target_radius_km=R_bennu,
         mesh_scale_mode="rms",
-        downsample=2,
+        downsample=1,
     )
 
     # --------------------------

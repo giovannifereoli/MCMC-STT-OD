@@ -6,13 +6,13 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 - Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
 - GravityPopper dynamics uses degree-2 gravity potential in body-fixed:
     U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
-  Acceleration is computed as a = -∇U in body-fixed, then rotated to inertial.
+  Acceleration is computed as a = ∇U in body-fixed, then rotated to inertial.
 
 - You estimate:
     theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
   about a reference x0_ref (also 12D state).
 
-- Measurements: RADIOMETRIC from spacecraft to GravityPopper, with occultation mask (sphere proxy).
+- Measurements: TBD
 
 Pipeline:
   1) Propagate truth GravityPopper with truth params.
@@ -42,14 +42,9 @@ Units:
 - km, km/s, seconds (ET)
 """
 
-# TODO: change plot from x to z!
-# TODO: Add SRP and attitude? maybe create measurement gaps
-# TODO: Read chelseay and make realistic
-# TODO: Check all the math
-# TODO: Implement ADS? To improve performance and correctness
-
-# NOTE: For second order, you generally need tighter tolerances, use `RK45`,
-# and call `propagate_state` or `propagate_state_stm_only` instead of `propagate`.
+# TODO: Find other cases just poking around scenarios.
+# Maybe initialize from state spacecraft and do lead follower? Do more SPH? Do jumps? Play around with cases,
+# initial conditions, measurements etc!
 
 
 import os
@@ -672,8 +667,7 @@ def plot_bennu_scene_body_fixed(
     pt_b = np.zeros_like(pt_i)
 
     for k, tk in enumerate(tau_i):
-        R_bi = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
-        R_ib = R_bi.T
+        R_ib = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
         sc_b[k] = R_ib @ sc_i[k]
         pt_b[k] = R_ib @ pt_i[k]
 
@@ -703,7 +697,7 @@ def plot_bennu_scene_body_fixed(
         linewidth=1.6,
         alpha=0.95,
         color="tab:red",
-        label="GravityPopper truth",
+        label="GravityPopper Truth",
     )
 
     # ------------------------------------------------------------
@@ -729,7 +723,7 @@ def plot_bennu_scene_body_fixed(
                 marker="o",
                 color="black",
                 alpha=0.9,
-                label="GravityPopper Visible",
+                label="Measurement Used",
             )
         if sc_occ.size:
             ax.scatter(
@@ -740,7 +734,7 @@ def plot_bennu_scene_body_fixed(
                 marker="x",
                 color="black",
                 alpha=0.9,
-                label="GravityPopper Occulted",
+                label="Measurement Unavailable",
             )
 
     # ------------------------------------------------------------
@@ -754,7 +748,7 @@ def plot_bennu_scene_body_fixed(
     # No title (caption-driven for papers)
     # ax.set_title(title)
 
-    ax.view_init(elev=28, azim=35)
+    ax.view_init(elev=10, azim=-120)
 
     mesh_v = np.asarray(mesh.vertices)
     all_xyz = np.vstack([mesh_v, sc_b, pt_b])
@@ -1134,9 +1128,10 @@ if __name__ == "__main__":
     ABCORR = "NONE"
 
     # Observation window (must be covered by SPK)
+    utc00 = "2019-02-27T23:40:00"
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T00:20:00"
-    n_obs = 20  # NOTE: 22 batch not working, 23 is working!
+    utc1 = "2019-03-01T01:30:00"
+    n_obs = 90  # NOTE: 22 batch not working, 23 is working!
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1187,14 +1182,14 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 1e-4  # 0.1% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 0.5  # 50% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 1e-2  # 0.01% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 50% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 5000  # 5 *
+    n_samples = 100  # 5 *
     burn_in = 1
     thin = 1
     spherical_spread = 1e-4
@@ -1205,6 +1200,7 @@ if __name__ == "__main__":
     _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
+    et00 = spice.utc2et(utc00)
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
@@ -1282,6 +1278,8 @@ if __name__ == "__main__":
 
     # Full truth initial state (12)
     x0_true = np.hstack([r0_true, v0_true, params_true])
+    st00, _ = spice.spkezr(SC_NAME, float(et00), FRAME_I, ABCORR, CENTER)
+    x0_true = np.hstack([st00[0:3], st00[3:6], params_true])
 
     # --------------------------
     # Build STT functions + propagator (must accept t argument)
@@ -1405,7 +1403,7 @@ if __name__ == "__main__":
         sigma_range_rate=sigma_range_rate,
         obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
-        max_iter=15,
+        max_iter=1,
         tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
