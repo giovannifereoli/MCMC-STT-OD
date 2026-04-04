@@ -551,7 +551,7 @@ def load_kernels(kernel_root: Path):
 
 
 # ============================================================
-# BETTER TRAJECTORY PLOT USING THE SHAPE MODEL (trimesh)
+# PLOTS
 # ============================================================
 
 import numpy as np
@@ -776,6 +776,97 @@ def plot_bennu_scene_body_fixed(
     plt.show()
 
 
+def plot_error_svd_explained(
+    x0_true,
+    x0_ref,
+    V_svd,
+    save_dir="results",
+    filename=None,
+    annotate_ratio=True,
+):
+    from matplotlib.patches import Patch
+
+    # ----------------------------
+    # Error in SVD basis
+    # ----------------------------
+    e = np.asarray(x0_true) - np.asarray(x0_ref)
+    z_err = np.asarray(V_svd).T @ e
+
+    idx = np.arange(len(z_err))
+    z_abs = np.abs(z_err)
+
+    # ----------------------------
+    # L2 percentage normalization
+    # ----------------------------
+    z_err = V_svd.T @ e
+    z2 = z_err**2
+    total = np.sum(z2)
+    y = 100 * z2 / total
+    ylabel = r"Explained Squared Error (SVD Basis) [\%]"
+
+    # ----------------------------
+    # Plot
+    # ----------------------------
+    fig, ax = plt.subplots(figsize=(9, 4.8))
+
+    colors = ["tab:blue"] * len(idx)
+    colors[-1] = "red"
+
+    bars = ax.bar(idx, y, color=colors, alpha=0.85, width=0.75)
+
+    ax.set_yscale("linear")
+    ax.set_ylim(0, 100)
+    ax.set_xticks(idx)
+    ax.set_xticklabels([str(i) for i in idx])
+
+    ax.set_xlabel("SVD Coordinate Index")
+    ax.set_ylabel(ylabel)
+
+    ax.grid(True, which="both", linestyle=":", alpha=0.7)
+
+    # ----------------------------
+    # Cleaner annotations
+    # ----------------------------
+    # optional ratio annotation for the null-space bar
+    if annotate_ratio:
+        ax.text(
+            idx[-1],
+            y[-1],
+            rf"{y[-1]:.1f}\%",
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            color="red",
+            fontweight="bold",
+        )
+        for i, yi in enumerate(y):
+            if yi < 1:
+                ax.text(idx[i], 1.0, rf"{yi:.3f}\%", ha="center", fontsize=8)
+
+    # legend with correct color
+    legend_handles = [
+        Patch(facecolor="tab:blue", edgecolor="tab:blue", label="Other components"),
+        Patch(facecolor="red", edgecolor="red", label="Null-space component"),
+    ]
+    ax.legend(handles=legend_handles, frameon=True)
+
+    plt.tight_layout()
+
+    # ----------------------------
+    # Save
+    # ----------------------------
+    os.makedirs(save_dir, exist_ok=True)
+    if filename is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"error_svd_explained_{ts}.pdf"
+
+    filepath = os.path.join(save_dir, filename)
+    fig.savefig(filepath, format="pdf", bbox_inches="tight", pad_inches=0.2)
+    print(f"Saved: {filepath}")
+
+    plt.show()
+
+
 # ============================================================
 # Gauss-Newton batch solver with STMs
 # ============================================================
@@ -930,6 +1021,10 @@ def solve_stage1_gn_with_stm(
         if step_norm < tol:
             break
 
+    # Rotation Matrix (optional, for degenerate cases)
+    # _, _, Vt = np.linalg.svd(A, full_matrices=False)
+    # V_svd = Vt.T
+
     # Compute covariance at convergence
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
@@ -1034,7 +1129,7 @@ def solve_stage1_gn_with_stm(
         fig.tight_layout()
         plt.show()
 
-    return x0_ref, delta_total, cov_full
+    return x0_ref, delta_total, cov_full  # , V_svd
 
 
 def solve_stage1_full_nonlinear_lsq(
@@ -1458,6 +1553,11 @@ if __name__ == "__main__":
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
     print("[Stage 1] delta_hat1:\n", delta_hat1)
+    # plot_error_svd_explained(
+    #    x0_true=x0_true,
+    #    x0_ref=x0_ref1,
+    #    V_svd=V_svd,
+    # )
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1
@@ -1609,6 +1709,7 @@ if __name__ == "__main__":
             use_median_as_truth=False,
             true_theta=true_delta,
         )
+
     except Exception as e:
         print("\n[Corner] Skipped.", e)
 

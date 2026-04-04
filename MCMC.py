@@ -724,6 +724,7 @@ class MCMCModel:
         quantile_range=(0.005, 0.995),
         title_digits=3,
         legend_outside=True,
+        rotation_matrix=None,
     ):
         if self.samples is None:
             print("Run MCMC first.")
@@ -759,7 +760,11 @@ class MCMCModel:
         # ----------------------------
         # Labels: x_i
         # ----------------------------
-        labels = [rf"$x_{{{k}}}$" for k in idx]
+        labels = (
+            [rf"$z_{{{k}}}$" for k in idx]
+            if rotation_matrix is not None
+            else [rf"$x_{{{k}}}$" for k in idx]
+        )
 
         # ----------------------------
         # Batch / True on same subspace
@@ -774,6 +779,27 @@ class MCMCModel:
                 raise ValueError("batch_cov shape is inconsistent with selected idx.")
 
         tt = np.asarray(true_theta)[idx] if true_theta is not None else None
+
+        # ----------------------------
+        # Rotate Everything if requested
+        # ----------------------------
+        if rotation_matrix is not None:
+            R = np.asarray(rotation_matrix)
+            if R.shape != (d, d):
+                raise ValueError(
+                    f"rotation_matrix must have shape {(d, d)}, got {R.shape}"
+                )
+            s = s @ R
+            if best_params is not None:
+                best_params = best_params @ R
+            if truths is not None:
+                truths = truths @ R
+            if bm is not None:
+                bm = bm @ R
+            if batch_cov is not None:
+                bc = R.T @ bc @ R
+            if tt is not None:
+                tt = tt @ R
 
         # ----------------------------
         # Robust range + ensure EVERYTHING is visible
@@ -1054,6 +1080,146 @@ class MCMCModel:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = f"results/corner_{ts}.pdf"
         fig.savefig(out, format="pdf", bbox_inches="tight", pad_inches=0.25)
+        print(f"Saved: {out}")
+
+        plt.show()
+
+    def plot_marginals_overlaid(
+        self,
+        idx=None,
+        max_dims=15,
+        bins=80,
+        quantile_range=(0.005, 0.995),
+        rotation_matrix=None,
+        density=True,
+        log_y=False,
+        alpha=0.28,
+        linewidth=1.5,
+        show_kde=False,
+        figsize=(10, 6),
+        labels=None,
+        center=False,
+    ):
+        if self.samples is None:
+            print("Run MCMC first.")
+            return
+
+        samples = np.asarray(self.samples)
+        if samples.ndim != 2 or samples.shape[0] < 2:
+            raise ValueError("self.samples must be a 2D array with at least 2 rows.")
+
+        # ----------------------------
+        # Choose dimensions
+        # ----------------------------
+        ndim = samples.shape[1]
+        if idx is None:
+            idx = np.arange(min(ndim, max_dims))
+        else:
+            idx = np.asarray(idx, dtype=int)
+
+        s = samples[:, idx]
+        d = s.shape[1]
+
+        # ----------------------------
+        # Labels
+        # ----------------------------
+        if labels is None:
+            labels = (
+                [rf"$z_{{{k}}}$" for k in idx]
+                if rotation_matrix is not None
+                else [rf"$x_{{{k}}}$" for k in idx]
+            )
+
+        # ----------------------------
+        # Rotate if requested
+        # ----------------------------
+        if rotation_matrix is not None:
+            R = np.asarray(rotation_matrix)
+            if R.shape != (d, d):
+                raise ValueError(
+                    f"rotation_matrix must have shape {(d, d)}, got {R.shape}"
+                )
+            s = s @ R
+
+        # ----------------------------
+        # Global x-range from all marginals
+        # ----------------------------
+        qlo, qhi = quantile_range
+        lo_all = []
+        hi_all = []
+
+        for j in range(d):
+            x = s[:, j]
+
+            if center:
+                mu = np.mean(x)
+                x = x - mu
+
+            lo, hi = np.quantile(x, [qlo, qhi])
+            if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
+                lo, hi = float(np.min(s[:, j])), float(np.max(s[:, j]))
+            lo_all.append(lo)
+            hi_all.append(hi)
+
+        xmin = min(lo_all)
+        xmax = max(hi_all)
+        span = xmax - xmin
+        if not np.isfinite(span) or span <= 0:
+            span = 1.0
+        pad = 0.05 * span
+        xmin -= pad
+        xmax += pad
+
+        # ----------------------------
+        # Plot
+        # ----------------------------
+        fig, ax = plt.subplots(figsize=figsize)
+        colors = plt.cm.tab20(np.linspace(0, 1, d))
+
+        for j in range(d):
+            x = s[:, j]
+
+            if center:
+                mu = np.mean(x)
+                x = x - mu
+
+            ax.hist(
+                x,
+                bins=bins,
+                range=(xmin, xmax),
+                density=density,
+                histtype="stepfilled",
+                alpha=alpha,
+                linewidth=linewidth,
+                label=labels[j],
+                color=colors[j],
+            )
+
+            if show_kde and np.std(x) > 0:
+                try:
+                    kde = gaussian_kde(x)
+                    xx = np.linspace(xmin, xmax, 500)
+                    yy = kde(xx)
+                    ax.plot(xx, yy, linewidth=1.5)
+                except Exception:
+                    pass
+
+        ax.set_xlim(xmin, xmax)
+        ax.set_xlabel("Centered Value" if center else "Parameter Value", fontsize=11)
+        ax.set_ylabel("Density" if density else "Count", fontsize=11)
+
+        if log_y:
+            ax.set_yscale("log")
+
+        ax.tick_params(labelsize=9)
+        ax.legend(fontsize=9, ncol=2, frameon=True)
+
+        fig.tight_layout()
+
+        os.makedirs("results", exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = f"results/marginals_overlaid_{ts}.pdf"
+        fig.savefig(out, format="pdf", bbox_inches="tight", pad_inches=0.2)
         print(f"Saved: {out}")
 
         plt.show()
