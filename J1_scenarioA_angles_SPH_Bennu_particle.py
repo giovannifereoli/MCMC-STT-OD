@@ -798,7 +798,6 @@ def plot_error_svd_explained(
     # ----------------------------
     # L2 percentage normalization
     # ----------------------------
-    z_err = V_svd.T @ e
     z2 = z_err**2
     total = np.sum(z2)
     y = 100 * z2 / total
