@@ -350,7 +350,7 @@ class MCMCModel:
     def plot_convergence(
         self,
         idx=None,
-        max_dims: int = 15,
+        max_dims: int = 20,
         thin: int = 1,
         discard: int = 0,
         max_walkers_to_plot=None,
@@ -719,7 +719,7 @@ class MCMCModel:
         plot_contours_labels=False,  # keep off unless you really need it
         batch_sigma_levels=(3.0,),
         idx=None,  # list/array of parameter indices to plot
-        max_dims=15,
+        max_dims=20,
         bins=40,
         quantile_range=(0.005, 0.995),
         title_digits=3,
@@ -1087,7 +1087,7 @@ class MCMCModel:
     def plot_marginals_overlaid(
         self,
         idx=None,
-        max_dims=15,
+        max_dims=20,
         bins=80,
         quantile_range=(0.005, 0.995),
         rotation_matrix=None,
@@ -1459,7 +1459,7 @@ class MCMCModel:
     def plot_autocorrelation(
         self,
         idx=None,  # parameters to include (default: all, capped)
-        max_dims: int = 15,  # max number of parameters shown
+        max_dims: int = 20,  # max number of parameters shown
         max_lag: int = 500,
         thin: int = 1,
         discard: int = 0,

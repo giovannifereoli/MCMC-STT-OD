@@ -12,7 +12,7 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
     theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
   about a reference x0_ref (also 12D state).
 
-- Measurements: RADIOMETRIC from spacecraft to GravityPopper, with occultation mask (sphere proxy).
+- Measurements: TBD
 
 Pipeline:
   1) Propagate truth GravityPopper with truth params.
@@ -41,6 +41,11 @@ You MUST provide:
 Units:
 - km, km/s, seconds (ET)
 """
+
+# TODO: Find other cases just poking around scenarios.
+# Maybe initialize from state spacecraft and do lead follower? Do more SPH? Do jumps? Play around with cases,
+# initial conditions, measurements etc!
+
 
 import os
 import sys
@@ -718,7 +723,7 @@ def plot_bennu_scene_body_fixed(
                 marker="o",
                 color="black",
                 alpha=0.9,
-                label="Measurement Included",
+                label="Measurement Used",
             )
         if sc_occ.size:
             ax.scatter(
@@ -1123,9 +1128,10 @@ if __name__ == "__main__":
     ABCORR = "NONE"
 
     # Observation window (must be covered by SPK)
+    # utc00 = "2019-02-27T23:40:00"
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T01:30:00"
-    n_obs = 90  # NOTE: 22 batch not working, 23 is working!
+    utc1 = "2019-03-01T00:30:00"
+    n_obs = 30
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1152,11 +1158,9 @@ if __name__ == "__main__":
     )
 
     # Measurement noise
-    sigma_range = (
-        0.5 * 1e60
-    )  # km  (INF cm, typical 60-sec integration ranging, HERA-ISL)
+    sigma_range = 1 * 1e-3  # km  (50 cm, typical 60-sec integration ranging, HERA-ISL)
     sigma_range_rate = (
-        5 * 1e-6
+        1 * 1e-5
     )  # km/s  (0.05 mm/s, typical 60-sec integration Doppler, HERA-ISL)
 
     # reference is perturbed by these fractions of |truth|
@@ -1178,16 +1182,16 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 1e-2  # 0.01% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 0.5  # 50% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
     n_samples = 500000  # 5 *
-    burn_in = 15000
-    thin = 1000
+    burn_in = 1
+    thin = 1
     spherical_spread = 1e-4
 
     # --------------------------
@@ -1196,6 +1200,7 @@ if __name__ == "__main__":
     _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
+    # et00 = spice.utc2et(utc00)
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
@@ -1273,6 +1278,8 @@ if __name__ == "__main__":
 
     # Full truth initial state (12)
     x0_true = np.hstack([r0_true, v0_true, params_true])
+    # st00, _ = spice.spkezr(SC_NAME, float(et00), FRAME_I, ABCORR, CENTER)
+    # x0_true = np.hstack([st00[0:3], st00[3:6], params_true])
 
     # --------------------------
     # Build STT functions + propagator (must accept t argument)
@@ -1396,7 +1403,7 @@ if __name__ == "__main__":
         sigma_range_rate=sigma_range_rate,
         obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
-        max_iter=15,
+        max_iter=1,
         tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
