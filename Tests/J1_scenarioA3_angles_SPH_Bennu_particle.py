@@ -1128,10 +1128,10 @@ if __name__ == "__main__":
     ABCORR = "NONE"
 
     # Observation window (must be covered by SPK)
-    utc00 = "2019-02-27T23:40:00"
+    # utc00 = "2019-02-27T23:40:00"
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T01:30:00"
-    n_obs = 90  # NOTE: 22 batch not working, 23 is working!
+    utc1 = "2019-03-01T03:00:00"
+    n_obs = 180
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1157,11 +1157,10 @@ if __name__ == "__main__":
         [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
     )
 
-    # Measurement noise
-    sigma_range = 1 * 1e-3  # km  (50 cm, typical 60-sec integration ranging, HERA-ISL)
-    sigma_range_rate = (
-        1 * 1e-5
-    )  # km/s  (0.05 mm/s, typical 60-sec integration Doppler, HERA-ISL)
+    # Measurement noise levels (1-sigma)
+    # NOTE: 60-sec integration time, Gravity Imaging Radio Observer
+    sigma_range = 1e-5  # km  (1 cm)
+    sigma_range_rate = 1e-11  # km/s  (0.01 μm/s)
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
@@ -1182,14 +1181,14 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 1e-2  # 0.01% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 50% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 10  # 1000% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 10  # 1000% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 100  # 5 *
+    n_samples = 2000  # 5 *
     burn_in = 1
     thin = 1
     spherical_spread = 1e-4
@@ -1200,7 +1199,6 @@ if __name__ == "__main__":
     _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
-    et00 = spice.utc2et(utc00)
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
@@ -1227,8 +1225,8 @@ if __name__ == "__main__":
     )
     vertices = np.asarray(bennu_mesh.vertices)
 
-    lat_desired = np.deg2rad(45.0)
-    lon_desired = np.deg2rad(80.0)
+    lat_desired = np.deg2rad(85.0)
+    lon_desired = np.deg2rad(0.0)
     pos_target = np.array(
         [
             R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
@@ -1253,13 +1251,6 @@ if __name__ == "__main__":
     # Outward initial velocity (random hemisphere w.r.t. r0_true)
     rng = np.random.default_rng(7)
     vmag = 2e-4  # km/s
-    """"
-    u = rng.normal(size=3)
-    u /= np.linalg.norm(u)
-    if np.dot(u, r0_true) < 0:
-        u = -u
-    v0_true = vmag * u
-    """
 
     # tangent launch direction (physically plausible: lofting off surface)
     rhat = r0_true / np.linalg.norm(r0_true)
@@ -1278,8 +1269,6 @@ if __name__ == "__main__":
 
     # Full truth initial state (12)
     x0_true = np.hstack([r0_true, v0_true, params_true])
-    st00, _ = spice.spkezr(SC_NAME, float(et00), FRAME_I, ABCORR, CENTER)
-    x0_true = np.hstack([st00[0:3], st00[3:6], params_true])
 
     # --------------------------
     # Build STT functions + propagator (must accept t argument)
@@ -1367,7 +1356,7 @@ if __name__ == "__main__":
             rng_ref.normal(scale=sig_ref_c, size=5),
         ]
     )
-    x0_ref = x0_true - ref_dev
+    x0_ref = x0_true - 0 * ref_dev
     print("\n[Reference] deviation from truth:", ref_dev)
 
     # --------------------------
@@ -1499,7 +1488,7 @@ if __name__ == "__main__":
         spherical_spread=spherical_spread,
         method_optimize="LSQ",
         # use_demoves=True,
-        stretch_a=1.25,
+        # stretch_a=1.25,
     )
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
