@@ -1167,7 +1167,6 @@ if __name__ == "__main__":
     ABCORR = "NONE"
 
     # Observation window (must be covered by SPK)
-    # utc00 = "2019-02-27T23:40:00"
     utc0 = "2019-03-01T00:00:00"
     utc1 = "2019-03-01T03:00:00"
     n_obs = 180
@@ -1188,54 +1187,26 @@ if __name__ == "__main__":
     # ============================================================
     # Bennu Gravity Field Truth Values (degree 2×2 + degree 3×3)
     # ============================================================
-    #
-    # CONVENTION: unnormalized Stokes coefficients, same as used throughout
-    # this script.  Reference radius R_ref = 0.2459 km (Bennu mean radius).
-    #
-    # DEGREE-2 TERMS (SOURCE: Scheeres et al. 2019, Sci. Adv.; bennu_v17.tpc)
-    # These match the values already in your script to high precision.
-    # The spacecraft-only solution (consistent with particle solution at 2-3σ):
-    mu_true = 4.89044967462e-09  # km^3/s^2  (GM; from SPICE bennu_v17.tpc)
-    C20_true = 6.09086686e-02  # unnorm.; Scheeres 2020 particle solution
-    C21_true = -2.81206646e-14  # ~0 by construction (principal-axis frame)
-    S21_true = 3.87423500e-15  # ~0 by construction (principal-axis frame)
-    C22_true = 1.97844553e-03  # unnorm.; Scheeres 2020 particle solution
-    S22_true = -7.06499291e-04  # unnorm.; Scheeres 2020 particle solution
+    # CONVENTION: unnormalized Stokes coefficients.
+    # Reference radius R_ref = 0.2459 km.
 
-    # DEGREE-3 TERMS
-    # ---------------------------------------------------------------
-    # C30 / J3: Scheeres et al. (2020), Table 1 reports the NORMALIZED
-    # zonal J̄3 (particle solution).  Converting to unnormalized:
-    #   C30_unnorm = J3_norm / sqrt(7)  ≈ -3.22e-02 / 2.6458 ≈ -1.217e-02
-    # The open-access snippet from Scheeres 2020 (oro.open.ac.uk) states
-    # Table 1 gives "normalized zonals"; the particle-field J3 is reported
-    # as approximately -0.0322 (normalized).
-    #
-    # C30_true = -1.217e-02   # unnorm., converted from Scheeres 2020 Table 1
-    #
-    # C31, S31, C32, S32, C33, S33:
-    # The full tesseral degree-3 solution is in Scheeres 2020 Supplementary
-    # Table S2 (particle field), which is not freely accessible.
-    # The best publicly available source is the SPICE kernel you already load:
-    #   particles_pub_03Mar2020.bsp
-    # The kernel encodes the particle-based gravity solution to degree/order 9.
-    # YOU SHOULD EXTRACT THESE DIRECTLY FROM THAT KERNEL using SPICE:
-    #
-    #   spice.bodvrd("BENNU", "GRAVITY_C_30_0", 1)  -> C30
-    #   spice.bodvrd("BENNU", "GRAVITY_C_31_1", 1)  -> C31
-    #   spice.bodvrd("BENNU", "GRAVITY_S_31_1", 1)  -> S31
-    #   ... etc.
-    #
-    # Until you confirm kernel variable names, use the constant-density
-    # shape-model values (Chanut et al. 2017, MNRAS 470, Table 2),
-    # which are publicly tabulated for R_ref = 0.2459 km, rho = 1.26 g/cm^3:
-    C30_true = -1.217e-02  # unnorm.; converted from Scheeres 2020 J̄3 ≈ -0.0322
-    C31_true = -4.10e-04  # unnorm.; constant-density shape model estimate
-    S31_true = 2.90e-04  # unnorm.; constant-density shape model estimate
-    C32_true = 9.80e-04  # unnorm.; constant-density shape model estimate
-    S32_true = -1.30e-04  # unnorm.; constant-density shape model estimate
-    C33_true = -3.10e-04  # unnorm.; constant-density shape model estimate
-    S33_true = 1.50e-04  # unnorm.; constant-density shape model estimate
+    mu_true = 4.89044967462e-09  # km^3/s^2
+
+    # Degree 2
+    C20_true = 0.060908668621940644  # = -J2
+    C21_true = -2.8120664615284112e-14
+    S21_true = 3.874234999952248e-15
+    C22_true = 0.001978445533807606
+    S22_true = -0.0007064992913094132
+
+    # Degree 3
+    C30_true = -0.004572082563573552  # = -J3
+    C31_true = 0.0008801840896940344
+    S31_true = -0.0005870017273132463
+    C32_true = -0.0003193368868974497
+    S32_true = -0.000183688614279846
+    C33_true = 0.0001632924069308578
+    S33_true = -4.32290988621995e-05
 
     params_true = np.array(
         [
@@ -1287,7 +1258,7 @@ if __name__ == "__main__":
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 15000  # 5 *
+    n_samples = 50000  # 5 *
     burn_in = 1500
     thin = 300
     spherical_spread = 1e-4
@@ -1586,7 +1557,7 @@ if __name__ == "__main__":
         thin=thin,
         spherical_spread=spherical_spread,
         method_optimize="LSQ",
-        # use_demoves=True,
+        use_demoves=True,
         stretch_a=1.2,
     )
 

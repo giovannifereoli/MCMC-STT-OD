@@ -268,6 +268,10 @@ class MCMCModel:
             f"[Run] Starting MCMC sampling with {n_walkers} walkers for {n_samples} steps..."
         )
         with multiprocessing.get_context("fork").Pool() as pool:
+            print(
+                "[Run] Using multiprocessing with fork context. Number of processes:",
+                pool._processes,
+            )
             self.sampler = emcee.EnsembleSampler(
                 nwalkers=n_walkers,
                 ndim=self.ndim,
