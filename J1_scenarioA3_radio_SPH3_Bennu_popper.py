@@ -1251,16 +1251,16 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 10  # 1000% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 10  # 1000% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 1  # 1000% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 1  # 1000% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 50000  # 5 *
-    burn_in = 1500
-    thin = 300
+    n_samples = 500000  # 5 *
+    burn_in = 15000
+    thin = 2000
     spherical_spread = 1e-4
 
     # --------------------------
@@ -1579,7 +1579,6 @@ if __name__ == "__main__":
     # --------------------------
     model.plot_convergence()
     model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
-    # model.plot_log_likelihood()
     model.summary()
     model.print_regression_diagnostics()
     model.plot_autocorrelation()
