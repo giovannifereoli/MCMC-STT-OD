@@ -1257,9 +1257,10 @@ if __name__ == "__main__":
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
+    # NOTE: This took 11:21:02<00:00, 19.58it/s!
     n_walkers = 128  # 10 *
-    n_samples = 500000  # 5 *
-    burn_in = 15000
+    n_samples = 800000  # 5 *
+    burn_in = 30000
     thin = 2000
     spherical_spread = 1e-4
 
