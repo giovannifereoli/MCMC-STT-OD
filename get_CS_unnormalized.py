@@ -22,9 +22,10 @@ def normalization_constants(n, m):
     Returns
     -------
     float
-        Normalization constant sqrt((n-m)! * (2n+1) * (2 - delta(0,m)) / (n+m)!)
+        Normalization constant N(n, m) for the given degree n and order m.
     """
-    numerator = math.factorial(n - m) * (2 * n + 1) * (2 - int(m == 0))
+    delta_0m = 1 if m == 0 else 0
+    numerator = math.factorial(n - m) * (2 * n + 1) * (2 - delta_0m)
     denominator = math.factorial(n + m)
     return math.sqrt(numerator / denominator)
 
@@ -340,10 +341,31 @@ def bennu_10_10(generate_json=False):
 if __name__ == "__main__":
     GM, C, S = bennu_10_10(generate_json=True)
 
-    print(f"GM       = {GM:.6e} km^3/s^2")
-    print(f"C[2,0]   = {C[2,0]:.6e}   (J2 zonal)")
-    print(f"C[2,2]   = {C[2,2]:.6e}   (sectoral)")
-    print(f"S[2,2]   = {S[2,2]:.6e}")
-    print(f"C[3,0]   = {C[3,0]:.6e}   (J3 zonal)")
-    print(f"\nFull C matrix (degree 2-4):")
-    print(C[2:5, :5])
+    print("\n" + "=" * 50)
+    print("      BENNU GRAVITY FIELD COEFFICIENTS")
+    print("=" * 50)
+
+    print(f"\nμ (GM) [km^3/s^2]")
+    print(f"  {GM: .12e}")
+
+    print("\nDegree 2")
+    print("-" * 50)
+    print(f"{'Coeff':<6} {'Value':>20}")
+    print(f"{'C20':<6} {C[2,0]:>20.12e}")
+    print(f"{'C21':<6} {C[2,1]:>20.12e}")
+    print(f"{'S21':<6} {S[2,1]:>20.12e}")
+    print(f"{'C22':<6} {C[2,2]:>20.12e}")
+    print(f"{'S22':<6} {S[2,2]:>20.12e}")
+
+    print("\nDegree 3")
+    print("-" * 50)
+    print(f"{'Coeff':<6} {'Value':>20}")
+    print(f"{'C30':<6} {C[3,0]:>20.12e}")
+    print(f"{'C31':<6} {C[3,1]:>20.12e}")
+    print(f"{'S31':<6} {S[3,1]:>20.12e}")
+    print(f"{'C32':<6} {C[3,2]:>20.12e}")
+    print(f"{'S32':<6} {S[3,2]:>20.12e}")
+    print(f"{'C33':<6} {C[3,3]:>20.12e}")
+    print(f"{'S33':<6} {S[3,3]:>20.12e}")
+
+    print("\n" + "=" * 50)
