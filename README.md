@@ -18,7 +18,8 @@ The methodology enables efficient posterior sampling by replacing repeated nonli
 - **State-space whitening for correlated parameters**  
 - **Standard convergence diagnostics**
 
-The approach is demonstrated on an **angles-only optical navigation case study** involving particle trajectory reconstruction near asteroid 101955 Bennu.
+The framework is demonstrated on **angles-only and radio-only orbit determination case studies** involving particle trajectory reconstruction in the vicinity of asteroid 101955 Bennu.
+
 
 ---
 
