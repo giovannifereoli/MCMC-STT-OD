@@ -1,5 +1,5 @@
 """
-test_Claude2.py  —  Non-Gaussian SPH posterior scenario with Gaussian priors + Student-t likelihood
+Non-Gaussian SPH posterior scenario with Gaussian priors + Student-t likelihood
 
 Same physical setup as test_Claude.py; two changes only:
   1. Gaussian priors on ALL parameters (µ and SH coefficients included).
@@ -1448,7 +1448,7 @@ if __name__ == "__main__":
     # GAUSSIAN PRIORS (all parameters)
     # ---------------------------------
     # Position / velocity: Gaussian, derived from pre-detachment imaging accuracy
-    sig_prior_r = np.full(3, 0.250)   # 250 m  position uncertainty [km]
+    sig_prior_r = np.full(3, 0.250)  # 250 m  position uncertainty [km]
     sig_prior_v = np.full(3, 3.0e-4)  # 0.3 mm/s velocity uncertainty [km/s]
 
     # mu: Gaussian centred on zero delta, sigma = 30% of truth value.
@@ -1659,8 +1659,8 @@ if __name__ == "__main__":
     # --------------------------
     # Priors on 19D delta0 — ALL GAUSSIAN
     # --------------------------
-    priors_r  = [norm(loc=0.0, scale=s) for s in sig_prior_r]
-    priors_v  = [norm(loc=0.0, scale=s) for s in sig_prior_v]
+    priors_r = [norm(loc=0.0, scale=s) for s in sig_prior_r]
+    priors_v = [norm(loc=0.0, scale=s) for s in sig_prior_v]
     priors_mu = [norm(loc=0.0, scale=mu_prior_sigma)]
     priors_sh = [norm(loc=0.0, scale=s) for s in sh_prior_sigma]
 
@@ -1744,9 +1744,7 @@ if __name__ == "__main__":
 
     # Priors for MCMC — all Gaussian, shifted to be centred on the Stage-1 MAP.
     delta_shift = x0_ref1 - x0_ref
-    priors_ref1 = [
-        norm(loc=-delta_shift[i], scale=priors[i].std()) for i in range(19)
-    ]
+    priors_ref1 = [norm(loc=-delta_shift[i], scale=priors[i].std()) for i in range(19)]
 
     # --------------------------
     # MCMC with Student-t likelihood (ν = nu_student_t)
@@ -1764,7 +1762,9 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     # Patch the log_likelihood in-place — no subclass needed.
-    model.log_likelihood = make_studentt_log_likelihood(residuals_normalized, nu_student_t)
+    model.log_likelihood = make_studentt_log_likelihood(
+        residuals_normalized, nu_student_t
+    )
     model.setup_whitening_from_priors()
     model.run(
         n_samples=n_samples,

@@ -1,5 +1,5 @@
 """
-test_Claude3.py  —  Non-Gaussian SPH posterior scenario: Gaussian priors + Gaussian-mixture likelihood
+Non-Gaussian SPH posterior scenario: Gaussian priors + Gaussian-mixture likelihood
 
 Same physical setup as test_Claude.py and test_Claude2.py; two changes only:
   1. Gaussian priors on ALL parameters (µ and SH coefficients included), as in test_Claude2.py.
@@ -120,6 +120,7 @@ def occultation_mask_shape(
     if use_embree:
         try:
             from trimesh.ray.ray_pyembree import RayMeshIntersector
+
             intersector = RayMeshIntersector(bennu_mesh_bf)
         except Exception:
             intersector = bennu_mesh_bf.ray
@@ -165,7 +166,27 @@ def generate_stt_functions_bennu_deg3(
 
     n_state = 19
     X = sp.Matrix(
-        [x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22, C30, C31, S31, C32, S32, C33, S33]
+        [
+            x,
+            y,
+            z,
+            vx,
+            vy,
+            vz,
+            mu,
+            C20,
+            C21,
+            S21,
+            C22,
+            S22,
+            C30,
+            C31,
+            S31,
+            C32,
+            S32,
+            C33,
+            S33,
+        ]
     )
     r_i = sp.Matrix([x, y, z])
 
@@ -243,7 +264,28 @@ def generate_stt_functions_bennu_deg3(
             Bk[idx] = deriv
         B_syms[k] = Bk
 
-    args = (x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22, C30, C31, S31, C32, S32, C33, S33, t)
+    args = (
+        x,
+        y,
+        z,
+        vx,
+        vy,
+        vz,
+        mu,
+        C20,
+        C21,
+        S21,
+        C22,
+        S22,
+        C30,
+        C31,
+        S31,
+        C32,
+        S32,
+        C33,
+        S33,
+        t,
+    )
     f_func = sp.lambdify(args, f, "numpy")
     A_func = sp.lambdify(args, B_syms[1], "numpy")
     B_funcs = {
@@ -315,7 +357,14 @@ def range_rate_and_partials_from_rel_state(rel_state):
     d_rhodot_dvz = z / rho
 
     d_rhodot_d_x = np.stack(
-        [d_rhodot_dx, d_rhodot_dy, d_rhodot_dz, d_rhodot_dvx, d_rhodot_dvy, d_rhodot_dvz],
+        [
+            d_rhodot_dx,
+            d_rhodot_dy,
+            d_rhodot_dz,
+            d_rhodot_dvx,
+            d_rhodot_dvy,
+            d_rhodot_dvz,
+        ],
         axis=1,
     )
 
@@ -463,7 +512,9 @@ def add_trimesh_to_ax(
     verts = mesh.vertices
 
     if faces.shape[0] > max_faces:
-        idx = np.random.default_rng(0).choice(faces.shape[0], size=max_faces, replace=False)
+        idx = np.random.default_rng(0).choice(
+            faces.shape[0], size=max_faces, replace=False
+        )
         faces = faces[idx]
 
     poly3d = verts[faces]
@@ -513,10 +564,24 @@ def plot_bennu_scene_body_fixed(
 
     add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
 
-    ax.plot(sc_b[:, 0], sc_b[:, 1], sc_b[:, 2], linewidth=1.8, alpha=0.95,
-            color="tab:blue", label="OSIRIS-REx (-64)")
-    ax.plot(pt_b[:, 0], pt_b[:, 1], pt_b[:, 2], linewidth=1.6, alpha=0.95,
-            color="tab:red", label="GravityPopper Truth")
+    ax.plot(
+        sc_b[:, 0],
+        sc_b[:, 1],
+        sc_b[:, 2],
+        linewidth=1.8,
+        alpha=0.95,
+        color="tab:blue",
+        label="OSIRIS-REx (-64)",
+    )
+    ax.plot(
+        pt_b[:, 0],
+        pt_b[:, 1],
+        pt_b[:, 2],
+        linewidth=1.6,
+        alpha=0.95,
+        color="tab:red",
+        label="GravityPopper Truth",
+    )
 
     if vis_mask is not None:
         vis_mask = np.asarray(vis_mask).astype(bool)
@@ -529,11 +594,27 @@ def plot_bennu_scene_body_fixed(
         sc_occ = sc_b[~vis_mask_ds]
 
         if sc_vis.size:
-            ax.scatter(sc_vis[:, 0], sc_vis[:, 1], sc_vis[:, 2], s=16, marker="o",
-                       color="black", alpha=0.9, label="Measurement Used")
+            ax.scatter(
+                sc_vis[:, 0],
+                sc_vis[:, 1],
+                sc_vis[:, 2],
+                s=16,
+                marker="o",
+                color="black",
+                alpha=0.9,
+                label="Measurement Used",
+            )
         if sc_occ.size:
-            ax.scatter(sc_occ[:, 0], sc_occ[:, 1], sc_occ[:, 2], s=18, marker="x",
-                       color="black", alpha=0.9, label="Measurement Unavailable")
+            ax.scatter(
+                sc_occ[:, 0],
+                sc_occ[:, 1],
+                sc_occ[:, 2],
+                s=18,
+                marker="x",
+                color="black",
+                alpha=0.9,
+                label="Measurement Unavailable",
+            )
 
     ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
     ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
@@ -554,13 +635,17 @@ def plot_bennu_scene_body_fixed(
     ax.set_zlim(mins[2] - pad, maxs[2] + pad)
     set_axes_equal_3d(ax)
 
-    ax.legend(loc="upper right", bbox_to_anchor=(0.98, 0.98), frameon=True, borderaxespad=0.2)
+    ax.legend(
+        loc="upper right", bbox_to_anchor=(0.98, 0.98), frameon=True, borderaxespad=0.2
+    )
     fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
 
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     fig.canvas.draw()
-    fig.savefig(f"results/bennu_scene_body_fixed_{timestamp}.pdf", format="pdf", pad_inches=0.20)
+    fig.savefig(
+        f"results/bennu_scene_body_fixed_{timestamp}.pdf", format="pdf", pad_inches=0.20
+    )
     print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
     plt.show()
 
@@ -650,7 +735,10 @@ def solve_stage1_gn_with_stm(
             Wp = np.diag(1.0 / prior_sig[finite])
             Jp = np.zeros((Wp.shape[0], n_upd))
             Jp[:, finite] = Wp
-            rp = -(delta_total[update_idx][finite] - prior_mean[finite]) / prior_sig[finite]
+            rp = (
+                -(delta_total[update_idx][finite] - prior_mean[finite])
+                / prior_sig[finite]
+            )
             rows.append(Jp)
             rhs.append(rp)
 
@@ -666,7 +754,9 @@ def solve_stage1_gn_with_stm(
         step_norm = np.linalg.norm(d_upd)
         rms = np.sqrt(np.mean(r**2))
         if verbose:
-            print(f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}")
+            print(
+                f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}"
+            )
         if step_norm < tol:
             break
 
@@ -720,10 +810,14 @@ def solve_stage1_full_nonlinear_lsq(
     def residual_vector(delta_upd):
         x0 = x0_ref.copy()
         x0[update_idx] = x0_ref[update_idx] + delta_upd
-        sol = propagator.propagate_state_only(x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method)
+        sol = propagator.propagate_state_only(
+            x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
+        )
         x = sol.y[:19, :].T
         rel_state = x[:, :6] - sc_state[:, :6]
-        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(rel_state)
+        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(
+            rel_state
+        )
         y_model = np.empty_like(y_obs)
         y_model[0::2] = range_model
         y_model[1::2] = range_rate_model
@@ -737,8 +831,15 @@ def solve_stage1_full_nonlinear_lsq(
         return r_meas
 
     result = least_squares(
-        fun=residual_vector, x0=np.zeros(n_upd), method="trf", jac="2-point",
-        max_nfev=max_nfev, ftol=1e-14, xtol=1e-14, gtol=1e-14, verbose=verbose,
+        fun=residual_vector,
+        x0=np.zeros(n_upd),
+        method="trf",
+        jac="2-point",
+        max_nfev=max_nfev,
+        ftol=1e-14,
+        xtol=1e-14,
+        gtol=1e-14,
+        verbose=verbose,
     )
     delta_hat_full = np.zeros(19)
     delta_hat_full[update_idx] = result.x
@@ -845,7 +946,10 @@ def solve_stage1_gn_angles(
         x_ref = sol_ref.y[:19, :].T
 
         Phi_list = np.array(
-            [np.array(stts_ref[1][k], dtype=float).reshape(19, 19) for k in range(len(tau))]
+            [
+                np.array(stts_ref[1][k], dtype=float).reshape(19, 19)
+                for k in range(len(tau))
+            ]
         )
 
         los = x_ref[:, :3] - sc_state[:, :3]
@@ -878,7 +982,10 @@ def solve_stage1_gn_angles(
             Wp = np.diag(1.0 / prior_sig[finite])
             Jp = np.zeros((Wp.shape[0], n_upd))
             Jp[:, finite] = Wp
-            rp = -(delta_total[update_idx][finite] - prior_mean[finite]) / prior_sig[finite]
+            rp = (
+                -(delta_total[update_idx][finite] - prior_mean[finite])
+                / prior_sig[finite]
+            )
             rows.append(Jp)
             rhs.append(rp)
 
@@ -930,7 +1037,12 @@ class _MixtureLogLikelihood:
     def __call__(self, theta):
         r = self.residuals_func(theta)
         log_clean = self.log_1meps - 0.5 * r**2 - self.half_log_2pi
-        log_outlier = self.log_eps - 0.5 * (r / self.k_outlier) ** 2 - self.log_k - self.half_log_2pi
+        log_outlier = (
+            self.log_eps
+            - 0.5 * (r / self.k_outlier) ** 2
+            - self.log_k
+            - self.half_log_2pi
+        )
         return float(np.sum(np.logaddexp(log_clean, log_outlier)))
 
 
@@ -996,8 +1108,21 @@ if __name__ == "__main__":
     S33_true = -4.32290988621995e-05
 
     params_true = np.array(
-        [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true,
-         C30_true, C31_true, S31_true, C32_true, S32_true, C33_true, S33_true],
+        [
+            mu_true,
+            C20_true,
+            C21_true,
+            S21_true,
+            C22_true,
+            S22_true,
+            C30_true,
+            C31_true,
+            S31_true,
+            C32_true,
+            S32_true,
+            C33_true,
+            S33_true,
+        ],
         dtype=float,
     )
 
@@ -1014,8 +1139,8 @@ if __name__ == "__main__":
     ref_pct_r = ref_pct_v = ref_pct_mu = ref_pct_c = 0.0
 
     # GAUSSIAN PRIORS (all parameters)
-    sig_prior_r = np.full(3, 0.250)    # 250 m position uncertainty [km]
-    sig_prior_v = np.full(3, 3.0e-4)   # 0.3 mm/s velocity uncertainty [km/s]
+    sig_prior_r = np.full(3, 0.250)  # 250 m position uncertainty [km]
+    sig_prior_v = np.full(3, 3.0e-4)  # 0.3 mm/s velocity uncertainty [km/s]
 
     # mu: Gaussian, sigma = 30% of truth value
     mu_prior_sigma = np.abs(mu_true) * 0.3
@@ -1043,7 +1168,9 @@ if __name__ == "__main__":
     n_obs = round(arc_hours * 60.0 / cadence_min) + 1
     ets_full = np.linspace(et0, et1, n_obs)
     tau_full = ets_full - ets_full[0]
-    print(f"[Setup] arc={arc_hours:.1f} hr, cadence={cadence_min:.0f} min, n_obs={n_obs}")
+    print(
+        f"[Setup] arc={arc_hours:.1f} hr, cadence={cadence_min:.0f} min, n_obs={n_obs}"
+    )
 
     sc_state_full = np.zeros((n_obs, 6))
     for i, et in enumerate(ets_full):
@@ -1058,17 +1185,23 @@ if __name__ == "__main__":
     vertices = np.asarray(bennu_mesh.vertices)
 
     rverts = np.linalg.norm(vertices, axis=1)
-    print("[Mesh] vertex radius stats (raw): min/mean/max =",
-          rverts.min(), rverts.mean(), rverts.max())
+    print(
+        "[Mesh] vertex radius stats (raw): min/mean/max =",
+        rverts.min(),
+        rverts.mean(),
+        rverts.max(),
+    )
     vertices = np.asarray(bennu_mesh.vertices)
 
     lat_desired = np.deg2rad(3.0)
     lon_desired = np.deg2rad(45.0)
-    pos_target = np.array([
-        R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
-        R_bennu * np.cos(lat_desired) * np.sin(lon_desired),
-        R_bennu * np.sin(lat_desired),
-    ])
+    pos_target = np.array(
+        [
+            R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
+            R_bennu * np.cos(lat_desired) * np.sin(lon_desired),
+            R_bennu * np.sin(lat_desired),
+        ]
+    )
     dists = np.linalg.norm(vertices - pos_target, axis=1)
     closest_idx = np.argmin(dists)
     pos_detach_bf = vertices[closest_idx]
@@ -1076,7 +1209,9 @@ if __name__ == "__main__":
     normal_bf = bennu_mesh.vertex_normals[closest_idx]
     normal_bf = normal_bf / np.linalg.norm(normal_bf)
 
-    R_ib0 = make_bennu_rotation_matrix(alpha_true, delta_true, omega_true, t=0.0, w0=0.0)
+    R_ib0 = make_bennu_rotation_matrix(
+        alpha_true, delta_true, omega_true, t=0.0, w0=0.0
+    )
     r0_true = R_ib0.T @ pos_detach_bf
 
     rng = np.random.default_rng(7)
@@ -1098,8 +1233,12 @@ if __name__ == "__main__":
     # STT propagator
     # --------------------------
     f_func, A_func, B_funcs = generate_stt_functions_bennu_deg3(
-        order=stt_order, R_ref_km=R_ref, alpha_rad=alpha_true,
-        delta_rad=delta_true, omega_rad_s=omega_true, w0_rad=0.0,
+        order=stt_order,
+        R_ref_km=R_ref,
+        alpha_rad=alpha_true,
+        delta_rad=delta_true,
+        omega_rad_s=omega_true,
+        w0_rad=0.0,
     )
     propagator = STTPropagatorND(
         order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=19
@@ -1117,7 +1256,9 @@ if __name__ == "__main__":
     # --------------------------
     # Visibility mask
     # --------------------------
-    vis_mask_full = occultation_mask(sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu)
+    vis_mask_full = occultation_mask(
+        sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu
+    )
     ets = ets_full
     tau = tau_full
     sc_state = sc_state_full
@@ -1132,8 +1273,11 @@ if __name__ == "__main__":
     # --------------------------
     rng_meas = np.random.default_rng(123)
     y_obs_full = generate_opnav_measurements_from_sc(
-        x_part=x_true, sc_state=sc_state,
-        sigma_ra=sigma_ra, sigma_dec=sigma_dec, rng=rng_meas,
+        x_part=x_true,
+        sc_state=sc_state,
+        sigma_ra=sigma_ra,
+        sigma_dec=sigma_dec,
+        rng=rng_meas,
     )
 
     epoch_is_outlier = rng_meas.random(n_obs) < outlier_frac
@@ -1166,20 +1310,22 @@ if __name__ == "__main__":
     sig_ref_mu = np.abs(x0_true[6:7] * ref_pct_mu)
     sig_ref_c = np.abs(x0_true[7:19] * ref_pct_c)
 
-    ref_dev = np.hstack([
-        rng_ref.normal(scale=sig_ref_r, size=3),
-        rng_ref.normal(scale=sig_ref_v, size=3),
-        rng_ref.normal(scale=sig_ref_mu, size=1),
-        rng_ref.normal(scale=sig_ref_c, size=12),
-    ])
+    ref_dev = np.hstack(
+        [
+            rng_ref.normal(scale=sig_ref_r, size=3),
+            rng_ref.normal(scale=sig_ref_v, size=3),
+            rng_ref.normal(scale=sig_ref_mu, size=1),
+            rng_ref.normal(scale=sig_ref_c, size=12),
+        ]
+    )
     x0_ref = x0_true - 0 * ref_dev
     print("\n[Reference] deviation from truth:", ref_dev)
 
     # --------------------------
     # Priors on 19D delta0 — ALL GAUSSIAN
     # --------------------------
-    priors_r  = [norm(loc=0.0, scale=s) for s in sig_prior_r]
-    priors_v  = [norm(loc=0.0, scale=s) for s in sig_prior_v]
+    priors_r = [norm(loc=0.0, scale=s) for s in sig_prior_r]
+    priors_v = [norm(loc=0.0, scale=s) for s in sig_prior_v]
     priors_mu = [norm(loc=0.0, scale=mu_prior_sigma)]
     priors_sh = [norm(loc=0.0, scale=s) for s in sh_prior_sigma]
 
@@ -1262,9 +1408,7 @@ if __name__ == "__main__":
 
     # Priors for MCMC — all Gaussian, shifted to Stage-1 MAP
     delta_shift = x0_ref1 - x0_ref
-    priors_ref1 = [
-        norm(loc=-delta_shift[i], scale=priors[i].std()) for i in range(19)
-    ]
+    priors_ref1 = [norm(loc=-delta_shift[i], scale=priors[i].std()) for i in range(19)]
 
     # --------------------------
     # MCMC with Gaussian-mixture likelihood + Gaussian priors
@@ -1325,7 +1469,10 @@ if __name__ == "__main__":
         label="P(outlier | data)",
     )
     ax.axhline(
-        outlier_frac, color="k", ls="--", lw=1.2,
+        outlier_frac,
+        color="k",
+        ls="--",
+        lw=1.2,
         label=f"Prior $\\varepsilon$={outlier_frac:.2f}",
     )
     ax.set_xlabel("Time since epoch [hr]")
@@ -1390,14 +1537,25 @@ if __name__ == "__main__":
     # --------------------------
     try:
         labels = [
-            r"$\delta x_0$", r"$\delta y_0$", r"$\delta z_0$",
-            r"$\delta v_{x0}$", r"$\delta v_{y0}$", r"$\delta v_{z0}$",
+            r"$\delta x_0$",
+            r"$\delta y_0$",
+            r"$\delta z_0$",
+            r"$\delta v_{x0}$",
+            r"$\delta v_{y0}$",
+            r"$\delta v_{z0}$",
             r"$\delta \mu$",
-            r"$\delta C_{20}$", r"$\delta C_{21}$", r"$\delta S_{21}$",
-            r"$\delta C_{22}$", r"$\delta S_{22}$",
-            r"$\delta C_{30}$", r"$\delta C_{31}$", r"$\delta S_{31}$",
-            r"$\delta C_{32}$", r"$\delta S_{32}$",
-            r"$\delta C_{33}$", r"$\delta S_{33}$",
+            r"$\delta C_{20}$",
+            r"$\delta C_{21}$",
+            r"$\delta S_{21}$",
+            r"$\delta C_{22}$",
+            r"$\delta S_{22}$",
+            r"$\delta C_{30}$",
+            r"$\delta C_{31}$",
+            r"$\delta S_{31}$",
+            r"$\delta C_{32}$",
+            r"$\delta S_{32}$",
+            r"$\delta C_{33}$",
+            r"$\delta S_{33}$",
         ]
         model.plot_corner_with_batch(
             batch_mean=np.zeros(19),
