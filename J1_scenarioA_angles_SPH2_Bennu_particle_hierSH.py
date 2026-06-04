@@ -1,4 +1,47 @@
 """
+========================================================================
+WHY HIERARCHICAL BAYESIAN ESTIMATION HERE?
+========================================================================
+In ordinary Bayesian estimation the posterior is
+
+    p(theta | y) ∝ p(y | theta) · p(theta),
+
+i.e. likelihood × prior, where the prior p(theta) is FIXED by the analyst:
+its hyperparameters (here the SH-deviation scales σ_g) are chosen by hand
+BEFORE looking at the data.  When the data are informative the likelihood is
+sharply peaked and dominates, so this hand-picked prior scale barely affects
+the answer -- the result is "let the data speak."
+
+OpNav of a detached particle is the OPPOSITE regime.  The measurements are
+angles only (RA/DEC), the arc is short (~1.5 h), and there are occultation
+gaps; the line-of-sight geometry pins the particle's POSITION/VELOCITY well
+but carries almost no information about the gravity-field coefficients, whose
+signal on the trajectory over such a short arc is tiny.  Along those weakly
+observable directions the likelihood is nearly flat, so the posterior simply
+RETURNS THE PRIOR: p(theta|y) ≈ p(theta).  Whatever σ_g the analyst typed in
+(say "1% of the truth") then BECOMES the answer -- a subjective modeling
+choice masquerading as an estimation result, and a direct source of bias if
+that guess is wrong.  A point estimate would look confident for no reason.
+
+Hierarchical Bayes fixes this by refusing to commit to a single prior scale.
+Instead of fixing σ_g, we place a (hyper)prior ON σ_g and let the data inform
+it too -- a "prior on the prior":
+
+    p(theta, σ_g | y) ∝ p(y | theta) · p(theta | σ_g) · p(σ_g).
+
+The sensitive choice (how wide is the SH prior?) is moved up one level into a
+weakly-informative hyperprior, and the model LEARNS how much spread is actually
+consistent with the data rather than asserting it.  Three consequences matter
+here: (i) the arbitrary "1%" is no longer hard-coded into the result; (ii) the
+uncertainty about σ_g is propagated DOWN into the coefficient posterior, giving
+honestly wider error bars exactly where the data are weak (adaptive shrinkage /
+partial pooling); and (iii) coefficients in the same group borrow strength from
+one another.  This is precisely the weak / partially-identified regime where a
+fixed point-prior would dictate the answer and where hierarchical modeling pays
+off.  The specific grouping, the choice over Kaula's rule, and the non-centered
+parameterization that makes this samplable are justified further below.
+
+========================================================================
 Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 
 - Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
@@ -10,17 +53,61 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 
 - You estimate (HIERARCHICAL variant of the base scenario):
     theta_phys = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
-  about a reference x0_ref (12D state), PLUS two hierarchical hyperparameters --
-  the per-group SH-deviation scales, sampled in log space:
-    s_zonal    = ln σ_zonal     (governs C20),
-    s_nonzonal = ln σ_nonzonal  (governs C21, S21, C22, S22),
-  for a 14D sampling vector theta = [theta_phys(12), s_zonal, s_nonzonal].
+  about a reference x0_ref (12D state), PLUS one hierarchical hyperparameter PER SH
+  GROUP -- the per-group SH-deviation scale, sampled in log space.  The degree-2
+  coefficients are grouped by spherical-harmonic ORDER m (see justification below):
+    s_zonal    = ln σ_zonal     (governs C20            , m=0),
+    s_tesseral = ln σ_tesseral  (governs C21, S21        , m=1),
+    s_sectoral = ln σ_sectoral  (governs C22, S22        , m=2),
+  for a 15D sampling vector theta = [theta_phys(12), s_zonal, s_tesseral, s_sectoral].
   The 5 SH coefficients are sampled NON-CENTERED: C = x0_ref + w·σ_g with w ~ N(0,1),
   so each group's prior width σ_g is LEARNED from the data (weakly-informative
   log-Gaussian hyperprior centred at the a-priori 1% scale).  This removes the Neal
   funnel a centered (coefficient, σ_g) parameterization would create, and the SH
   prior stays centred on x0_ref -- consistent with the Stage-1 batch and the state
   priors (no double-counting of the data).
+
+  WHY GROUP BY ORDER m (and not lump all non-zonal terms together):
+    The pooled scale σ_g of a group is set, a priori, by the RMS magnitude of its
+    members.  For Bennu in its principal-axis body-fixed frame the order-1 (tesseral)
+    terms C21,S21 ~ 1e-14 vanish by construction (the pole is aligned with the
+    maximum-inertia axis), whereas the order-0 (zonal) oblateness C20 ~ 6e-2 and the
+    order-2 (sectoral) equatorial-ellipticity terms C22,S22 ~ 1e-3 are O(1)-relevant.
+    These three families differ by up to ~12 orders of magnitude.  A single
+    "non-zonal" group {C21,S21,C22,S22} would let the sectoral terms (1e-3) set a
+    shared scale σ_g ~ 1e-5 that the tesseral terms (1e-14) then inherit, inflating
+    the C21/S21 posterior by ~10 orders of magnitude relative to the batch (which
+    keeps each coefficient's own 1% prior).  Grouping by order keeps each σ_g
+    representative of its members, so partial pooling shrinks like with like and the
+    near-zero tesseral terms stay near zero, matching the linearized covariance.
+
+  WHY NOT KAULA'S RULE (or a fixed power-law degree-variance prior):
+    Kaula-type rules σ_n^2 ~ (K/n^2)/(2n+1) are SPECTRAL priors that regularize the
+    DECAY of power ACROSS degrees n; they say nothing about the relative size of
+    coefficients of the same degree but different order m.  Here (i) we estimate a
+    SINGLE degree (n=2), so there is no across-degree spectrum to regularize -- the
+    one quantity Kaula constrains is absent; (ii) Kaula's constant is calibrated for
+    large, near-hydrostatic planetary bodies, whereas Bennu's low-degree field is
+    dominated by its irregular SHAPE and rubble-pile structure and does not follow a
+    smooth power law; and (iii) Kaula is a FIXED deterministic scale, not learned,
+    so it cannot adapt σ_g to the (here, very weak) information the short OpNav arc
+    actually carries about gravity.  The per-order hierarchical scale is the natural
+    small-body, single-degree analogue: a weakly-informative, data-adaptive width
+    that distinguishes the physically distinct zonal/tesseral/sectoral families
+    instead of imposing an Earth-calibrated spectral slope that does not apply.
+
+  WHY NON-CENTERED (the funnel):
+    In the CENTERED form one samples (C_j, σ_g) jointly with C_j ~ N(x0_ref, σ_g^2).
+    The joint geometry is a funnel (Neal 2003): as σ_g -> 0 the admissible C_j region
+    pinches to a point, so the posterior curvature varies by orders of magnitude with
+    σ_g and any single step size is simultaneously too large in the neck and too small
+    in the mouth -- ensemble/HMC samplers stall and the σ_g tail is never explored.
+    The NON-CENTERED form C_j = x0_ref + w_j·σ_g with w_j ~ N(0,1) factorizes the
+    prior into a fixed unit Gaussian on w and a smooth log-Gaussian on s_g = ln σ_g,
+    so the prior geometry is INDEPENDENT of σ_g (no pinch) and the sampler mixes at a
+    single scale (Papaspiliopoulos et al. 2007; Betancourt & Girolami 2015).  Sampling
+    s_g = ln σ_g (rather than σ_g) additionally enforces positivity and makes the
+    weakly-informative hyperprior symmetric in scale (a factor ~exp(0.75) ~ 2 spread).
 
 - Measurements: RA/DEC from spacecraft to particle, with occultation mask (sphere proxy).
 
@@ -32,7 +119,8 @@ Pipeline:
   5) Stage-1 full nonlinear MAP (optional, slow): re-propagate each evaluation.
   6) Stage-2 STT-based MAP: use propagate_deviation with your STTPropagator.
   7) MCMC around the STT-based residual function, with a HIERARCHICAL per-group
-     SH-variance prior: the zonal/non-zonal σ_g are sampled alongside the state.
+     SH-variance prior: the per-order (zonal/tesseral/sectoral) σ_g are sampled
+     alongside the state.
 
 IMPORTANT REQUIREMENT:
 - Your STTPropagator must support time-dependent dynamics: f(x,t), A(x,t), Bk(x,t).
@@ -775,7 +863,7 @@ def plot_bennu_scene_body_fixed(
     )
     print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
 
-    plt.show()
+    # plt.show()
 
 
 def plot_error_svd_explained(
@@ -1128,7 +1216,7 @@ def solve_stage1_gn_with_stm(
         fname = f"results/postfit_residuals_batch_{timestamp}.pdf"
         fig.savefig(fname, format="pdf", bbox_inches="tight")
         fig.tight_layout()
-        plt.show()
+        # plt.show()
 
     return x0_ref, delta_total, cov_full  # , V_svd
 
@@ -1304,7 +1392,7 @@ if __name__ == "__main__":
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
     utc1 = "2019-03-01T01:30:00"
-    n_obs = 90
+    n_obs = 22
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1365,9 +1453,9 @@ if __name__ == "__main__":
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 2000  # 5 *
-    burn_in = 1
-    thin = 1
+    n_samples = 50000  # 5 *
+    burn_in = 5000
+    thin = 100
     spherical_spread = 1e-1
 
     # --------------------------
@@ -1622,17 +1710,27 @@ if __name__ == "__main__":
     priors_ref1 = [norm(loc=-ds, scale=s) for ds, s in zip(delta_shift, prior_sigma)]
 
     # --------------------------------------------------------------------------
-    # HIERARCHICAL SH PRIOR: sample a per-group SH-deviation scale sigma_g for the
-    # ZONAL (C20) and NON-ZONAL (C21,S21,C22,S22) coefficients.  Non-centered:
-    # C = x0_ref + w*sigma_g, w ~ N(0,1); sigma_g = exp(s_g) is sampled with a
-    # weakly-informative log-Gaussian hyperprior centred at the a-priori SH scale.
-    # Sampling state (14D): theta = [delta_state(7), w_SH(5), s_zonal, s_nonzonal].
+    # HIERARCHICAL SH PRIOR: sample a per-group SH-deviation scale sigma_g, grouped by
+    # spherical-harmonic order m -- ZONAL (C20), TESSERAL (C21,S21), SECTORAL (C22,S22).
+    # Non-centered: C = x0_ref + w*sigma_g, w ~ N(0,1); sigma_g = exp(s_g) is sampled
+    # with a weakly-informative log-Gaussian hyperprior centred at the a-priori SH scale.
+    # Sampling state: theta = [delta_state(7), w_SH(5), s_g(one per group)].
     # --------------------------------------------------------------------------
-    group_index_map = {"zonal": [7], "nonzonal": [8, 9, 10, 11]}
+    # Group SH coefficients by spherical-harmonic ORDER m, NOT into one "non-zonal"
+    # bucket.  Pooling C21,S21 (m=1, truth ~1e-14, i.e. ~0 for a pole-aligned body)
+    # with C22,S22 (m=2, truth ~1e-3) forces the tiny tesseral terms to inherit the
+    # sectoral scale (~1e-5), ballooning their posterior far beyond the batch (which
+    # keeps each coefficient's own 1% prior).  Separate groups -> each group's sigma_g
+    # reflects its own member magnitudes, so C21/S21 stay ~1e-16 like the batch.
+    group_index_map = {
+        "zonal": [7],  # C20      (m=0)
+        "tesseral": [8, 9],  # C21, S21 (m=1)  ~0 for Bennu
+        "sectoral": [10, 11],  # C22, S22 (m=2)
+    }
     group_labels = list(group_index_map.keys())
     n_phys = 12
-    ndim_full = n_phys + len(group_labels)  # 14
-    group_to_hyper = {g: n_phys + k for k, g in enumerate(group_labels)}  # 12, 13
+    ndim_full = n_phys + len(group_labels)  # 12 + n_groups
+    group_to_hyper = {g: n_phys + k for k, g in enumerate(group_labels)}
 
     # sigma_g hyperprior centre = RMS over the group of the a-priori SH sigmas
     # (prior_sigma[7:12], the SAME 1% scale the Stage-1 batch used) -> GN/MCMC
@@ -1793,7 +1891,7 @@ if __name__ == "__main__":
     plt.title("Occultation / Visibility Mask (sphere proxy)")
     plt.grid(True, linestyle=":")
     plt.tight_layout()
-    plt.show()
+    # plt.show()
 
     # --------------------------
     # Corner plot
@@ -1813,9 +1911,9 @@ if __name__ == "__main__":
             r"$\delta C_{22}$",
             r"$\delta S_{22}$",
         ]
-        # Pad the 12D batch (zeros, cov1) to 14D.  The 2 hyperparameters have no
-        # batch analog (GN does not estimate sigma_g); for them the red ellipse is
-        # the PRIOR and the purple point is ln(realized deviation-from-a-priori RMS).
+        # Pad the 12D batch (zeros, cov1) to the full sampling dim.  The per-group
+        # hyperparameters have no batch analog (GN does not estimate sigma_g); for them
+        # the red ellipse is the PRIOR and the purple point is ln(realized RMS deviation).
         batch_mean_full = np.hstack(
             [np.zeros(12), [logsig_loc[g] for g in group_labels]]
         )
