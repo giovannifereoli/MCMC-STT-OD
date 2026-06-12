@@ -1451,7 +1451,7 @@ if __name__ == "__main__":
     # --------------------------
     # Stage 1: full nonlinear batch with visibility weighting
     # --------------------------
-    print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
+    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
 
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,

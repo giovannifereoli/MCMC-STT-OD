@@ -373,10 +373,9 @@ def generate_opnav_measurements_from_sc(
 
     if add_outliers:
         p_out = 0.02
-        out_scale = 20 * sigma_angle
         mask = rng.random(size=ra.shape) < p_out
-        ra_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
-        dec_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
+        ra_meas[mask] += rng.normal(0, 20 * sigma_ra, size=np.sum(mask))
+        dec_meas[mask] += rng.normal(0, 20 * sigma_dec, size=np.sum(mask))
 
     y = np.empty(2 * len(ra))
     y[0::2] = ra_meas
@@ -926,7 +925,7 @@ def solve_stage1_gn_with_stm(
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
     if max_iter == 0:
-        cov_upd = prior_sig[update_idx] ** 2 * np.eye(n_upd)
+        cov_upd = np.diag(prior_sig**2)
     else:
         try:
             AtA = A.T @ A
@@ -1411,7 +1410,7 @@ if __name__ == "__main__":
     # --------------------------
     # Stage 1: full nonlinear batch with visibility weighting
     # --------------------------
-    print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
+    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
 
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,

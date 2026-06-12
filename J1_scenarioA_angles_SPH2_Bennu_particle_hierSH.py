@@ -463,10 +463,9 @@ def generate_opnav_measurements_from_sc(
 
     if add_outliers:
         p_out = 0.02
-        out_scale = 20 * sigma_angle
         mask = rng.random(size=ra.shape) < p_out
-        ra_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
-        dec_meas[mask] += rng.normal(0, out_scale, size=np.sum(mask))
+        ra_meas[mask] += rng.normal(0, 20 * sigma_ra, size=np.sum(mask))
+        dec_meas[mask] += rng.normal(0, 20 * sigma_dec, size=np.sum(mask))
 
     y = np.empty(2 * len(ra))
     y[0::2] = ra_meas
@@ -1118,7 +1117,7 @@ def solve_stage1_gn_with_stm(
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
     if max_iter == 0:
-        cov_upd = prior_sig[update_idx] ** 2 * np.eye(n_upd)
+        cov_upd = np.diag(prior_sig**2)
     else:
         try:
             AtA = A.T @ A
@@ -1638,7 +1637,7 @@ if __name__ == "__main__":
     # --------------------------
     # Stage 1: full nonlinear batch with visibility weighting
     # --------------------------
-    print("\n[Stage 1] Full nonlinear batch (NO STTs) to convergence...")
+    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
 
     x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
         propagator=propagator,
@@ -1673,7 +1672,7 @@ if __name__ == "__main__":
     # Residual function (STT-based) with visibility weighting
     # --------------------------
     def residuals_normalized(delta0):
-        delta0 = np.asarray(delta0)[:12]  # robust to 14D theta (drops the 2 sigma_g)
+        delta0 = np.asarray(delta0)[:12]  # robust to 15D theta (drops the 3 ln sigma_g)
         _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
 
         los = x_est[:, :3] - sc_state[:, :3]
@@ -1922,7 +1921,7 @@ if __name__ == "__main__":
         for g in group_labels:
             batch_cov_full[group_to_hyper[g], group_to_hyper[g]] = logsig_scale[g] ** 2
 
-        # Single 14D corner: physical (r, v, mu, 5 SH) + the 2 per-group ln sigma_g.
+        # Single 15D corner: physical (r, v, mu, 5 SH) + the 3 per-group ln sigma_g.
         model.plot_corner_with_batch(
             batch_mean=batch_mean_full,
             batch_cov=batch_cov_full,
