@@ -49,8 +49,10 @@ Units:
 - km, km/s, seconds (tau = seconds since start; SPICE uses ET)
 """
 
+import io
 import os
 import copy
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -683,13 +685,40 @@ def set_figure_dir(path):
     return _FIG_DIR
 
 
+def _write_bytes_retry(fname, data, tries=6, wait=2.0):
+    """Write `data` to `fname`, retrying with backoff (cloud-synced folders can time out)."""
+    for k in range(tries):
+        try:
+            fname.parent.mkdir(parents=True, exist_ok=True)
+            tmp = fname.with_name(f".{fname.name}.part")
+            tmp.write_bytes(data)
+            os.replace(tmp, fname)
+            return True
+        except OSError as err:
+            print(f"[Figure] write of {fname.name} failed ({err}); retry {k + 1}/{tries}")
+            time.sleep(wait * 2**k)
+    return False
+
+
 def save_figure(fig, name):
-    """Save `fig` as <figure dir>/<name>.pdf, show it if SHOW_FIGS, then close it."""
-    _FIG_DIR.mkdir(parents=True, exist_ok=True)
+    """
+    Save `fig` as <figure dir>/<name>.pdf, show it if SHOW_FIGS, then close it.
+    The PDF is rendered in memory first and then written with retries, so a slow
+    OneDrive write cannot crash the run; if every retry fails it goes to a local folder.
+    """
     fname = _FIG_DIR / f"{name}.pdf"
-    fig.savefig(fname)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="pdf")
+    data = buf.getvalue()
+    if not _write_bytes_retry(fname, data):
+        fname = Path.home() / "ryugu_figures_fallback" / _FIG_DIR.name / f"{name}.pdf"
+        _write_bytes_retry(fname, data, tries=2)
+        print(f"[Figure] WARNING: could not write to {_FIG_DIR}; saved locally instead")
     print(f"[Figure] saved {fname}")
-    if SHOW_FIGS:
+    interactive = plt.get_backend().lower() not in {
+        "agg", "pdf", "svg", "ps", "cairo", "pgf", "template"
+    }
+    if SHOW_FIGS and interactive:
         plt.show()
     plt.close(fig)
     return fname
