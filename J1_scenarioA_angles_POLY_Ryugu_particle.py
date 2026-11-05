@@ -59,7 +59,10 @@ import numpy as np
 import spiceypy as spice
 import trimesh
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.legend_handler import HandlerTuple
 import matplotlib.ticker as mticker
 from scipy.interpolate import CubicSpline
 from scipy.optimize import least_squares
@@ -77,28 +80,94 @@ from polyhedral_gravity import (
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
-# Publication-ish defaults
+# ============================================================
+# FIGURE STYLE (journal)
+# ============================================================
+# Figures are drawn at their printed size (single column COL_W, full text width TXT_W) with
+# LaTeX text at 7-8 pt, so they drop into a two-column journal layout without rescaling.
+# Vector PDFs; only dense layers (mesh, point clouds, walker traces) are rasterized.
+# MCMC.py sets its own rcParams on import, so this block must come after that import.
+
+COL_W = 3.5  # single-column width [in]
+TXT_W = 7.16  # full text width (double column) [in]
+SHOW_FIGS = True  # plt.show() after each figure is saved
+
 plt.rcParams.update(
     {
         "text.usetex": True,
+        "text.latex.preamble": (
+            r"\usepackage{amsmath}\usepackage{amssymb}\usepackage{bm}\usepackage{mathrsfs}"
+        ),
         "font.family": "serif",
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
-        "grid.linewidth": 0.8,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
+        "font.size": 8,
+        "axes.labelsize": 8,
+        "axes.titlesize": 8,
+        "legend.fontsize": 7,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
+        "axes.linewidth": 0.6,
+        "axes.edgecolor": "0.15",
+        "axes.labelcolor": "0.1",
+        "axes.titlepad": 4.0,
+        "axes.labelpad": 2.5,
         "axes.spines.top": False,
         "axes.spines.right": False,
+        "axes.grid": True,
+        "axes.axisbelow": True,
+        "grid.color": "0.9",
+        "grid.linestyle": "-",
+        "grid.linewidth": 0.4,
+        "xtick.direction": "in",
+        "ytick.direction": "in",
+        "xtick.color": "0.15",
+        "ytick.color": "0.15",
+        "xtick.major.size": 3.0,
+        "ytick.major.size": 3.0,
+        "xtick.minor.size": 1.6,
+        "ytick.minor.size": 1.6,
+        "xtick.major.width": 0.6,
+        "ytick.major.width": 0.6,
+        "xtick.minor.width": 0.4,
+        "ytick.minor.width": 0.4,
+        "lines.linewidth": 1.2,
+        "lines.markersize": 4.0,
+        "legend.frameon": False,
+        "legend.handlelength": 1.8,
+        "legend.handletextpad": 0.5,
+        "legend.columnspacing": 1.2,
+        "legend.borderaxespad": 0.3,
+        "figure.dpi": 150,
+        "savefig.dpi": 600,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.02,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
     }
 )
-plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
+
+# Okabe-Ito colors (colorblind-safe; adjacent pairs checked for CVD separation).
+# Each color has ONE meaning in every figure.
+C_POST = "#0072B2"  # MCMC posterior / Gaussian mixture (blue)
+C_BATCH = "#D55E00"  # Gauss-Newton batch / single Gaussian (vermillion)
+C_SC = "#009E73"  # spacecraft, images used (bluish green)
+C_OCC = "#E69F00"  # occulted epochs (orange)
+C_MC = "0.62"  # nonlinear Monte Carlo (neutral grey)
+C_TRUTH = "k"  # truth
+C_SPAN = "0.93"  # background spans (observation arc, burn-in, +/-3 sigma)
+C_XYZ = ("#56B4E9", "#CC79A7", "#E69F00")  # x / y / z components (ACF figure only)
+
+# Estimated parameters: symbols, display units and scale from internal units (km, km/s, -)
+PARAM_SYM = [
+    r"\delta x_0",
+    r"\delta y_0",
+    r"\delta z_0",
+    r"\delta \dot{x}_0",
+    r"\delta \dot{y}_0",
+    r"\delta \dot{z}_0",
+    r"\delta \eta",
+]
+PARAM_UNIT = ["m", "m", "m", r"mm\,s$^{-1}$", r"mm\,s$^{-1}$", r"mm\,s$^{-1}$", r"\%"]
+PARAM_SCALE = np.array([1e3, 1e3, 1e3, 1e6, 1e6, 1e6, 1e2])
 
 # ============================================================
 # Constants
@@ -597,190 +666,613 @@ def sun_rtn_frame(et0, body_id, frame="J2000", abcorr="NONE"):
 # ============================================================
 # PLOTS
 # ============================================================
+# Every figure is saved as <name>.pdf in the folder set by set_figure_dir() (main sets
+# results/ryugu_poly_<timestamp>/). Colors, units and symbols come from the style block at
+# the top of the file, so the same quantity looks the same in every figure.
 
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-
-def set_axes_equal_3d(ax):
-    """Make 3D axes have equal scale so the mesh doesn't look like a pancake."""
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-
-    x_mid = np.mean(x_limits)
-    y_mid = np.mean(y_limits)
-    z_mid = np.mean(z_limits)
-
-    plot_radius = 0.5 * max([x_range, y_range, z_range])
-
-    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
-    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
-    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
+_FIG_DIR = Path("results")
 
 
-def add_trimesh_to_ax(
-    ax, mesh, color=(0.7, 0.7, 0.7, 1.0), alpha=0.35, edge_alpha=0.15, max_faces=30000
-):
-    """
-    Render a trimesh.Trimesh on a matplotlib 3D axis.
-    Downsamples faces if mesh is huge (matplotlib dies otherwise).
-    """
-    faces = mesh.faces
-    verts = mesh.vertices
+def set_figure_dir(path):
+    """Folder where save_figure() writes the PDFs (created if needed)."""
+    global _FIG_DIR
+    _FIG_DIR = Path(path)
+    _FIG_DIR.mkdir(parents=True, exist_ok=True)
+    return _FIG_DIR
 
-    if faces.shape[0] > max_faces:
-        idx = np.random.default_rng(0).choice(
-            faces.shape[0], size=max_faces, replace=False
+
+def save_figure(fig, name):
+    """Save `fig` as <figure dir>/<name>.pdf, show it if SHOW_FIGS, then close it."""
+    _FIG_DIR.mkdir(parents=True, exist_ok=True)
+    fname = _FIG_DIR / f"{name}.pdf"
+    fig.savefig(fname)
+    print(f"[Figure] saved {fname}")
+    if SHOW_FIGS:
+        plt.show()
+    plt.close(fig)
+    return fname
+
+
+def param_label(i, unit=True):
+    """Axis label of estimated parameter i, e.g. '$\\delta x_0$ [m]'."""
+    s = f"${PARAM_SYM[i]}$"
+    return f"{s} [{PARAM_UNIT[i]}]" if unit else s
+
+
+def _tint(color, a):
+    """Mix `color` with white: a = 0 -> white, a = 1 -> color."""
+    c = np.asarray(mcolors.to_rgb(color))
+    return tuple((1.0 - a) + a * c)
+
+
+OCC_FILL = _tint(C_OCC, 0.2)  # opaque fill of the occulted epochs
+
+
+def _occulted_spans(t, vis):
+    """(start, end) of each run of occulted epochs, edges at the midpoints between epochs."""
+    t = np.asarray(t, dtype=float)
+    occ = ~np.asarray(vis, dtype=bool)
+    if not np.any(occ):
+        return []
+    dt = np.diff(t)
+    left = np.r_[t[0] - 0.5 * dt[0], t[1:] - 0.5 * dt]
+    right = np.r_[t[:-1] + 0.5 * dt, t[-1] + 0.5 * dt[-1]]
+    edges = np.diff(np.r_[0, occ.astype(int), 0])
+    i0 = np.flatnonzero(edges == 1)
+    i1 = np.flatnonzero(edges == -1) - 1
+    return [(left[a], right[b]) for a, b in zip(i0, i1)]
+
+
+def shade_occulted(ax, t, vis, text=None, text_y=0.97):
+    """Shade the occulted epochs of a time axis (optionally labelled inside the first span)."""
+    spans = _occulted_spans(t, vis)
+    for a, b in spans:
+        ax.axvspan(a, b, color=OCC_FILL, lw=0, zorder=0.4)
+    if text and spans:
+        a, b = spans[0]
+        lo, hi = ax.get_xlim()
+        ax.text(
+            0.5 * (max(a, lo) + min(b, hi)), text_y, text, color="0.3", fontsize=7,
+            ha="center", va="top" if text_y > 0.5 else "bottom",
+            transform=ax.get_xaxis_transform(), zorder=5,
         )
-        faces = faces[idx]
-
-    poly3d = verts[faces]  # (F,3,3)
-    coll = Poly3DCollection(poly3d, linewidths=0.2)
-    coll.set_facecolor(color)
-    coll.set_alpha(alpha)
-    coll.set_edgecolor((0.0, 0.0, 0.0, edge_alpha))
-    ax.add_collection3d(coll)
+    return spans
 
 
-def plot_ryugu_scene_body_fixed(
+# ------------------------------------------------------------
+# Scene (body-fixed frame)
+# ------------------------------------------------------------
+
+
+def _view_dir(elev, azim):
+    """Unit vector from the scene toward the camera for ax.view_init(elev, azim)."""
+    e, a = np.deg2rad(elev), np.deg2rad(azim)
+    return np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+
+
+def _shaded_mesh(mesh, view, light, base=(0.74, 0.71, 0.67), ambient=0.30):
+    """Lambert-shaded Poly3DCollection of the front-facing triangles of `mesh`."""
+    nrm = np.asarray(mesh.face_normals)
+    front = nrm @ view > 0.0  # closed surface: back faces are never visible
+    tri = np.asarray(mesh.vertices)[np.asarray(mesh.faces)[front]]
+    shade = ambient + (1.0 - ambient) * np.clip(nrm[front] @ light, 0.0, None)
+    fc = np.clip(np.outer(shade, base), 0.0, 1.0)
+    coll = Poly3DCollection(
+        tri, facecolors=fc, edgecolors=fc, linewidths=0.15, antialiased=False, zorder=1
+    )
+    coll.set_rasterized(True)
+    return coll
+
+
+def _hidden_by_mesh(mesh, pts, view, eps=1e-6):
+    """True where a point is hidden from the (orthographic) camera by the mesh."""
+    pts = np.asarray(pts, dtype=float)
+    if pts.size == 0:
+        return np.zeros(0, dtype=bool)
+    dirs = np.repeat(view[None, :], pts.shape[0], axis=0)
+    return np.asarray(mesh.ray.intersects_any(pts + eps * view, dirs), dtype=bool)
+
+
+def _to_body(pos_i, tau, alpha, delta, omega, w0=0.0):
+    """Rotate inertial positions (N,3) at times tau into the body-fixed frame."""
+    return np.array(
+        [
+            np.asarray(make_ryugu_rotation_matrix(alpha, delta, omega, float(t), w0)) @ p
+            for p, t in zip(np.asarray(pos_i, dtype=float), np.asarray(tau, dtype=float))
+        ]
+    )
+
+
+def plot_scene_body_fixed(
     ryugu_mesh,
-    sc_state_full,
-    x_true_full,
-    x_map,
-    tau_full,
-    tau_map,
+    tau_obs,
+    sc_obs,
+    vis_mask,
+    tau_line,
+    sc_line,
+    pt_line,
     alpha,
     delta,
     omega,
-    vis_mask=None,
-    sc_label="Notional S/C (CSR-30)",
-    downsample=1,
+    w0=0.0,
+    detach_bf=None,
+    elev=14.0,
+    azim=62.0,
+    zoom=1.0,
+    name="fig_scene_body_fixed",
 ):
     """
-    BODY-FIXED visualization (publication-ready).
-    Assumes `ryugu_mesh` is in Ryugu body-fixed frame, centered at origin;
-    make_ryugu_rotation_matrix returns R_ib (inertial -> body).
+    Observation geometry in the Ryugu body-fixed frame: shaded shape model, spacecraft and
+    particle (truth) tracks over the observation arc, and the image epochs on the S/C track
+    (used / occulted by the shape model). Orthographic view; track points hidden behind the
+    body are not drawn. Inputs are inertial positions [km] at times tau [s].
     """
-    sl = slice(None, None, max(1, int(downsample)))
+    view = _view_dir(elev, azim)
+    light = _view_dir(elev + 30.0, azim + 35.0)  # key light above-left of the camera
 
-    sc_i = np.asarray(sc_state_full)[sl, :3]
-    pt_i = np.asarray(x_true_full)[sl, :3]
-    tau_i = np.asarray(tau_full)[sl]
-    mesh = ryugu_mesh
+    sc_b = _to_body(sc_line[:, :3], tau_line, alpha, delta, omega, w0)
+    pt_b = _to_body(pt_line[:, :3], tau_line, alpha, delta, omega, w0)
+    obs_b = _to_body(sc_obs[:, :3], tau_obs, alpha, delta, omega, w0)
+    vis = np.asarray(vis_mask, dtype=bool)
 
-    # Rotate INERTIAL -> BODY-FIXED
-    sc_b = np.zeros_like(sc_i)
-    pt_b = np.zeros_like(pt_i)
-    for k, tk in enumerate(tau_i):
-        R_ib = np.asarray(make_ryugu_rotation_matrix(alpha, delta, omega, float(tk)))
-        sc_b[k] = R_ib @ sc_i[k]
-        pt_b[k] = R_ib @ pt_i[k]
+    def _visible_line(xyz):
+        out = xyz.copy()
+        out[_hidden_by_mesh(ryugu_mesh, xyz, view)] = np.nan
+        return out
 
-    fig = plt.figure(figsize=(7.2, 5.4))
-    ax = fig.add_subplot(111, projection="3d")
+    sc_v, pt_v = _visible_line(sc_b), _visible_line(pt_b)
+    obs_hidden = _hidden_by_mesh(ryugu_mesh, obs_b, view)
 
-    add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
+    fig = plt.figure(figsize=(COL_W, 2.9))
+    ax = fig.add_axes((0.0, -0.03, 1.0, 0.96), projection="3d", computed_zorder=False)
+    ax.set_proj_type("ortho")
+    ax.view_init(elev=elev, azim=azim)
 
+    ax.add_collection3d(_shaded_mesh(ryugu_mesh, view, light))
+    ax.plot(*sc_v.T, color=C_SC, lw=1.1, zorder=3)
+    ax.plot(*pt_v.T, color=C_TRUTH, lw=1.1, zorder=3)
+
+    used = vis & ~obs_hidden
+    occl = ~vis & ~obs_hidden
     ax.plot(
-        sc_b[:, 0],
-        sc_b[:, 1],
-        sc_b[:, 2],
-        linewidth=1.8,
-        alpha=0.95,
-        color="tab:blue",
-        label=sc_label,
+        *obs_b[used].T, ls="none", marker="o", ms=2.8, mfc=C_SC, mec="white", mew=0.35,
+        zorder=4,
     )
-    ax.plot(
-        pt_b[:, 0],
-        pt_b[:, 1],
-        pt_b[:, 2],
-        linewidth=1.6,
-        alpha=0.95,
-        color="tab:red",
-        label="Particle Truth",
-    )
-
-    # Visible / occulted points (both black)
-    if vis_mask is not None:
-        vis_mask = np.asarray(vis_mask).astype(bool)
-        vis_mask_ds = (
-            vis_mask[sl]
-            if vis_mask.shape[0] >= tau_full[sl].shape[0]
-            else vis_mask[: sc_b.shape[0]]
+    ax.plot(*obs_b[occl].T, ls="none", marker="x", ms=3.2, color=C_OCC, mew=0.9, zorder=4)
+    if detach_bf is not None and not _hidden_by_mesh(ryugu_mesh, detach_bf[None], view)[0]:
+        ax.plot(
+            *np.asarray(detach_bf)[:, None], ls="none", marker="*", ms=7.5, mfc=C_TRUTH,
+            mec="white", mew=0.5, zorder=5,
         )
 
-        sc_vis = sc_b[vis_mask_ds]
-        sc_occ = sc_b[~vis_mask_ds]
+    # Equal-aspect cube around everything drawn
+    xyz = np.vstack([np.asarray(ryugu_mesh.vertices), sc_b, pt_b])
+    mid = 0.5 * (xyz.min(0) + xyz.max(0))
+    half = 0.5 * np.max(xyz.max(0) - xyz.min(0)) * 1.02
+    ax.set_xlim(mid[0] - half, mid[0] + half)
+    ax.set_ylim(mid[1] - half, mid[1] + half)
+    ax.set_zlim(mid[2] - half, mid[2] + half)
+    ax.set_box_aspect((1, 1, 1), zoom=zoom)
 
-        if sc_vis.size:
-            ax.scatter(
-                sc_vis[:, 0],
-                sc_vis[:, 1],
-                sc_vis[:, 2],
-                s=16,
-                marker="o",
-                color="black",
-                alpha=0.9,
-                label="Measurement Included",
-            )
-        if sc_occ.size:
-            ax.scatter(
-                sc_occ[:, 0],
-                sc_occ[:, 1],
-                sc_occ[:, 2],
-                s=18,
-                marker="x",
-                color="black",
-                alpha=0.9,
-                label="Measurement Unavailable",
-            )
+    for a, lab in zip(
+        (ax.xaxis, ax.yaxis, ax.zaxis),
+        (r"$X_{\mathscr{B}}$ [km]", r"$Y_{\mathscr{B}}$ [km]", r"$Z_{\mathscr{B}}$ [km]"),
+    ):
+        a.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        a.line.set_color("0.4")
+        a.line.set_linewidth(0.5)
+        a._axinfo["grid"].update(color="0.88", linewidth=0.4)
+        a._axinfo["tick"].update(inward_factor=0.0, outward_factor=0.25)
+        a.set_major_locator(mticker.MaxNLocator(5))
+        a.set_tick_params(pad=-1.5, labelsize=6.5)
+        a.set_label_text(lab)
+        a.labelpad = -3.0
 
-    ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_zlabel(r"$Z_\mathscr{B}$ [km]", labelpad=10)
-    fig.canvas.draw()
-
-    ax.view_init(elev=10, azim=-120)
-
-    mesh_v = np.asarray(mesh.vertices)
-    all_xyz = np.vstack([mesh_v, sc_b, pt_b])
-
-    mins = np.min(all_xyz, axis=0)
-    maxs = np.max(all_xyz, axis=0)
-    span = maxs - mins
-    span_max = float(np.max(span)) if np.all(np.isfinite(span)) else 1.0
-    pad = 0.08 * span_max
-
-    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
-    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
-    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-
-    set_axes_equal_3d(ax)
-
-    ax.legend(
-        loc="upper right",
-        bbox_to_anchor=(0.98, 0.98),
-        frameon=True,
-        borderaxespad=0.2,
+    handles = [
+        Line2D([], [], color=C_SC, lw=1.1, label="Spacecraft"),
+        Line2D([], [], color=C_TRUTH, lw=1.1, label="Particle (truth)"),
+        Line2D([], [], ls="none", marker="o", ms=3.5, mfc=C_SC, mec="white", mew=0.35,
+               label="Image used"),
+        Line2D([], [], ls="none", marker="x", ms=3.8, color=C_OCC, mew=0.9,
+               label="Image occulted"),
+    ]
+    if detach_bf is not None:
+        handles.append(
+            Line2D([], [], ls="none", marker="*", ms=7, mfc=C_TRUTH, mec="white", mew=0.5,
+                   label="Ejection site")
+        )
+    fig.legend(
+        handles=handles, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 0.955),
+        columnspacing=1.0, handletextpad=0.4,
     )
+    return save_figure(fig, name)
 
-    fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
 
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig.canvas.draw()
-    fig.savefig(
-        f"results/ryugu_scene_body_fixed_{timestamp}.pdf",
-        format="pdf",
-        pad_inches=0.20,
+# ------------------------------------------------------------
+# Observation geometry and post-fit residuals (time axis)
+# ------------------------------------------------------------
+
+
+def plot_observation_geometry(
+    tau_obs, sc_obs, pt_obs, vis_mask, tau_line=None, sc_line=None, pt_line=None,
+    name="fig_observation_geometry",
+):
+    """S/C-particle range over the arc; image epochs marked used / occulted (shaded)."""
+    t = np.asarray(tau_obs) / 3600.0
+    vis = np.asarray(vis_mask, dtype=bool)
+    rho = np.linalg.norm(np.asarray(pt_obs)[:, :3] - np.asarray(sc_obs)[:, :3], axis=1)
+
+    fig, ax = plt.subplots(figsize=(COL_W, 1.95), layout="constrained")
+    ax.set_xlim(t[0], t[-1])
+    shade_occulted(ax, t, vis, text="occulted\nby Ryugu", text_y=0.04)
+    if tau_line is not None:
+        rho_l = np.linalg.norm(np.asarray(pt_line)[:, :3] - np.asarray(sc_line)[:, :3], axis=1)
+        ax.plot(np.asarray(tau_line) / 3600.0, rho_l, color="0.25", lw=0.9, zorder=2)
+    ax.plot(
+        t[vis], rho[vis], ls="none", marker="o", ms=3.4, mfc=C_SC, mec="white", mew=0.4,
+        zorder=3,
     )
-    print(f"Saved: results/ryugu_scene_body_fixed_{timestamp}.pdf")
+    ax.plot(t[~vis], rho[~vis], ls="none", marker="x", ms=3.6, color=C_OCC, mew=1.0, zorder=3)
+    ax.set_xlabel("Time since epoch [h]")
+    ax.set_ylabel(r"S/C--particle range [km]")
+    ax.set_ylim(bottom=0.0)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(5))
 
-    plt.show()
+    handles = [
+        Line2D([], [], color="0.25", lw=0.9, label="Range (truth)"),
+        Line2D([], [], ls="none", marker="o", ms=3.4, mfc=C_SC, mec="white", mew=0.4,
+               label=f"Image used ({int(vis.sum())})"),
+        (
+            Patch(facecolor=OCC_FILL, lw=0),
+            Line2D([], [], ls="none", marker="x", ms=3.6, color=C_OCC, mew=1.0),
+        ),
+    ]
+    labels = [h.get_label() for h in handles[:2]] + [f"Image occulted ({int((~vis).sum())})"]
+    ax.legend(handles, labels, loc="lower right", ncol=1)
+    return save_figure(fig, name)
+
+
+def plot_postfit_residuals(
+    tau_obs, res_batch, res_mcmc, vis_mask, name="fig_postfit_residuals"
+):
+    """
+    Normalized RA / Dec post-fit residuals at the visible epochs for the Gauss-Newton batch
+    (open circles) and the MCMC MAP (dots). Inputs are stacked [ra0, dec0, ra1, ...] / sigma.
+    """
+    t = np.asarray(tau_obs) / 3600.0
+    vis = np.asarray(vis_mask, dtype=bool)
+    rb = np.asarray(res_batch).reshape(-1, 2)
+    rm = np.asarray(res_mcmc).reshape(-1, 2)
+
+    fig, axes = plt.subplots(2, 1, figsize=(COL_W, 2.9), sharex=True, layout="constrained")
+    lim = max(3.6, 1.15 * float(np.max(np.abs(np.r_[rb[vis].ravel(), rm[vis].ravel()]))))
+    for k, (ax, comp) in enumerate(zip(axes, ("RA", "Dec"))):
+        ax.set_xlim(t[0], t[-1])
+        ax.set_ylim(-lim, lim)
+        ax.axhspan(-3.0, 3.0, color="0.95", lw=0, zorder=0)
+        ax.axhspan(-1.0, 1.0, color="0.89", lw=0, zorder=0)
+        ax.axhline(0.0, color="0.45", lw=0.6, zorder=1)
+        shade_occulted(ax, t, vis, text="occulted" if k == 0 else None)
+        ax.plot(
+            t[vis], rb[vis, k], ls="none", marker="o", ms=4.2, mfc="none", mec=C_BATCH,
+            mew=0.8, zorder=3,
+        )
+        ax.plot(t[vis], rm[vis, k], ls="none", marker="o", ms=1.9, color=C_POST, zorder=4)
+        ax.set_yticks([-3, -1, 0, 1, 3])
+        ax.yaxis.grid(False)
+        ax.set_ylabel(rf"{comp} residual [$\sigma$]")
+        rms_b = np.sqrt(np.mean(rb[vis, k] ** 2))
+        rms_m = np.sqrt(np.mean(rm[vis, k] ** 2))
+        ax.text(
+            0.99, 0.04, rf"RMS: batch {rms_b:.2f}, MCMC {rms_m:.2f}", transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=7, color="0.2", zorder=5,
+            bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.85),
+        )
+    axes[1].set_xlabel("Time since epoch [h]")
+
+    handles = [
+        Line2D([], [], ls="none", marker="o", ms=4.2, mfc="none", mec=C_BATCH, mew=0.8,
+               label="Gauss--Newton batch"),
+        Line2D([], [], ls="none", marker="o", ms=2.4, color=C_POST, label="MCMC MAP"),
+        Patch(facecolor="0.89", label=r"$\pm1\sigma$"),
+        Patch(facecolor="0.95", label=r"$\pm3\sigma$"),
+    ]
+    fig.legend(handles=handles, loc="outside upper center", ncol=4, columnspacing=0.9)
+    return save_figure(fig, name)
+
+
+# ------------------------------------------------------------
+# MCMC diagnostics (chain traces, autocorrelation, corner)
+# ------------------------------------------------------------
+
+
+def _chain_physical(model, discard=0, thin=1):
+    """Full emcee chain (n_steps, n_walkers, ndim) in physical (unwhitened) coordinates."""
+    ch = np.asarray(model.sampler.get_chain(discard=discard, thin=thin), dtype=float)
+    if getattr(model, "is_whitened", False):
+        ch = ch @ np.asarray(model.whiten_L).T + np.asarray(model.whiten_mean)
+    return ch
+
+
+def plot_mcmc_traces(
+    model, burn_in, true_theta=None, batch_theta=None, n_walkers_show=24, max_points=1500,
+    seed=0, name="fig_mcmc_traces",
+):
+    """
+    Walker traces of every parameter and of the log-posterior over the full run: a random
+    subset of walkers (grey), the ensemble median with its 16-84% band (blue), the truth
+    (black) and the batch estimate (vermillion). The burn-in is shaded. Y-limits follow the
+    post-burn-in ensemble, so the initial transient enters from outside the panel.
+    """
+    n_steps = model.sampler.get_chain().shape[0]
+    stride = max(1, n_steps // max_points)
+    ch = _chain_physical(model, thin=stride) * PARAM_SCALE  # display units
+    lp = np.asarray(model.sampler.get_log_prob(thin=stride), dtype=float)
+    steps = np.arange(ch.shape[0]) * stride
+    n_par = ch.shape[2]
+    post = steps >= burn_in
+    rng = np.random.default_rng(seed)
+    pick = rng.choice(ch.shape[1], size=min(n_walkers_show, ch.shape[1]), replace=False)
+
+    n_rows = int(np.ceil((n_par + 1) / 2))
+    fig, axes = plt.subplots(
+        n_rows, 2, figsize=(TXT_W, 1.18 * n_rows + 0.45), sharex=True, layout="constrained"
+    )
+    axes = axes.ravel()
+
+    def _panel(ax, y, ylabel, ref_true=None, ref_batch=None):
+        ax.axvspan(0, burn_in, color=C_SPAN, lw=0, zorder=0)
+        ax.plot(steps, y[:, pick], color="0.7", lw=0.25, alpha=0.5, zorder=1, rasterized=True)
+        q16, q50, q84 = np.percentile(y, [16, 50, 84], axis=1)
+        ax.fill_between(steps, q16, q84, color=C_POST, alpha=0.25, lw=0, zorder=2)
+        ax.plot(steps, q50, color=C_POST, lw=0.9, zorder=3)
+        if ref_batch is not None:
+            ax.axhline(ref_batch, color=C_BATCH, lw=0.9, ls="--", zorder=4)
+        if ref_true is not None:
+            ax.axhline(ref_true, color=C_TRUTH, lw=0.8, zorder=5)
+        yp = y[post]
+        lo, hi = np.percentile(yp, [0.5, 99.5])
+        refs = [r for r in (ref_true, ref_batch) if r is not None]
+        lo, hi = min([lo] + refs), max([hi] + refs)
+        pad = 0.35 * (hi - lo)
+        ax.set_ylim(lo - pad, hi + pad)
+        ax.set_ylabel(ylabel)
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(4))
+
+    for i in range(n_par):
+        _panel(
+            axes[i], ch[:, :, i], param_label(i),
+            None if true_theta is None else true_theta[i] * PARAM_SCALE[i],
+            None if batch_theta is None else batch_theta[i] * PARAM_SCALE[i],
+        )
+    _panel(axes[n_par], lp, r"$\log p(\bm{\theta}\,|\,\bm{y})$")
+    for ax in axes[n_par + 1:]:
+        ax.set_visible(False)
+
+    for ax in axes[n_par - 1: n_par + 1]:
+        ax.set_xlabel("Step")
+        ax.xaxis.set_tick_params(labelbottom=True)
+    for ax in axes:
+        ax.set_xlim(0, n_steps)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
+
+    handles = [
+        Line2D([], [], color="0.7", lw=0.8, label=f"Walkers ({len(pick)} of {ch.shape[1]})"),
+        (
+            Patch(facecolor=C_POST, alpha=0.25, lw=0),
+            Line2D([], [], color=C_POST, lw=0.9),
+        ),
+        Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label="Gauss--Newton batch"),
+        Line2D([], [], color=C_TRUTH, lw=0.8, label="Truth"),
+        Patch(facecolor=C_SPAN, lw=0, label="Burn-in"),
+    ]
+    labels = [handles[0].get_label(), "Ensemble median, 16--84\\%", handles[2].get_label(),
+              handles[3].get_label(), handles[4].get_label()]
+    fig.legend(handles, labels, loc="outside upper center", ncol=5)
+    return save_figure(fig, name)
+
+
+def plot_mcmc_autocorrelation(model, burn_in, thin, name="fig_mcmc_autocorrelation"):
+    """
+    Walker-averaged normalized autocorrelation of every parameter after burn-in, with the
+    integrated autocorrelation time (emcee) in the legend and the thinning interval marked.
+    """
+    import emcee
+
+    ch = _chain_physical(model, discard=burn_in)  # (n, W, d)
+    n, n_w, n_par = ch.shape
+    tau = np.atleast_1d(emcee.autocorr.integrated_time(ch, tol=0))
+    acf = np.array(
+        [
+            np.mean([emcee.autocorr.function_1d(ch[:, k, i]) for k in range(n_w)], axis=0)
+            for i in range(n_par)
+        ]
+    )
+    max_lag = int(min(n - 1, max(6.0 * np.max(tau), 2.5 * thin)))
+    lag = np.arange(max_lag + 1)
+
+    styles = [(C_XYZ[i % 3], "-" if i < 3 else "--") for i in range(6)] + [("0.2", "-.")]
+    fig, ax = plt.subplots(figsize=(COL_W, 2.35), layout="constrained")
+    ax.axhline(0.0, color="0.45", lw=0.6)
+    for i in range(n_par):
+        c, ls = styles[i] if i < len(styles) else ("0.5", ":")
+        ax.plot(
+            lag, acf[i, : max_lag + 1], color=c, ls=ls, lw=1.1,
+            label=rf"{param_label(i, unit=False)}: $\hat\tau = {tau[i]:.0f}$",
+        )
+    ax.axvline(thin, color="0.3", lw=0.7, ls=":")
+    ax.text(
+        thin, 0.55, " thinning", rotation=90, ha="right", va="bottom", fontsize=7,
+        color="0.3", transform=ax.get_xaxis_transform(),
+    )
+    ax.set_xlim(0, max_lag)
+    ax.set_ylim(-0.2, 1.02)
+    ax.set_xlabel("Lag [steps]")
+    ax.set_ylabel("Autocorrelation")
+    ax.legend(loc="upper right", ncol=2, fontsize=6.5, columnspacing=0.8, handlelength=2.2)
+    return save_figure(fig, name)
+
+
+def _inner_ticks(lo, hi, margin=0.12):
+    """2-3 'nice' ticks in [lo, hi], each at least `margin` (axis fraction) from the edges."""
+    d = margin * (hi - lo)
+    t = np.array([0.5 * (lo + hi)])
+    for n in (3, 4, 5, 6):
+        c = mticker.MaxNLocator(n).tick_values(lo, hi)
+        c = c[(c >= lo + d) & (c <= hi - d)]
+        if c.size >= 2:
+            return c[:3] if c.size <= 3 else c[::2][:3]
+        if c.size:
+            t = c
+    return t
+
+
+def _hpd_levels(H, masses):
+    """Density thresholds enclosing the given probability masses of a 2D histogram."""
+    h = np.sort(H.ravel())[::-1]
+    c = np.cumsum(h)
+    c /= c[-1]
+    return np.array([h[min(np.searchsorted(c, m), h.size - 1)] for m in masses])
+
+
+def plot_corner(
+    samples, true_theta=None, batch_mean=None, batch_cov=None, bins=40, smooth=1.1,
+    name="fig_corner",
+):
+    """
+    Corner plot of the MCMC posterior (blue: 1/2/3-sigma highest-density regions, i.e.
+    39.3 / 86.5 / 98.9% of the 2D mass) against the Gauss-Newton batch covariance
+    (vermillion ellipses with the same masses) and the truth (black). Displayed in m, mm/s, %.
+
+    The 2D densities are estimated in pair-whitened coordinates (histogram + Gaussian
+    smoothing) and mapped back, so near-degenerate pairs (|rho| ~ 1) stay smooth.
+    """
+    from scipy.ndimage import gaussian_filter
+
+    s = PARAM_SCALE
+    X = np.asarray(samples, dtype=float) * s
+    n_par = X.shape[1]
+    tr = None if true_theta is None else np.asarray(true_theta) * s
+    bm = None if batch_mean is None else np.asarray(batch_mean) * s
+    bc = None if batch_cov is None else np.asarray(batch_cov) * np.outer(s, s)
+
+    masses = np.array([0.393, 0.865, 0.989])
+    fills = [_tint(C_POST, a) for a in (0.16, 0.38, 0.68)]
+
+    # Axis ranges: posterior, batch +/-3.5 sigma, truth
+    lo, hi = np.percentile(X, [0.05, 99.95], axis=0)
+    if bm is not None and bc is not None:
+        sb = np.sqrt(np.diag(bc))
+        lo, hi = np.minimum(lo, bm - 3.5 * sb), np.maximum(hi, bm + 3.5 * sb)
+    if tr is not None:
+        lo, hi = np.minimum(lo, tr), np.maximum(hi, tr)
+    pad = 0.06 * (hi - lo)
+    lo, hi = lo - pad, hi + pad
+
+    fig, axes = plt.subplots(n_par, n_par, figsize=(TXT_W, TXT_W))
+    fig.subplots_adjust(left=0.085, right=0.99, bottom=0.075, top=0.965, wspace=0.07,
+                        hspace=0.07)
+
+    for i in range(n_par):
+        for j in range(n_par):
+            ax = axes[i, j]
+            ax.grid(False)
+            if j > i:
+                ax.set_visible(False)
+                continue
+            ax.set_xlim(lo[j], hi[j])
+            ax.set_xticks(_inner_ticks(lo[j], hi[j]))
+
+            if i == j:  # ---- marginal
+                ax.hist(
+                    X[:, i], bins=bins, range=(lo[i], hi[i]), density=True,
+                    histtype="stepfilled", color=_tint(C_POST, 0.3), ec=C_POST, lw=0.8,
+                )
+                if bm is not None and bc is not None:
+                    xx = np.linspace(lo[i], hi[i], 300)
+                    ax.plot(xx, norm.pdf(xx, bm[i], np.sqrt(bc[i, i])), color=C_BATCH, lw=0.9)
+                if tr is not None:
+                    ax.axvline(tr[i], color=C_TRUTH, lw=0.8)
+                ax.set_ylim(bottom=0.0)
+                ax.set_yticks([])
+                ax.spines["left"].set_visible(False)
+                q16, q50, q84 = np.percentile(X[:, i], [16, 50, 84])
+                em, ep = q50 - q16, q84 - q50
+                dec = int(np.clip(1 - np.floor(np.log10(min(em, ep))), 0, 6))
+                ax.set_title(
+                    rf"${PARAM_SYM[i]} = {q50:.{dec}f}^{{+{ep:.{dec}f}}}_{{-{em:.{dec}f}}}$",
+                    fontsize=6.5, pad=3,
+                )
+            else:  # ---- joint (x: param j, y: param i)
+                ax.set_ylim(lo[i], hi[i])
+                ax.set_yticks(_inner_ticks(lo[i], hi[i]))
+                P2 = X[:, [j, i]]
+                m2 = P2.mean(0)
+                Lc = np.linalg.cholesky(np.cov(P2, rowvar=False))
+                U = np.linalg.solve(Lc, (P2 - m2).T).T
+                r = max(4.0, float(np.percentile(np.abs(U), 99.95))) * 1.05
+                H, ex, ey = np.histogram2d(U[:, 0], U[:, 1], bins=bins, range=[[-r, r]] * 2)
+                H = gaussian_filter(H, smooth)
+                cu, cv = 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1])
+                GU, GV = np.meshgrid(cu, cv, indexing="ij")
+                GX = m2[0] + Lc[0, 0] * GU
+                GY = m2[1] + Lc[1, 0] * GU + Lc[1, 1] * GV
+                lev = _hpd_levels(H, masses)  # descending in mass -> ascending in density
+                lev = np.r_[np.sort(lev), H.max() * 1.0001]
+                if np.all(np.diff(lev) > 0):
+                    ax.contourf(GX, GY, H, levels=lev, colors=fills, zorder=1)
+                    ax.contour(GX, GY, H, levels=lev[:-1], colors=C_POST, linewidths=0.45,
+                               zorder=2)
+                else:
+                    ax.plot(P2[:, 0], P2[:, 1], ",", color=C_POST, alpha=0.2, zorder=1)
+                if bm is not None and bc is not None:
+                    C2 = bc[np.ix_([j, i], [j, i])]
+                    for rad in (1.0, 2.0, 3.0):
+                        e = _ellipse_2d(bm[[j, i]], C2, rad)
+                        ax.plot(e[0], e[1], color=C_BATCH, lw=0.7, zorder=3)
+                if tr is not None:
+                    ax.plot(
+                        tr[j], tr[i], ls="none", marker="*", ms=5.5, mfc=C_TRUTH, mec="white",
+                        mew=0.4, zorder=4,
+                    )
+
+            # outer labels only
+            if i == n_par - 1:
+                ax.set_xlabel(param_label(j))
+                ax.tick_params(axis="x", labelrotation=45, labelsize=6.5)
+                for lab in ax.get_xticklabels():
+                    lab.set_ha("right")
+                    lab.set_rotation_mode("anchor")
+            else:
+                ax.set_xticklabels([])
+            if j == 0 and i > 0:
+                ax.set_ylabel(param_label(i))
+                ax.tick_params(axis="y", labelsize=6.5)
+            elif i != j:
+                ax.set_yticklabels([])
+    fig.align_ylabels(axes[:, 0])
+    fig.align_xlabels(axes[-1, :])
+
+    handles = [
+        (Patch(facecolor=fills[2], lw=0), Patch(facecolor=fills[1], lw=0),
+         Patch(facecolor=fills[0], lw=0)),
+        Line2D([], [], color=C_BATCH, lw=0.9),
+        Line2D([], [], ls="none", marker="*", ms=7, mfc=C_TRUTH, mec="white", mew=0.4),
+    ]
+    fig.legend(
+        handles,
+        ["MCMC posterior", "Gauss--Newton batch (linear)", "Truth"],
+        loc="upper right", bbox_to_anchor=(0.97, 0.93), fontsize=8,
+        handler_map={tuple: HandlerTuple(ndivide=None, pad=0.0)}, handlelength=2.6,
+    )
+    fig.text(
+        0.97, 0.93 - 0.085, r"Contours: $1\sigma$, $2\sigma$, $3\sigma$ regions"
+        "\n" r"(39.3, 86.5, 98.9\% of the 2D mass)",
+        ha="right", va="top", fontsize=7, color="0.3",
+    )
+    return save_figure(fig, name)
 
 
 # ============================================================
@@ -988,75 +1480,7 @@ def solve_stage1_gn_with_stm(
         for j, idx_j in enumerate(update_idx):
             cov_full[idx_i, idx_j] = cov_upd[i, j]
 
-    # ----------------------------
-    # Plot postfit (Stage-1 GN)
-    # ----------------------------
-    if verbose:
-        sol_pf, _ = propagator.propagate(
-            x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
-        )
-        x_pf = sol_pf.y[:n, :].T
-
-        los_pf = x_pf[:, :3] - sc_state[:, :3]
-        ra_pf, dec_pf, _, _ = radec_and_partials_from_los(los_pf)
-
-        res_pf = np.empty_like(y_obs)
-        res_pf[0::2] = wrap_to_pi(y_obs[0::2] - ra_pf)
-        res_pf[1::2] = y_obs[1::2] - dec_pf
-
-        postfit = (res_pf / w) * obs_weights
-
-        residuals_matrix = postfit.reshape(-1, 2).T
-        time_hr = np.asarray(tau).ravel() / 3600.0
-
-        mask0 = residuals_matrix[0] != 0.0
-        mask1 = residuals_matrix[1] != 0.0
-
-        r0, t0 = residuals_matrix[0, mask0], time_hr[mask0]
-        r1, t1 = residuals_matrix[1, mask1], time_hr[mask1]
-
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
-
-        ax0.scatter(t0, r0, s=50, alpha=0.85)
-        ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax0.set_ylabel(r"Whitened RA Residual [$\sigma$]")
-        ax0.grid(True, linestyle=":")
-        if r0.size > 0:
-            lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax0.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        ax1.scatter(t1, r1, s=50, alpha=0.85)
-        ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax1.set_ylabel(r"Whitened DEC Residual [$\sigma$]")
-        ax1.set_xlabel("Time since epoch [hours]")
-        ax1.grid(True, linestyle=":")
-        if r1.size > 0:
-            lim = np.max(np.abs(np.quantile(r1, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax1.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        legend_items = [
-            Line2D(
-                [0],
-                [0],
-                color="red",
-                linestyle=":",
-                linewidth=3.2,
-                label=r"$\pm 3\sigma$",
-            ),
-        ]
-        ax0.legend(handles=legend_items, loc="upper right", frameon=True)
-
-        os.makedirs("results", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"results/postfit_residuals_batch_ryugu_{timestamp}.pdf"
-        fig.savefig(fname, format="pdf", bbox_inches="tight")
-        fig.tight_layout()
-        plt.show()
-
+    # (post-fit residuals of this solution are plotted in main, next to the MCMC MAP)
     return x0_ref, delta_total, cov_full
 
 
@@ -1159,11 +1583,6 @@ def solve_stage1_full_nonlinear_lsq(
 # ============================================================
 # POSTERIOR SPLIT (GMM) + STM PROPAGATION TO A GIVEN EPOCH
 # ============================================================
-
-GMM_COLOR = "#2a78d6"  # Gaussian mixture (categorical slot 1)
-GAUSS_COLOR = "#eb6834"  # single Gaussian (categorical slot 2)
-MC_COLOR = "#8c8c8c"  # Monte Carlo samples (neutral)
-
 
 def fit_posterior_gmm(samples, n_components=8, select_bic=False, k_max=12, random_state=0):
     """
@@ -1299,21 +1718,26 @@ def _ellipse_2d(mean2, cov2, radius, n=181):
     return mean2[:, None] + radius * (vecs @ (np.sqrt(np.clip(vals, 0.0, None))[:, None] * circ))
 
 
-def plot_gmm_propagation(panels, prob=0.99, n_draw=20000, seed=0):
+def plot_gmm_propagation(
+    panels, prob=0.99, n_draw=20000, seed=0, name="fig_gmm_stm_propagation"
+):
     """
     2x3 position projections (row 0: epoch, row 1: target). Each panel dict holds (km):
       mc (M,3), w (K,), mu (K,3), P (K,3,3), mu1 (3,), P1 (3,3), truth (3,), center (3,), title.
-    Drawn in meters relative to `center`: the MC cloud, every GMM component's ellipse, the
-    GMM highest-density region holding `prob` of the mass (level from mixture draws), the
-    single-Gaussian ellipse with the same mass, and the truth.
+    Drawn in meters relative to `center` (the MC mean): the MC cloud, every GMM component's
+    ellipse, the GMM highest-density region holding `prob` of the mass (level from mixture
+    draws), the single-Gaussian ellipse with the same mass, and the truth.
     """
     r_ell = np.sqrt(chi2.ppf(prob, 2))
     pct = f"{100 * prob:g}\\%"
     pairs = [(0, 1), (0, 2), (1, 2)]
-    names = [r"$\delta x$ [m]", r"$\delta y$ [m]", r"$\delta z$ [m]"]
+    names = [r"$\Delta x$ [m]", r"$\Delta y$ [m]", r"$\Delta z$ [m]"]
     rng = np.random.default_rng(seed)
 
-    fig, axes = plt.subplots(2, 3, figsize=(14.0, 8.6))
+    fig = plt.figure(figsize=(TXT_W, 4.9), layout="constrained")
+    fig.get_layout_engine().set(h_pad=0.03, hspace=0.04, wspace=0.04)
+    sub = fig.subfigures(len(panels), 1)
+    axes = np.array([sf.subplots(1, 3) for sf in np.atleast_1d(sub)])
     for row, pnl in enumerate(panels):
         c = np.asarray(pnl["center"], dtype=float)
         mc = (pnl["mc"] - c) * 1e3
@@ -1347,86 +1771,81 @@ def plot_gmm_propagation(panels, prob=0.99, n_draw=20000, seed=0):
             lo, hi = lo - pad, hi + pad
 
             ax.scatter(
-                mc[:, i], mc[:, j], s=5, color=MC_COLOR, alpha=0.45, lw=0,
-                rasterized=True, zorder=1,
+                mc[:, i], mc[:, j], s=2.5, color=C_MC, alpha=0.7, lw=0, rasterized=True,
+                zorder=1,
             )
             for k in range(len(w)):
                 e = _ellipse_2d(mu2[k], P2[k], r_ell)
-                ax.plot(e[0], e[1], color=GMM_COLOR, lw=0.8, alpha=0.5, zorder=2)
+                ax.plot(e[0], e[1], color=C_POST, lw=0.45, alpha=0.55, zorder=2)
 
-            gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 220), np.linspace(lo[1], hi[1], 220))
+            gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 240), np.linspace(lo[1], hi[1], 240))
             grid = np.column_stack([gx.ravel(), gy.ravel()])
             dens = np.exp(gmm_logpdf(grid, w, mu2, P2)).reshape(gx.shape)
             level = np.quantile(np.exp(gmm_logpdf(draws[:, ix], w, mu2, P2)), 1.0 - prob)
-            ax.contour(gx, gy, dens, levels=[level], colors=GMM_COLOR, linewidths=2.0, zorder=3)
+            ax.contour(gx, gy, dens, levels=[level], colors=C_POST, linewidths=1.3, zorder=3)
 
-            ax.plot(e1[0], e1[1], color=GAUSS_COLOR, lw=2.0, ls="--", zorder=4)
+            ax.plot(e1[0], e1[1], color=C_BATCH, lw=1.1, ls="--", zorder=4)
             ax.plot(
-                tr[i], tr[j], ls="none", marker="*", ms=13, color="k",
-                mec="white", mew=0.8, zorder=5,
+                tr[i], tr[j], ls="none", marker="*", ms=7.5, mfc=C_TRUTH, mec="white",
+                mew=0.5, zorder=5,
             )
             ax.set_xlim(lo[0], hi[0])
             ax.set_ylim(lo[1], hi[1])
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(5))
+            ax.yaxis.set_major_locator(mticker.MaxNLocator(5))
             ax.set_xlabel(names[i])
             ax.set_ylabel(names[j])
-        axes[row, 0].set_title(pnl["title"], loc="left")
+            ax.set_title(f"({'abcdef'[3 * row + col]})", loc="left")
+        np.atleast_1d(sub)[row].suptitle(pnl["title"], fontsize=8)
 
     handles = [
-        Line2D([], [], ls="none", marker="o", ms=5, color=MC_COLOR, label="Monte Carlo (nonlinear)"),
-        Line2D([], [], color=GMM_COLOR, lw=0.8, alpha=0.6, label=f"GMM components ({pct})"),
-        Line2D([], [], color=GMM_COLOR, lw=2.0, label=f"GMM + STMs ({pct} region)"),
-        Line2D([], [], color=GAUSS_COLOR, lw=2.0, ls="--", label=f"Single Gaussian + STM ({pct})"),
-        Line2D([], [], ls="none", marker="*", ms=12, color="k", label="Truth"),
+        Line2D([], [], ls="none", marker="o", ms=3, color=C_MC, label="Monte Carlo (nonlinear)"),
+        Line2D([], [], color=C_POST, lw=0.45, alpha=0.7, label=f"GMM components ({pct})"),
+        Line2D([], [], color=C_POST, lw=1.3, label=f"GMM + STMs ({pct} HDR)"),
+        Line2D([], [], color=C_BATCH, lw=1.1, ls="--", label=f"Single Gaussian + STM ({pct})"),
+        Line2D([], [], ls="none", marker="*", ms=7.5, mfc=C_TRUTH, mec="white", mew=0.5,
+               label="Truth"),
     ]
-    fig.legend(handles=handles, loc="upper center", ncol=5, frameon=False, bbox_to_anchor=(0.5, 1.0))
-    fig.tight_layout(rect=(0, 0, 1, 0.95))
-
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"results/gmm_stm_propagation_ryugu_{timestamp}.pdf"
-    fig.savefig(fname, format="pdf", bbox_inches="tight")
-    print(f"Saved: {fname}")
-    plt.show()
+    fig.legend(handles=handles, loc="outside upper center", ncol=5, columnspacing=1.0)
+    return save_figure(fig, name)
 
 
-def plot_prediction_history(t_hr, hist, t_obs_end_hr):
+def plot_prediction_history(t_hr, hist, t_obs_end_hr, name="fig_gmm_prediction_history"):
     """Position uncertainty and MC log-density (GMM vs single Gaussian) vs time."""
-    fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9.0, 6.6), sharex=True)
+    fig, (ax0, ax1) = plt.subplots(
+        2, 1, figsize=(COL_W, 3.3), sharex=True, layout="constrained",
+        gridspec_kw=dict(height_ratios=(1.35, 1.0)),
+    )
     for ax in (ax0, ax1):
-        ax.axvspan(t_hr[0], t_obs_end_hr, color="0.93", lw=0, zorder=0)
+        ax.axvspan(t_hr[0], t_obs_end_hr, color=C_SPAN, lw=0, zorder=0)
+        ax.set_xlim(t_hr[0], t_hr[-1])
     ax0.text(
-        0.5 * (t_hr[0] + t_obs_end_hr), 0.97, "observation arc", color="0.35",
+        0.5 * (t_hr[0] + t_obs_end_hr), 0.96, "observation arc", color="0.3", fontsize=7,
         ha="center", va="top", transform=ax0.get_xaxis_transform(),
     )
 
-    ax0.plot(t_hr, hist["sig_mc"] * 1e3, color="0.25", lw=2.0, label="Monte Carlo (nonlinear)")
-    ax0.plot(t_hr, hist["sig_gmm"] * 1e3, color=GMM_COLOR, lw=2.0, label="GMM + STMs")
-    ax0.plot(
-        t_hr, hist["sig_1"] * 1e3, color=GAUSS_COLOR, lw=2.0, ls="--",
-        label="Single Gaussian + STM",
-    )
-    ax0.set_ylabel(r"$\sqrt{\mathrm{tr}\,P_{rr}}$ [m]")
+    ax0.plot(t_hr, hist["sig_mc"] * 1e3, color="0.78", lw=3.2, solid_capstyle="round",
+             label="Monte Carlo", zorder=2)
+    ax0.plot(t_hr, hist["sig_gmm"] * 1e3, color=C_POST, lw=1.2, label="GMM + STMs", zorder=3)
+    ax0.plot(t_hr, hist["sig_1"] * 1e3, color=C_BATCH, lw=1.2, ls="--",
+             label="Single Gaussian + STM", zorder=4)
+    ax0.set_ylabel(r"$\sqrt{\mathrm{tr}\,\bm{P}_{rr}}$ [m]")
     ax0.set_yscale("log")
     ax0.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
     ax0.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
     ax0.yaxis.set_minor_formatter(mticker.NullFormatter())
+    ax0.set_title("(a) Position uncertainty", loc="left")
 
-    ax1.axhline(0.0, color="0.5", lw=0.8)
-    ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=GMM_COLOR, lw=2.0)
-    ax1.set_ylabel(r"$\overline{\log p}_{\mathrm{GMM}} - \overline{\log p}_{\mathcal{N}}$ [nats]")
-    ax1.set_xlabel("Time since epoch [hr]")
-    ax1.set_title(r"Mean log-density of the MC positions ($>0$: mixture fits better)", loc="left")
+    ax1.axhline(0.0, color="0.45", lw=0.6)
+    ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=C_POST, lw=1.2)
+    ax1.set_ylabel(r"$\Delta\,\overline{\log p}$ [nats]")
+    ax1.set_xlabel("Time since epoch [h]")
+    ax1.set_title(
+        r"(b) Mean log-density of MC positions, GMM $-$ single", loc="left"
+    )
 
-    handles, labels = ax0.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.0))
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"results/gmm_prediction_history_ryugu_{timestamp}.pdf"
-    fig.savefig(fname, format="pdf", bbox_inches="tight")
-    print(f"Saved: {fname}")
-    plt.show()
+    fig.legend(loc="outside upper center", ncol=3, columnspacing=0.8, handlelength=1.5)
+    return save_figure(fig, name)
 
 
 # ============================================================
@@ -1523,6 +1942,13 @@ if __name__ == "__main__":
     n_mc_prop = 300  # posterior samples propagated nonlinearly (Monte Carlo check)
     n_t_prop = 46  # output epochs on [epoch, target]
     gmm_prob = 0.99  # probability mass of the plotted regions
+
+    # Figures: one PDF per figure in a timestamped folder (SHOW_FIGS at the top of the file)
+    fig_dir = set_figure_dir(
+        Path(__file__).resolve().parent / "results"
+        / f"ryugu_poly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Figures] -> {fig_dir}")
 
     # --------------------------
     # Load SPICE (ET) + time grid
@@ -1716,6 +2142,33 @@ if __name__ == "__main__":
     print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
+    # Figures: observation geometry (truth only)
+    # --------------------------
+    sc_dense = propagator_sc.propagate_state_only(
+        x0_sc, tau_dense, show_progress=False, rtol=1e-10, atol=1e-13, method="LSODA"
+    ).y[:6].T
+    pt_dense = sol_dense.y[:3].T
+
+    plot_scene_body_fixed(
+        ryugu_mesh,
+        tau_obs=tau_full,
+        sc_obs=sc_state_full,
+        vis_mask=vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
+        w0=w0_true,
+        detach_bf=pos_detach_bf,
+    )
+    plot_observation_geometry(
+        tau_full, sc_state_full, x_true_full, vis_mask,
+        tau_line=tau_dense, sc_line=sc_dense, pt_line=pt_dense,
+    )
+
+    # --------------------------
     # Generate noisy RA/DEC measurements
     # --------------------------
     rng_meas = np.random.default_rng(123)
@@ -1882,60 +2335,31 @@ if __name__ == "__main__":
     print("\n[Truth] true_delta about ref1:\n", true_delta)
 
     # --------------------------
-    # Diagnostics
+    # Diagnostics + figures
     # --------------------------
-    model.plot_convergence()
-    model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
     model.summary()
     model.print_regression_diagnostics()
-    model.plot_autocorrelation()
-    model.plot_log_likelihood()
 
-    # --------------------------
-    # Plot scene (using MCMC estimate)
-    # --------------------------
-    _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, theta_hat)
-
-    plot_ryugu_scene_body_fixed(
-        ryugu_mesh=ryugu_mesh,
-        sc_state_full=sc_state_full,
-        x_true_full=x_true_full,
-        x_map=x_map,
-        tau_full=tau_full,
-        tau_map=tau,
-        alpha=alpha_true,
-        delta=delta_true,
-        omega=omega_true,
-        vis_mask=vis_mask,
-        downsample=1,
+    # Post-fit residuals: GN batch (delta = 0 about ref1) vs MCMC MAP
+    plot_postfit_residuals(
+        tau,
+        residuals_normalized(np.zeros(N_STATE)),
+        residuals_normalized(theta_hat),
+        vis_mask,
     )
+    plot_mcmc_traces(
+        model, burn_in, true_theta=true_delta, batch_theta=np.zeros(N_STATE)
+    )
+    plot_mcmc_autocorrelation(model, burn_in, thin)
 
-    # --------------------------
-    # Plot visibility mask
-    # --------------------------
-    t_hr = tau_full / 3600.0
-    plt.figure(figsize=(10, 2.6))
-    plt.plot(t_hr, vis_mask.astype(int), "o-")
-    plt.ylim(-0.1, 1.1)
-    plt.yticks([0, 1], ["occulted", "visible"])
-    plt.xlabel("Time since start [hr]")
-    plt.title("Occultation / Visibility Mask (shape model)")
-    plt.grid(True, linestyle=":")
-    plt.tight_layout()
-    plt.show()
-
-    # --------------------------
-    # Corner plot
-    # (x_0..x_6 = dx0, dy0, dz0, dvx0, dvy0, dvz0, deta)
-    # --------------------------
+    # Corner plot (deltas about ref1: dx0, dy0, dz0, dvx0, dvy0, dvz0, deta)
     try:
-        model.plot_corner_with_batch(
+        plot_corner(
+            model.samples,
+            true_theta=true_delta,
             batch_mean=np.zeros(N_STATE),
             batch_cov=cov1,
-            use_median_as_truth=False,
-            true_theta=true_delta,
         )
-
     except Exception as e:
         print("\n[Corner] Skipped.", e)
 
