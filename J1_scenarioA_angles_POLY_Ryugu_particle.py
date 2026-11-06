@@ -387,7 +387,9 @@ class RyuguPolyhedralDynamics:
         self.delta = float(delta)
         self.omega = float(omega)
         self.w0 = float(w0)
-        self.sun_pos_spline = sun_pos_spline  # tau -> Sun position wrt Ryugu [km], J2000
+        self.sun_pos_spline = (
+            sun_pos_spline  # tau -> Sun position wrt Ryugu [km], J2000
+        )
         self.mu_sun = float(mu_sun)
         self.srp_k_1au = float(srp_k_1au)  # Cr * (A/m) * P_1AU [km/s^2] at 1 AU
         self.parallel = bool(parallel)
@@ -405,7 +407,10 @@ class RyuguPolyhedralDynamics:
         if self._evaluable is not None:
             return
         tri = self.vertices_km[self.faces]
-        volume = np.sum(np.einsum("ij,ij->i", tri[:, 0], np.cross(tri[:, 1], tri[:, 2]))) / 6.0
+        volume = (
+            np.sum(np.einsum("ij,ij->i", tri[:, 0], np.cross(tri[:, 1], tri[:, 2])))
+            / 6.0
+        )
         if volume <= 0:
             raise ValueError("Mesh volume <= 0: faces must be oriented outward.")
         rho_km = self.density * 1e9  # [kg/m^3] -> [kg/km^3]
@@ -527,7 +532,9 @@ def check_A_against_fd(dyn, x, t, rel_step=1e-6):
         xp[j] += h
         xm[j] -= h
         A_fd[:, j] = (dyn.f_func(*xp, t) - dyn.f_func(*xm, t)) / (2 * h)
-    err = np.linalg.norm(A - A_fd, axis=0) / np.maximum(np.linalg.norm(A_fd, axis=0), 1e-300)
+    err = np.linalg.norm(A - A_fd, axis=0) / np.maximum(
+        np.linalg.norm(A_fd, axis=0), 1e-300
+    )
     return err
 
 
@@ -642,11 +649,16 @@ def load_kernels(kernel_root: Path):
     return kernels
 
 
-def build_sun_spline(et0, tau_end, body_id, frame="J2000", abcorr="NONE", dt=60.0, pad=1800.0):
+def build_sun_spline(
+    et0, tau_end, body_id, frame="J2000", abcorr="NONE", dt=60.0, pad=1800.0
+):
     """Cubic spline tau -> Sun position wrt the body [km] (so the dynamics need no SPICE)."""
     tau_grid = np.arange(-pad, tau_end + pad + dt, dt)
     r_sun = np.array(
-        [spice.spkpos("SUN", float(et0 + tg), frame, abcorr, body_id)[0] for tg in tau_grid]
+        [
+            spice.spkpos("SUN", float(et0 + tg), frame, abcorr, body_id)[0]
+            for tg in tau_grid
+        ]
     )
     return CubicSpline(tau_grid, r_sun, axis=0)
 
@@ -695,7 +707,9 @@ def _write_bytes_retry(fname, data, tries=6, wait=2.0):
             os.replace(tmp, fname)
             return True
         except OSError as err:
-            print(f"[Figure] write of {fname.name} failed ({err}); retry {k + 1}/{tries}")
+            print(
+                f"[Figure] write of {fname.name} failed ({err}); retry {k + 1}/{tries}"
+            )
             time.sleep(wait * 2**k)
     return False
 
@@ -716,7 +730,13 @@ def save_figure(fig, name):
         print(f"[Figure] WARNING: could not write to {_FIG_DIR}; saved locally instead")
     print(f"[Figure] saved {fname}")
     interactive = plt.get_backend().lower() not in {
-        "agg", "pdf", "svg", "ps", "cairo", "pgf", "template"
+        "agg",
+        "pdf",
+        "svg",
+        "ps",
+        "cairo",
+        "pgf",
+        "template",
     }
     if SHOW_FIGS and interactive:
         plt.show()
@@ -763,9 +783,15 @@ def shade_occulted(ax, t, vis, text=None, text_y=0.97):
         a, b = spans[0]
         lo, hi = ax.get_xlim()
         ax.text(
-            0.5 * (max(a, lo) + min(b, hi)), text_y, text, color="0.3", fontsize=7,
-            ha="center", va="top" if text_y > 0.5 else "bottom",
-            transform=ax.get_xaxis_transform(), zorder=5,
+            0.5 * (max(a, lo) + min(b, hi)),
+            text_y,
+            text,
+            color="0.3",
+            fontsize=7,
+            ha="center",
+            va="top" if text_y > 0.5 else "bottom",
+            transform=ax.get_xaxis_transform(),
+            zorder=5,
         )
     return spans
 
@@ -808,8 +834,11 @@ def _to_body(pos_i, tau, alpha, delta, omega, w0=0.0):
     """Rotate inertial positions (N,3) at times tau into the body-fixed frame."""
     return np.array(
         [
-            np.asarray(make_ryugu_rotation_matrix(alpha, delta, omega, float(t), w0)) @ p
-            for p, t in zip(np.asarray(pos_i, dtype=float), np.asarray(tau, dtype=float))
+            np.asarray(make_ryugu_rotation_matrix(alpha, delta, omega, float(t), w0))
+            @ p
+            for p, t in zip(
+                np.asarray(pos_i, dtype=float), np.asarray(tau, dtype=float)
+            )
         ]
     )
 
@@ -866,14 +895,31 @@ def plot_scene_body_fixed(
     used = vis & ~obs_hidden
     occl = ~vis & ~obs_hidden
     ax.plot(
-        *obs_b[used].T, ls="none", marker="o", ms=2.8, mfc=C_SC, mec="white", mew=0.35,
+        *obs_b[used].T,
+        ls="none",
+        marker="o",
+        ms=2.8,
+        mfc=C_SC,
+        mec="white",
+        mew=0.35,
         zorder=4,
     )
-    ax.plot(*obs_b[occl].T, ls="none", marker="x", ms=3.2, color=C_OCC, mew=0.9, zorder=4)
-    if detach_bf is not None and not _hidden_by_mesh(ryugu_mesh, detach_bf[None], view)[0]:
+    ax.plot(
+        *obs_b[occl].T, ls="none", marker="x", ms=3.2, color=C_OCC, mew=0.9, zorder=4
+    )
+    if (
+        detach_bf is not None
+        and not _hidden_by_mesh(ryugu_mesh, detach_bf[None], view)[0]
+    ):
         ax.plot(
-            *np.asarray(detach_bf)[:, None], ls="none", marker="*", ms=7.5, mfc=C_TRUTH,
-            mec="white", mew=0.5, zorder=5,
+            *np.asarray(detach_bf)[:, None],
+            ls="none",
+            marker="*",
+            ms=7.5,
+            mfc=C_TRUTH,
+            mec="white",
+            mew=0.5,
+            zorder=5,
         )
 
     # Equal-aspect cube around everything drawn
@@ -887,7 +933,11 @@ def plot_scene_body_fixed(
 
     for a, lab in zip(
         (ax.xaxis, ax.yaxis, ax.zaxis),
-        (r"$X_{\mathscr{B}}$ [km]", r"$Y_{\mathscr{B}}$ [km]", r"$Z_{\mathscr{B}}$ [km]"),
+        (
+            r"$X_{\mathscr{B}}$ [km]",
+            r"$Y_{\mathscr{B}}$ [km]",
+            r"$Z_{\mathscr{B}}$ [km]",
+        ),
     ):
         a.set_pane_color((1.0, 1.0, 1.0, 0.0))
         a.line.set_color("0.4")
@@ -901,20 +951,50 @@ def plot_scene_body_fixed(
 
     handles = [
         Line2D([], [], color=C_SC, lw=1.1, label="Spacecraft"),
-        Line2D([], [], color=C_TRUTH, lw=1.1, label="Particle (truth)"),
-        Line2D([], [], ls="none", marker="o", ms=3.5, mfc=C_SC, mec="white", mew=0.35,
-               label="Image used"),
-        Line2D([], [], ls="none", marker="x", ms=3.8, color=C_OCC, mew=0.9,
-               label="Image occulted"),
+        Line2D([], [], color=C_TRUTH, lw=1.1, label="Particle (Truth)"),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="o",
+            ms=3.5,
+            mfc=C_SC,
+            mec="white",
+            mew=0.35,
+            label="Image Used",
+        ),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="x",
+            ms=3.8,
+            color=C_OCC,
+            mew=0.9,
+            label="Image Occulted",
+        ),
     ]
     if detach_bf is not None:
         handles.append(
-            Line2D([], [], ls="none", marker="*", ms=7, mfc=C_TRUTH, mec="white", mew=0.5,
-                   label="Ejection site")
+            Line2D(
+                [],
+                [],
+                ls="none",
+                marker="*",
+                ms=7,
+                mfc=C_TRUTH,
+                mec="white",
+                mew=0.5,
+                label="Ejection Site",
+            )
         )
     fig.legend(
-        handles=handles, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 0.955),
-        columnspacing=1.0, handletextpad=0.4,
+        handles=handles,
+        loc="upper center",
+        ncol=3,
+        bbox_to_anchor=(0.5, 0.955),
+        columnspacing=1.0,
+        handletextpad=0.4,
     )
     return save_figure(fig, name)
 
@@ -925,7 +1005,13 @@ def plot_scene_body_fixed(
 
 
 def plot_observation_geometry(
-    tau_obs, sc_obs, pt_obs, vis_mask, tau_line=None, sc_line=None, pt_line=None,
+    tau_obs,
+    sc_obs,
+    pt_obs,
+    vis_mask,
+    tau_line=None,
+    sc_line=None,
+    pt_line=None,
     name="fig_observation_geometry",
 ):
     """S/C-particle range over the arc; image epochs marked used / occulted (shaded)."""
@@ -935,30 +1021,59 @@ def plot_observation_geometry(
 
     fig, ax = plt.subplots(figsize=(COL_W, 1.95), layout="constrained")
     ax.set_xlim(t[0], t[-1])
-    shade_occulted(ax, t, vis, text="occulted\nby Ryugu", text_y=0.04)
+    shade_occulted(ax, t, vis, text="Occulted\nby Ryugu", text_y=0.04)
     if tau_line is not None:
-        rho_l = np.linalg.norm(np.asarray(pt_line)[:, :3] - np.asarray(sc_line)[:, :3], axis=1)
+        rho_l = np.linalg.norm(
+            np.asarray(pt_line)[:, :3] - np.asarray(sc_line)[:, :3], axis=1
+        )
         ax.plot(np.asarray(tau_line) / 3600.0, rho_l, color="0.25", lw=0.9, zorder=2)
     ax.plot(
-        t[vis], rho[vis], ls="none", marker="o", ms=3.4, mfc=C_SC, mec="white", mew=0.4,
+        t[vis],
+        rho[vis],
+        ls="none",
+        marker="o",
+        ms=3.4,
+        mfc=C_SC,
+        mec="white",
+        mew=0.4,
         zorder=3,
     )
-    ax.plot(t[~vis], rho[~vis], ls="none", marker="x", ms=3.6, color=C_OCC, mew=1.0, zorder=3)
-    ax.set_xlabel("Time since epoch [h]")
-    ax.set_ylabel(r"S/C--particle range [km]")
+    ax.plot(
+        t[~vis],
+        rho[~vis],
+        ls="none",
+        marker="x",
+        ms=3.6,
+        color=C_OCC,
+        mew=1.0,
+        zorder=3,
+    )
+    ax.set_xlabel("Time since Epoch [h]")
+    ax.set_ylabel(r"S/C--Particle Range [km]")
     ax.set_ylim(bottom=0.0)
     ax.yaxis.set_major_locator(mticker.MaxNLocator(5))
 
     handles = [
-        Line2D([], [], color="0.25", lw=0.9, label="Range (truth)"),
-        Line2D([], [], ls="none", marker="o", ms=3.4, mfc=C_SC, mec="white", mew=0.4,
-               label=f"Image used ({int(vis.sum())})"),
+        Line2D([], [], color="0.25", lw=0.9, label="Range (Truth)"),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="o",
+            ms=3.4,
+            mfc=C_SC,
+            mec="white",
+            mew=0.4,
+            label=f"Image Used ({int(vis.sum())})",
+        ),
         (
             Patch(facecolor=OCC_FILL, lw=0),
             Line2D([], [], ls="none", marker="x", ms=3.6, color=C_OCC, mew=1.0),
         ),
     ]
-    labels = [h.get_label() for h in handles[:2]] + [f"Image occulted ({int((~vis).sum())})"]
+    labels = [h.get_label() for h in handles[:2]] + [
+        f"Image Occulted ({int((~vis).sum())})"
+    ]
     ax.legend(handles, labels, loc="lower right", ncol=1)
     return save_figure(fig, name)
 
@@ -975,35 +1090,64 @@ def plot_postfit_residuals(
     rb = np.asarray(res_batch).reshape(-1, 2)
     rm = np.asarray(res_mcmc).reshape(-1, 2)
 
-    fig, axes = plt.subplots(2, 1, figsize=(COL_W, 2.9), sharex=True, layout="constrained")
-    lim = max(3.6, 1.15 * float(np.max(np.abs(np.r_[rb[vis].ravel(), rm[vis].ravel()]))))
+    fig, axes = plt.subplots(
+        2, 1, figsize=(COL_W, 2.9), sharex=True, layout="constrained"
+    )
+    lim = max(
+        3.6, 1.15 * float(np.max(np.abs(np.r_[rb[vis].ravel(), rm[vis].ravel()])))
+    )
     for k, (ax, comp) in enumerate(zip(axes, ("RA", "Dec"))):
         ax.set_xlim(t[0], t[-1])
         ax.set_ylim(-lim, lim)
         ax.axhspan(-3.0, 3.0, color="0.95", lw=0, zorder=0)
         ax.axhspan(-1.0, 1.0, color="0.89", lw=0, zorder=0)
         ax.axhline(0.0, color="0.45", lw=0.6, zorder=1)
-        shade_occulted(ax, t, vis, text="occulted" if k == 0 else None)
+        shade_occulted(ax, t, vis, text="Occulted" if k == 0 else None)
         ax.plot(
-            t[vis], rb[vis, k], ls="none", marker="o", ms=4.2, mfc="none", mec=C_BATCH,
-            mew=0.8, zorder=3,
+            t[vis],
+            rb[vis, k],
+            ls="none",
+            marker="o",
+            ms=4.2,
+            mfc="none",
+            mec=C_BATCH,
+            mew=0.8,
+            zorder=3,
         )
-        ax.plot(t[vis], rm[vis, k], ls="none", marker="o", ms=1.9, color=C_POST, zorder=4)
+        ax.plot(
+            t[vis], rm[vis, k], ls="none", marker="o", ms=1.9, color=C_POST, zorder=4
+        )
         ax.set_yticks([-3, -1, 0, 1, 3])
         ax.yaxis.grid(False)
-        ax.set_ylabel(rf"{comp} residual [$\sigma$]")
+        ax.set_ylabel(rf"{comp} Residual [$\sigma$]")
         rms_b = np.sqrt(np.mean(rb[vis, k] ** 2))
         rms_m = np.sqrt(np.mean(rm[vis, k] ** 2))
         ax.text(
-            0.99, 0.04, rf"RMS: batch {rms_b:.2f}, MCMC {rms_m:.2f}", transform=ax.transAxes,
-            ha="right", va="bottom", fontsize=7, color="0.2", zorder=5,
+            0.99,
+            0.04,
+            rf"RMS: batch {rms_b:.2f}, MCMC {rms_m:.2f}",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color="0.2",
+            zorder=5,
             bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.85),
         )
-    axes[1].set_xlabel("Time since epoch [h]")
+    axes[1].set_xlabel("Time since Epoch [h]")
 
     handles = [
-        Line2D([], [], ls="none", marker="o", ms=4.2, mfc="none", mec=C_BATCH, mew=0.8,
-               label="Gauss--Newton batch"),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="o",
+            ms=4.2,
+            mfc="none",
+            mec=C_BATCH,
+            mew=0.8,
+            label="Gauss--Newton batch",
+        ),
         Line2D([], [], ls="none", marker="o", ms=2.4, color=C_POST, label="MCMC MAP"),
         Patch(facecolor="0.89", label=r"$\pm1\sigma$"),
         Patch(facecolor="0.95", label=r"$\pm3\sigma$"),
@@ -1026,8 +1170,14 @@ def _chain_physical(model, discard=0, thin=1):
 
 
 def plot_mcmc_traces(
-    model, burn_in, true_theta=None, batch_theta=None, n_walkers_show=24, max_points=1500,
-    seed=0, name="fig_mcmc_traces",
+    model,
+    burn_in,
+    true_theta=None,
+    batch_theta=None,
+    n_walkers_show=24,
+    max_points=1500,
+    seed=0,
+    name="fig_mcmc_traces",
 ):
     """
     Walker traces of every parameter and of the log-posterior over the full run: a random
@@ -1047,13 +1197,25 @@ def plot_mcmc_traces(
 
     n_rows = int(np.ceil((n_par + 1) / 2))
     fig, axes = plt.subplots(
-        n_rows, 2, figsize=(TXT_W, 1.18 * n_rows + 0.45), sharex=True, layout="constrained"
+        n_rows,
+        2,
+        figsize=(TXT_W, 1.18 * n_rows + 0.45),
+        sharex=True,
+        layout="constrained",
     )
     axes = axes.ravel()
 
     def _panel(ax, y, ylabel, ref_true=None, ref_batch=None):
         ax.axvspan(0, burn_in, color=C_SPAN, lw=0, zorder=0)
-        ax.plot(steps, y[:, pick], color="0.7", lw=0.25, alpha=0.5, zorder=1, rasterized=True)
+        ax.plot(
+            steps,
+            y[:, pick],
+            color="0.7",
+            lw=0.25,
+            alpha=0.5,
+            zorder=1,
+            rasterized=True,
+        )
         q16, q50, q84 = np.percentile(y, [16, 50, 84], axis=1)
         ax.fill_between(steps, q16, q84, color=C_POST, alpha=0.25, lw=0, zorder=2)
         ax.plot(steps, q50, color=C_POST, lw=0.9, zorder=3)
@@ -1068,37 +1230,47 @@ def plot_mcmc_traces(
         pad = 0.35 * (hi - lo)
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_ylabel(ylabel)
+        ax.set_xlabel("Step [-]")
         ax.yaxis.set_major_locator(mticker.MaxNLocator(4))
 
     for i in range(n_par):
         _panel(
-            axes[i], ch[:, :, i], param_label(i),
+            axes[i],
+            ch[:, :, i],
+            param_label(i),
             None if true_theta is None else true_theta[i] * PARAM_SCALE[i],
             None if batch_theta is None else batch_theta[i] * PARAM_SCALE[i],
         )
     _panel(axes[n_par], lp, r"$\log p(\bm{\theta}\,|\,\bm{y})$")
-    for ax in axes[n_par + 1:]:
+    for ax in axes[n_par + 1 :]:
         ax.set_visible(False)
 
-    for ax in axes[n_par - 1: n_par + 1]:
-        ax.set_xlabel("Step")
+    for ax in axes[n_par - 1 : n_par + 1]:
+        ax.set_xlabel("Step [-]")
         ax.xaxis.set_tick_params(labelbottom=True)
     for ax in axes:
         ax.set_xlim(0, n_steps)
         ax.xaxis.set_major_locator(mticker.MaxNLocator(5, integer=True))
 
     handles = [
-        Line2D([], [], color="0.7", lw=0.8, label=f"Walkers ({len(pick)} of {ch.shape[1]})"),
+        Line2D(
+            [], [], color="0.7", lw=0.8, label=f"Walkers ({len(pick)} of {ch.shape[1]})"
+        ),
         (
             Patch(facecolor=C_POST, alpha=0.25, lw=0),
             Line2D([], [], color=C_POST, lw=0.9),
         ),
-        Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label="Gauss--Newton batch"),
+        Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label="Batch Least Squares"),
         Line2D([], [], color=C_TRUTH, lw=0.8, label="Truth"),
         Patch(facecolor=C_SPAN, lw=0, label="Burn-in"),
     ]
-    labels = [handles[0].get_label(), "Ensemble median, 16--84\\%", handles[2].get_label(),
-              handles[3].get_label(), handles[4].get_label()]
+    labels = [
+        handles[0].get_label(),
+        "Ensemble median, 16--84\\%",
+        handles[2].get_label(),
+        handles[3].get_label(),
+        handles[4].get_label(),
+    ]
     fig.legend(handles, labels, loc="outside upper center", ncol=5)
     return save_figure(fig, name)
 
@@ -1115,32 +1287,49 @@ def plot_mcmc_autocorrelation(model, burn_in, thin, name="fig_mcmc_autocorrelati
     tau = np.atleast_1d(emcee.autocorr.integrated_time(ch, tol=0))
     acf = np.array(
         [
-            np.mean([emcee.autocorr.function_1d(ch[:, k, i]) for k in range(n_w)], axis=0)
+            np.mean(
+                [emcee.autocorr.function_1d(ch[:, k, i]) for k in range(n_w)], axis=0
+            )
             for i in range(n_par)
         ]
     )
     max_lag = int(min(n - 1, max(6.0 * np.max(tau), 2.5 * thin)))
     lag = np.arange(max_lag + 1)
 
-    styles = [(C_XYZ[i % 3], "-" if i < 3 else "--") for i in range(6)] + [("0.2", "-.")]
+    styles = [(C_XYZ[i % 3], "-" if i < 3 else "--") for i in range(6)] + [
+        ("0.2", "-.")
+    ]
     fig, ax = plt.subplots(figsize=(COL_W, 2.35), layout="constrained")
     ax.axhline(0.0, color="0.45", lw=0.6)
     for i in range(n_par):
         c, ls = styles[i] if i < len(styles) else ("0.5", ":")
         ax.plot(
-            lag, acf[i, : max_lag + 1], color=c, ls=ls, lw=1.1,
+            lag,
+            acf[i, : max_lag + 1],
+            color=c,
+            ls=ls,
+            lw=1.1,
             label=rf"{param_label(i, unit=False)}: $\hat\tau = {tau[i]:.0f}$",
         )
     ax.axvline(thin, color="0.3", lw=0.7, ls=":")
     ax.text(
-        thin, 0.55, " thinning", rotation=90, ha="right", va="bottom", fontsize=7,
-        color="0.3", transform=ax.get_xaxis_transform(),
+        thin,
+        0.55,
+        " Thinning",
+        rotation=90,
+        ha="right",
+        va="bottom",
+        fontsize=7,
+        color="0.3",
+        transform=ax.get_xaxis_transform(),
     )
     ax.set_xlim(0, max_lag)
     ax.set_ylim(-0.2, 1.02)
-    ax.set_xlabel("Lag [steps]")
-    ax.set_ylabel("Autocorrelation")
-    ax.legend(loc="upper right", ncol=2, fontsize=6.5, columnspacing=0.8, handlelength=2.2)
+    ax.set_xlabel("Lag [Steps]")
+    ax.set_ylabel("Autocorrelation [-]")
+    ax.legend(
+        loc="upper right", ncol=2, fontsize=6.5, columnspacing=0.8, handlelength=2.2
+    )
     return save_figure(fig, name)
 
 
@@ -1167,7 +1356,12 @@ def _hpd_levels(H, masses):
 
 
 def plot_corner(
-    samples, true_theta=None, batch_mean=None, batch_cov=None, bins=40, smooth=1.1,
+    samples,
+    true_theta=None,
+    batch_mean=None,
+    batch_cov=None,
+    bins=40,
+    smooth=1.1,
     name="fig_corner",
 ):
     """
@@ -1201,8 +1395,9 @@ def plot_corner(
     lo, hi = lo - pad, hi + pad
 
     fig, axes = plt.subplots(n_par, n_par, figsize=(TXT_W, TXT_W))
-    fig.subplots_adjust(left=0.085, right=0.99, bottom=0.075, top=0.965, wspace=0.07,
-                        hspace=0.07)
+    fig.subplots_adjust(
+        left=0.085, right=0.99, bottom=0.075, top=0.965, wspace=0.07, hspace=0.07
+    )
 
     for i in range(n_par):
         for j in range(n_par):
@@ -1216,12 +1411,23 @@ def plot_corner(
 
             if i == j:  # ---- marginal
                 ax.hist(
-                    X[:, i], bins=bins, range=(lo[i], hi[i]), density=True,
-                    histtype="stepfilled", color=_tint(C_POST, 0.3), ec=C_POST, lw=0.8,
+                    X[:, i],
+                    bins=bins,
+                    range=(lo[i], hi[i]),
+                    density=True,
+                    histtype="stepfilled",
+                    color=_tint(C_POST, 0.3),
+                    ec=C_POST,
+                    lw=0.8,
                 )
                 if bm is not None and bc is not None:
                     xx = np.linspace(lo[i], hi[i], 300)
-                    ax.plot(xx, norm.pdf(xx, bm[i], np.sqrt(bc[i, i])), color=C_BATCH, lw=0.9)
+                    ax.plot(
+                        xx,
+                        norm.pdf(xx, bm[i], np.sqrt(bc[i, i])),
+                        color=C_BATCH,
+                        lw=0.9,
+                    )
                 if tr is not None:
                     ax.axvline(tr[i], color=C_TRUTH, lw=0.8)
                 ax.set_ylim(bottom=0.0)
@@ -1232,7 +1438,8 @@ def plot_corner(
                 dec = int(np.clip(1 - np.floor(np.log10(min(em, ep))), 0, 6))
                 ax.set_title(
                     rf"${PARAM_SYM[i]} = {q50:.{dec}f}^{{+{ep:.{dec}f}}}_{{-{em:.{dec}f}}}$",
-                    fontsize=6.5, pad=3,
+                    fontsize=6.5,
+                    pad=3,
                 )
             else:  # ---- joint (x: param j, y: param i)
                 ax.set_ylim(lo[i], hi[i])
@@ -1242,18 +1449,29 @@ def plot_corner(
                 Lc = np.linalg.cholesky(np.cov(P2, rowvar=False))
                 U = np.linalg.solve(Lc, (P2 - m2).T).T
                 r = max(4.0, float(np.percentile(np.abs(U), 99.95))) * 1.05
-                H, ex, ey = np.histogram2d(U[:, 0], U[:, 1], bins=bins, range=[[-r, r]] * 2)
+                H, ex, ey = np.histogram2d(
+                    U[:, 0], U[:, 1], bins=bins, range=[[-r, r]] * 2
+                )
                 H = gaussian_filter(H, smooth)
                 cu, cv = 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1])
                 GU, GV = np.meshgrid(cu, cv, indexing="ij")
                 GX = m2[0] + Lc[0, 0] * GU
                 GY = m2[1] + Lc[1, 0] * GU + Lc[1, 1] * GV
-                lev = _hpd_levels(H, masses)  # descending in mass -> ascending in density
+                lev = _hpd_levels(
+                    H, masses
+                )  # descending in mass -> ascending in density
                 lev = np.r_[np.sort(lev), H.max() * 1.0001]
                 if np.all(np.diff(lev) > 0):
                     ax.contourf(GX, GY, H, levels=lev, colors=fills, zorder=1)
-                    ax.contour(GX, GY, H, levels=lev[:-1], colors=C_POST, linewidths=0.45,
-                               zorder=2)
+                    ax.contour(
+                        GX,
+                        GY,
+                        H,
+                        levels=lev[:-1],
+                        colors=C_POST,
+                        linewidths=0.45,
+                        zorder=2,
+                    )
                 else:
                     ax.plot(P2[:, 0], P2[:, 1], ",", color=C_POST, alpha=0.2, zorder=1)
                 if bm is not None and bc is not None:
@@ -1263,8 +1481,15 @@ def plot_corner(
                         ax.plot(e[0], e[1], color=C_BATCH, lw=0.7, zorder=3)
                 if tr is not None:
                     ax.plot(
-                        tr[j], tr[i], ls="none", marker="*", ms=5.5, mfc=C_TRUTH, mec="white",
-                        mew=0.4, zorder=4,
+                        tr[j],
+                        tr[i],
+                        ls="none",
+                        marker="*",
+                        ms=5.5,
+                        mfc=C_TRUTH,
+                        mec="white",
+                        mew=0.4,
+                        zorder=4,
                     )
 
             # outer labels only
@@ -1285,21 +1510,33 @@ def plot_corner(
     fig.align_xlabels(axes[-1, :])
 
     handles = [
-        (Patch(facecolor=fills[2], lw=0), Patch(facecolor=fills[1], lw=0),
-         Patch(facecolor=fills[0], lw=0)),
+        (
+            Patch(facecolor=fills[2], lw=0),
+            Patch(facecolor=fills[1], lw=0),
+            Patch(facecolor=fills[0], lw=0),
+        ),
         Line2D([], [], color=C_BATCH, lw=0.9),
         Line2D([], [], ls="none", marker="*", ms=7, mfc=C_TRUTH, mec="white", mew=0.4),
     ]
     fig.legend(
         handles,
-        ["MCMC posterior", "Gauss--Newton batch (linear)", "Truth"],
-        loc="upper right", bbox_to_anchor=(0.97, 0.93), fontsize=8,
-        handler_map={tuple: HandlerTuple(ndivide=None, pad=0.0)}, handlelength=2.6,
+        ["MCMC Posterior", "Batch Least Squares", "Truth"],
+        loc="upper right",
+        bbox_to_anchor=(0.97, 0.93),
+        fontsize=8,
+        handler_map={tuple: HandlerTuple(ndivide=None, pad=0.0)},
+        handlelength=2.6,
     )
     fig.text(
-        0.97, 0.93 - 0.085, r"Contours: $1\sigma$, $2\sigma$, $3\sigma$ regions"
-        "\n" r"(39.3, 86.5, 98.9\% of the 2D mass)",
-        ha="right", va="top", fontsize=7, color="0.3",
+        0.97,
+        0.93 - 0.085,
+        r"Contours: $1\sigma$, $2\sigma$, $3\sigma$ regions"
+        "\n"
+        r"(39.3, 86.5, 98.9\% of the 2D mass)",
+        ha="right",
+        va="top",
+        fontsize=7,
+        color="0.3",
     )
     return save_figure(fig, name)
 
@@ -1374,7 +1611,12 @@ def solve_stage1_gn_with_stm(
     def map_cost(x0_try, delta_tot_try):
         """True nonlinear MAP cost (state-only propagation)."""
         sol = propagator.propagate_state_only(
-            x0=x0_try, t_eval=tau, show_progress=False, rtol=rtol, atol=atol, method=method
+            x0=x0_try,
+            t_eval=tau,
+            show_progress=False,
+            rtol=rtol,
+            atol=atol,
+            method=method,
         )
         if sol.status != 0 or sol.y.shape[1] != len(tau):
             return np.inf
@@ -1467,7 +1709,9 @@ def solve_stage1_gn_with_stm(
             lam = 1e-3 * H_diag_max if lam == 0.0 else 10.0 * lam
 
         if not accepted:
-            print("\n[GN] Levenberg-Marquardt could not decrease the MAP cost: stopping.")
+            print(
+                "\n[GN] Levenberg-Marquardt could not decrease the MAP cost: stopping."
+            )
             break
 
         x0_ref = x0_ref + d_full
@@ -1613,7 +1857,10 @@ def solve_stage1_full_nonlinear_lsq(
 # POSTERIOR SPLIT (GMM) + STM PROPAGATION TO A GIVEN EPOCH
 # ============================================================
 
-def fit_posterior_gmm(samples, n_components=8, select_bic=False, k_max=12, random_state=0):
+
+def fit_posterior_gmm(
+    samples, n_components=8, select_bic=False, k_max=12, random_state=0
+):
     """
     Split posterior samples (N, n) into a full-covariance Gaussian mixture.
 
@@ -1679,7 +1926,9 @@ def gmm_logpdf(x, weights, means, covs):
     return logsumexp(lp, axis=0)
 
 
-def propagate_gmm_stm(propagator, x0_ref, weights, means, covs, t_eval, label="GMM", **ivp):
+def propagate_gmm_stm(
+    propagator, x0_ref, weights, means, covs, t_eval, label="GMM", **ivp
+):
     """
     Propagate every mixture component with its OWN first-order STM:
         m_k(t) = phi(t; x0_ref + mu_k),      P_k(t) = Phi_k(t) P_k Phi_k(t)^T,
@@ -1695,11 +1944,16 @@ def propagate_gmm_stm(propagator, x0_ref, weights, means, covs, t_eval, label="G
             x0_ref + means[k], t_eval, show_progress=False, **ivp
         )
         if sol.status != 0 or sol.y.shape[1] != t_eval.size:
-            raise RuntimeError(f"[{label}] component {k} propagation failed: {sol.message}")
+            raise RuntimeError(
+                f"[{label}] component {k} propagation failed: {sol.message}"
+            )
         Phi = stts[1]  # (N_t, n, n)
         m_t[k] = sol.y[:n].T
         P_t[k] = Phi @ covs[k] @ np.transpose(Phi, (0, 2, 1))
-        print(f"[{label}] component {k + 1}/{K} (w = {weights[k]:.3f}) propagated", flush=True)
+        print(
+            f"[{label}] component {k + 1}/{K} (w = {weights[k]:.3f}) propagated",
+            flush=True,
+        )
     return m_t, P_t
 
 
@@ -1734,8 +1988,12 @@ def position_prediction_history(X_mc, w_g, m_g, P_g, m_1, P_1):
         out["sig_mc"][j] = np.sqrt(np.trace(np.cov(pos, rowvar=False)))
         out["sig_gmm"][j] = np.sqrt(np.trace(Pg))
         out["sig_1"][j] = np.sqrt(np.trace(P_1[0, j, :3, :3]))
-        out["ll_gmm"][j] = np.mean(gmm_logpdf(pos, w_g, m_g[:, j, :3], P_g[:, j, :3, :3]))
-        out["ll_1"][j] = np.mean(gmm_logpdf(pos, np.ones(1), m_1[:, j, :3], P_1[:, j, :3, :3]))
+        out["ll_gmm"][j] = np.mean(
+            gmm_logpdf(pos, w_g, m_g[:, j, :3], P_g[:, j, :3, :3])
+        )
+        out["ll_1"][j] = np.mean(
+            gmm_logpdf(pos, np.ones(1), m_1[:, j, :3], P_1[:, j, :3, :3])
+        )
     return out
 
 
@@ -1744,7 +2002,9 @@ def _ellipse_2d(mean2, cov2, radius, n=181):
     t = np.linspace(0.0, 2.0 * np.pi, n)
     vals, vecs = np.linalg.eigh(cov2)
     circ = np.vstack([np.cos(t), np.sin(t)])
-    return mean2[:, None] + radius * (vecs @ (np.sqrt(np.clip(vals, 0.0, None))[:, None] * circ))
+    return mean2[:, None] + radius * (
+        vecs @ (np.sqrt(np.clip(vals, 0.0, None))[:, None] * circ)
+    )
 
 
 def plot_gmm_propagation(
@@ -1760,7 +2020,7 @@ def plot_gmm_propagation(
     r_ell = np.sqrt(chi2.ppf(prob, 2))
     pct = f"{100 * prob:g}\\%"
     pairs = [(0, 1), (0, 2), (1, 2)]
-    names = [r"$\Delta x$ [m]", r"$\Delta y$ [m]", r"$\Delta z$ [m]"]
+    names = [r"$\delta x$ [m]", r"$\delta y$ [m]", r"$\delta z$ [m]"]
     rng = np.random.default_rng(seed)
 
     fig = plt.figure(figsize=(TXT_W, 4.9), layout="constrained")
@@ -1779,7 +2039,10 @@ def plot_gmm_propagation(
 
         counts = rng.multinomial(n_draw, w / w.sum())
         draws = np.vstack(
-            [rng.multivariate_normal(mu[k], P[k], size=counts[k]) for k in range(len(w))]
+            [
+                rng.multivariate_normal(mu[k], P[k], size=counts[k])
+                for k in range(len(w))
+            ]
         )
 
         for col, (i, j) in enumerate(pairs):
@@ -1789,34 +2052,63 @@ def plot_gmm_propagation(
             e1 = _ellipse_2d(mu1[ix], P1[np.ix_(ix, ix)], r_ell)
 
             lo = np.min(
-                [mc[:, ix].min(0), e1.min(1), np.percentile(draws[:, ix], 0.1, axis=0), tr[ix]],
+                [
+                    mc[:, ix].min(0),
+                    e1.min(1),
+                    np.percentile(draws[:, ix], 0.1, axis=0),
+                    tr[ix],
+                ],
                 axis=0,
             )
             hi = np.max(
-                [mc[:, ix].max(0), e1.max(1), np.percentile(draws[:, ix], 99.9, axis=0), tr[ix]],
+                [
+                    mc[:, ix].max(0),
+                    e1.max(1),
+                    np.percentile(draws[:, ix], 99.9, axis=0),
+                    tr[ix],
+                ],
                 axis=0,
             )
             pad = 0.08 * (hi - lo)
             lo, hi = lo - pad, hi + pad
 
             ax.scatter(
-                mc[:, i], mc[:, j], s=2.5, color=C_MC, alpha=0.7, lw=0, rasterized=True,
+                mc[:, i],
+                mc[:, j],
+                s=2.5,
+                color=C_MC,
+                alpha=0.7,
+                lw=0,
+                rasterized=True,
                 zorder=1,
             )
             for k in range(len(w)):
                 e = _ellipse_2d(mu2[k], P2[k], r_ell)
                 ax.plot(e[0], e[1], color=C_POST, lw=0.45, alpha=0.55, zorder=2)
 
-            gx, gy = np.meshgrid(np.linspace(lo[0], hi[0], 240), np.linspace(lo[1], hi[1], 240))
+            gx, gy = np.meshgrid(
+                np.linspace(lo[0], hi[0], 240), np.linspace(lo[1], hi[1], 240)
+            )
             grid = np.column_stack([gx.ravel(), gy.ravel()])
             dens = np.exp(gmm_logpdf(grid, w, mu2, P2)).reshape(gx.shape)
-            level = np.quantile(np.exp(gmm_logpdf(draws[:, ix], w, mu2, P2)), 1.0 - prob)
-            ax.contour(gx, gy, dens, levels=[level], colors=C_POST, linewidths=1.3, zorder=3)
+            level = np.quantile(
+                np.exp(gmm_logpdf(draws[:, ix], w, mu2, P2)), 1.0 - prob
+            )
+            ax.contour(
+                gx, gy, dens, levels=[level], colors=C_POST, linewidths=1.3, zorder=3
+            )
 
             ax.plot(e1[0], e1[1], color=C_BATCH, lw=1.1, ls="--", zorder=4)
             ax.plot(
-                tr[i], tr[j], ls="none", marker="*", ms=7.5, mfc=C_TRUTH, mec="white",
-                mew=0.5, zorder=5,
+                tr[i],
+                tr[j],
+                ls="none",
+                marker="*",
+                ms=7.5,
+                mfc=C_TRUTH,
+                mec="white",
+                mew=0.5,
+                zorder=5,
             )
             ax.set_xlim(lo[0], hi[0])
             ax.set_ylim(lo[1], hi[1])
@@ -1828,50 +2120,99 @@ def plot_gmm_propagation(
         np.atleast_1d(sub)[row].suptitle(pnl["title"], fontsize=8)
 
     handles = [
-        Line2D([], [], ls="none", marker="o", ms=3, color=C_MC, label="Monte Carlo (nonlinear)"),
-        Line2D([], [], color=C_POST, lw=0.45, alpha=0.7, label=f"GMM components ({pct})"),
-        Line2D([], [], color=C_POST, lw=1.3, label=f"GMM + STMs ({pct} HDR)"),
-        Line2D([], [], color=C_BATCH, lw=1.1, ls="--", label=f"Single Gaussian + STM ({pct})"),
-        Line2D([], [], ls="none", marker="*", ms=7.5, mfc=C_TRUTH, mec="white", mew=0.5,
-               label="Truth"),
+        Line2D([], [], ls="none", marker="o", ms=3, color=C_MC, label="Monte Carlo"),
+        Line2D(
+            [],
+            [],
+            color=C_POST,
+            lw=0.45,
+            alpha=0.7,
+            label=f"GMM Components + STMs ({pct} HDR)",
+        ),
+        Line2D([], [], color=C_POST, lw=1.3, label=f"GMM Mixture + STMs ({pct} HDR)"),
+        Line2D(
+            [],
+            [],
+            color=C_BATCH,
+            lw=1.1,
+            ls="--",
+            label=f"Single Gaussian + STM ({pct} HDR)",
+        ),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="*",
+            ms=7.5,
+            mfc=C_TRUTH,
+            mec="white",
+            mew=0.5,
+            label="Truth",
+        ),
     ]
     fig.legend(handles=handles, loc="outside upper center", ncol=5, columnspacing=1.0)
     return save_figure(fig, name)
 
 
-def plot_prediction_history(t_hr, hist, t_obs_end_hr, name="fig_gmm_prediction_history"):
+def plot_prediction_history(
+    t_hr, hist, t_obs_end_hr, name="fig_gmm_prediction_history"
+):
     """Position uncertainty and MC log-density (GMM vs single Gaussian) vs time."""
     fig, (ax0, ax1) = plt.subplots(
-        2, 1, figsize=(COL_W, 3.3), sharex=True, layout="constrained",
+        2,
+        1,
+        figsize=(COL_W, 3.3),
+        sharex=True,
+        layout="constrained",
         gridspec_kw=dict(height_ratios=(1.35, 1.0)),
     )
     for ax in (ax0, ax1):
         ax.axvspan(t_hr[0], t_obs_end_hr, color=C_SPAN, lw=0, zorder=0)
         ax.set_xlim(t_hr[0], t_hr[-1])
     ax0.text(
-        0.5 * (t_hr[0] + t_obs_end_hr), 0.96, "observation arc", color="0.3", fontsize=7,
-        ha="center", va="top", transform=ax0.get_xaxis_transform(),
+        0.5 * (t_hr[0] + t_obs_end_hr),
+        0.96,
+        "observation arc",
+        color="0.3",
+        fontsize=7,
+        ha="center",
+        va="top",
+        transform=ax0.get_xaxis_transform(),
     )
 
-    ax0.plot(t_hr, hist["sig_mc"] * 1e3, color="0.78", lw=3.2, solid_capstyle="round",
-             label="Monte Carlo", zorder=2)
-    ax0.plot(t_hr, hist["sig_gmm"] * 1e3, color=C_POST, lw=1.2, label="GMM + STMs", zorder=3)
-    ax0.plot(t_hr, hist["sig_1"] * 1e3, color=C_BATCH, lw=1.2, ls="--",
-             label="Single Gaussian + STM", zorder=4)
+    ax0.plot(
+        t_hr,
+        hist["sig_mc"] * 1e3,
+        color="0.78",
+        lw=3.2,
+        solid_capstyle="round",
+        label="Monte Carlo",
+        zorder=2,
+    )
+    ax0.plot(
+        t_hr, hist["sig_gmm"] * 1e3, color=C_POST, lw=1.2, label="GMM + STMs", zorder=3
+    )
+    ax0.plot(
+        t_hr,
+        hist["sig_1"] * 1e3,
+        color=C_BATCH,
+        lw=1.2,
+        ls="--",
+        label="Single Gaussian + STM",
+        zorder=4,
+    )
     ax0.set_ylabel(r"$\sqrt{\mathrm{tr}\,\bm{P}_{rr}}$ [m]")
     ax0.set_yscale("log")
     ax0.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
     ax0.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
     ax0.yaxis.set_minor_formatter(mticker.NullFormatter())
-    ax0.set_title("(a) Position uncertainty", loc="left")
+    ax0.set_title("(a) Position Uncertainty", loc="left")
 
     ax1.axhline(0.0, color="0.45", lw=0.6)
     ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=C_POST, lw=1.2)
     ax1.set_ylabel(r"$\Delta\,\overline{\log p}$ [nats]")
-    ax1.set_xlabel("Time since epoch [h]")
-    ax1.set_title(
-        r"(b) Mean log-density of MC positions, GMM $-$ single", loc="left"
-    )
+    ax1.set_xlabel("Time since Epoch [h]")
+    ax1.set_title(r"(b) Mean Log-density of MC Positions, GMM $-$ Single", loc="left")
 
     fig.legend(loc="outside upper center", ncol=3, columnspacing=0.8, handlelength=1.5)
     return save_figure(fig, name)
@@ -1974,7 +2315,8 @@ if __name__ == "__main__":
 
     # Figures: one PDF per figure in a timestamped folder (SHOW_FIGS at the top of the file)
     fig_dir = set_figure_dir(
-        Path(__file__).resolve().parent / "results"
+        Path(__file__).resolve().parent
+        / "results"
         / f"ryugu_poly_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     print(f"[Figures] -> {fig_dir}")
@@ -2058,7 +2400,9 @@ if __name__ == "__main__":
     T_hat = C_rtn2i[:, 1]
     N_hat = C_rtn2i[:, 2]
     r_sc0 = a_sc * (np.cos(phi_sc0) * T_hat + np.sin(phi_sc0) * N_hat)
-    v_sc0 = np.sqrt(dyn_part.gm / a_sc) * (-np.sin(phi_sc0) * T_hat + np.cos(phi_sc0) * N_hat)
+    v_sc0 = np.sqrt(dyn_part.gm / a_sc) * (
+        -np.sin(phi_sc0) * T_hat + np.cos(phi_sc0) * N_hat
+    )
     x0_sc = np.hstack([r_sc0, v_sc0, 1.0])
 
     print("\nPropagating notional spacecraft (truth, treated as known)...")
@@ -2067,7 +2411,9 @@ if __name__ == "__main__":
     )
     sc_state_full = sol_sc.y[:6, :].T  # (N,6)
     r_sc_norm = np.linalg.norm(sc_state_full[:, :3], axis=1)
-    print(f"[S/C] range to Ryugu center: {r_sc_norm.min():.3f} - {r_sc_norm.max():.3f} km")
+    print(
+        f"[S/C] range to Ryugu center: {r_sc_norm.min():.3f} - {r_sc_norm.max():.3f} km"
+    )
 
     # --------------------------
     # Particle detach point on Ryugu surface
@@ -2118,7 +2464,9 @@ if __name__ == "__main__":
     x_chk = x0_true.copy()
     x_chk[0:3] = R_ib0.T @ (vertices[closest_idx] + 0.05 * normal_bf)
     err_A = check_A_against_fd(dyn_part, x_chk, t=0.0)
-    print("\n[Check] |A - A_fd| / |A_fd| per column:", np.array2string(err_A, precision=2))
+    print(
+        "\n[Check] |A - A_fd| / |A_fd| per column:", np.array2string(err_A, precision=2)
+    )
 
     # --------------------------
     # Propagate particle truth (DYNAMICS on tau_full)
@@ -2143,7 +2491,9 @@ if __name__ == "__main__":
         f"inside-mesh samples: {np.sum(inside)}"
     )
     if np.any(inside):
-        print("[WARNING] Particle truth trajectory impacts Ryugu: change detach/launch.")
+        print(
+            "[WARNING] Particle truth trajectory impacts Ryugu: change detach/launch."
+        )
 
     # --------------------------
     # Observability mask (occultation by the shape model)
@@ -2173,9 +2523,18 @@ if __name__ == "__main__":
     # --------------------------
     # Figures: observation geometry (truth only)
     # --------------------------
-    sc_dense = propagator_sc.propagate_state_only(
-        x0_sc, tau_dense, show_progress=False, rtol=1e-10, atol=1e-13, method="LSODA"
-    ).y[:6].T
+    sc_dense = (
+        propagator_sc.propagate_state_only(
+            x0_sc,
+            tau_dense,
+            show_progress=False,
+            rtol=1e-10,
+            atol=1e-13,
+            method="LSODA",
+        )
+        .y[:6]
+        .T
+    )
     pt_dense = sol_dense.y[:3].T
 
     plot_scene_body_fixed(
@@ -2193,8 +2552,13 @@ if __name__ == "__main__":
         detach_bf=pos_detach_bf,
     )
     plot_observation_geometry(
-        tau_full, sc_state_full, x_true_full, vis_mask,
-        tau_line=tau_dense, sc_line=sc_dense, pt_line=pt_dense,
+        tau_full,
+        sc_state_full,
+        x_true_full,
+        vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
     )
 
     # --------------------------
@@ -2237,9 +2601,7 @@ if __name__ == "__main__":
     # --------------------------
     # Priors on 7D delta0
     # --------------------------
-    prior_sigma = prior_looseness * np.hstack(
-        [sig_prior_r, sig_prior_v, sig_prior_eta]
-    )
+    prior_sigma = prior_looseness * np.hstack([sig_prior_r, sig_prior_v, sig_prior_eta])
     priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
     print("\n[Prior] sigmas:", prior_sigma)
 
@@ -2416,27 +2778,38 @@ if __name__ == "__main__":
     t_prop = np.linspace(0.0, tau_target, n_t_prop)
     ivp_prop = dict(rtol=1e-10, atol=1e-13, method="LSODA")
 
-    m_g_t, P_g_t = propagate_gmm_stm(propagator, x0_ref1, w_g, mu_g, P_g, t_prop, **ivp_prop)
+    m_g_t, P_g_t = propagate_gmm_stm(
+        propagator, x0_ref1, w_g, mu_g, P_g, t_prop, **ivp_prop
+    )
     m_1_t, P_1_t = propagate_gmm_stm(
         propagator, x0_ref1, w_1, mu_1, P_1, t_prop, label="Single Gaussian", **ivp_prop
     )
 
     rng_mc = np.random.default_rng(2024)
-    idx_mc = rng_mc.choice(post.shape[0], size=min(n_mc_prop, post.shape[0]), replace=False)
+    idx_mc = rng_mc.choice(
+        post.shape[0], size=min(n_mc_prop, post.shape[0]), replace=False
+    )
     X_mc = propagate_samples_mc(propagator, x0_ref1, post[idx_mc], t_prop, **ivp_prop)
     ok_mc = np.all(np.isfinite(X_mc[:, :, 0]), axis=1)
     if not np.all(ok_mc):
         print(f"[MC] {np.sum(~ok_mc)} sample propagations failed and are dropped.")
     X_mc = X_mc[ok_mc]
 
-    sol_tp = propagator.propagate_state_only(x0_true, t_prop, show_progress=False, **ivp_prop)
+    sol_tp = propagator.propagate_state_only(
+        x0_true, t_prop, show_progress=False, **ivp_prop
+    )
     x_true_prop = sol_tp.y[:N_STATE, :].T  # (n_t_prop, n)
 
     # Polyhedral field is only valid outside the body: flag any impact along the prediction
     n_in_truth = int(
         np.sum(
             points_inside_mesh(
-                ryugu_mesh, x_true_prop[:, :3], t_prop, alpha_true, delta_true, omega_true
+                ryugu_mesh,
+                x_true_prop[:, :3],
+                t_prop,
+                alpha_true,
+                delta_true,
+                omega_true,
             )
         )
     )
@@ -2444,7 +2817,12 @@ if __name__ == "__main__":
         bool(
             np.any(
                 points_inside_mesh(
-                    ryugu_mesh, X_mc[i, :, :3], t_prop, alpha_true, delta_true, omega_true
+                    ryugu_mesh,
+                    X_mc[i, :, :3],
+                    t_prop,
+                    alpha_true,
+                    delta_true,
+                    omega_true,
                 )
             )
         )
@@ -2465,8 +2843,14 @@ if __name__ == "__main__":
     sig_mc_T = np.sqrt(np.diag(np.cov(pos_mc, rowvar=False)))
     print(f"\n[GMM] Position at target ({utc_target}), per-axis 1-sigma [m]:")
     print("   MC             :", np.array2string(sig_mc_T * 1e3, precision=2))
-    print("   GMM + STMs     :", np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2))
-    print("   Single Gaussian:", np.array2string(np.sqrt(np.diag(P1_T)) * 1e3, precision=2))
+    print(
+        "   GMM + STMs     :",
+        np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2),
+    )
+    print(
+        "   Single Gaussian:",
+        np.array2string(np.sqrt(np.diag(P1_T)) * 1e3, precision=2),
+    )
     print("[GMM] Mean offset from the MC mean [m]:")
     print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
     print("   Single Gaussian:", np.array2string((m1_T - m_mc) * 1e3, precision=2))
@@ -2505,7 +2889,7 @@ if __name__ == "__main__":
 
     plot_gmm_propagation(
         [
-            _panel(0, f"Posterior at epoch ({utc0.replace('T', ' ')} UTC)"),
+            _panel(0, f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"),
             _panel(
                 -1,
                 f"Predicted at {utc_target.replace('T', ' ')} UTC "
