@@ -53,6 +53,7 @@ import io
 import os
 import copy
 import time
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -94,13 +95,37 @@ COL_W = 3.5  # single-column width [in]
 TXT_W = 7.16  # full text width (double column) [in]
 SHOW_FIGS = True  # plt.show() after each figure is saved
 
+def _ensure_tex_on_path():
+    """
+    True if latex + dvipng are reachable. GUI-launched processes (VS Code, Jupyter, Spyder on
+    macOS) often do not inherit the login-shell PATH, so the standard TeX locations are added
+    before giving up; otherwise matplotlib would silently fall back to mathtext and DejaVu.
+    """
+    if shutil.which("latex") and shutil.which("dvipng"):
+        return True
+    import glob
+
+    extra = ["/Library/TeX/texbin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/texbin"]
+    extra += sorted(glob.glob("/usr/local/texlive/*/bin/*"), reverse=True)
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(path + [d for d in extra if os.path.isdir(d)])
+    return bool(shutil.which("latex") and shutil.which("dvipng"))
+
+
+USE_TEX = _ensure_tex_on_path()
+if not USE_TEX:
+    print("[figures] latex/dvipng not found: falling back to mathtext (Computer Modern)")
+EN_DASH = "--" if USE_TEX else "-"  # cmr10 (mathtext fallback) has no en-dash glyph
+# Every label in this script renders identically in both modes: math lives inside $...$,
+# percent signs are written $\%$, and only commands mathtext also knows are used.
 plt.rcParams.update(
     {
-        "text.usetex": True,
-        "text.latex.preamble": (
-            r"\usepackage{amsmath}\usepackage{amssymb}\usepackage{bm}\usepackage{mathrsfs}"
-        ),
+        "text.usetex": USE_TEX,
+        "text.latex.preamble": r"\usepackage{amsmath}\usepackage{amssymb}\usepackage{mathrsfs}",
+        "mathtext.fontset": "cm",
+        "axes.formatter.use_mathtext": True,
         "font.family": "serif",
+        "font.serif": ["Computer Modern Roman", "cmr10", "DejaVu Serif"],
         "font.size": 8,
         "axes.labelsize": 8,
         "axes.titlesize": 8,
@@ -163,12 +188,12 @@ PARAM_SYM = [
     r"\delta x_0",
     r"\delta y_0",
     r"\delta z_0",
-    r"\delta \dot{x}_0",
-    r"\delta \dot{y}_0",
-    r"\delta \dot{z}_0",
+    r"\delta v_{x,0}",
+    r"\delta v_{y,0}",
+    r"\delta v_{z,0}",
     r"\delta \eta",
 ]
-PARAM_UNIT = ["m", "m", "m", r"mm\,s$^{-1}$", r"mm\,s$^{-1}$", r"mm\,s$^{-1}$", r"\%"]
+PARAM_UNIT = ["m", "m", "m", "mm/s", "mm/s", "mm/s", r"$\%$"]
 PARAM_SCALE = np.array([1e3, 1e3, 1e3, 1e6, 1e6, 1e6, 1e2])
 
 # ============================================================
@@ -1049,7 +1074,7 @@ def plot_observation_geometry(
         zorder=3,
     )
     ax.set_xlabel("Time since Epoch [h]")
-    ax.set_ylabel(r"S/C--Particle Range [km]")
+    ax.set_ylabel(f"S/C{EN_DASH}Particle Range [km]")
     ax.set_ylim(bottom=0.0)
     ax.yaxis.set_major_locator(mticker.MaxNLocator(5))
 
@@ -1146,7 +1171,7 @@ def plot_postfit_residuals(
             mfc="none",
             mec=C_BATCH,
             mew=0.8,
-            label="Gauss--Newton batch",
+            label="Batch Least Squares",
         ),
         Line2D([], [], ls="none", marker="o", ms=2.4, color=C_POST, label="MCMC MAP"),
         Patch(facecolor="0.89", label=r"$\pm1\sigma$"),
@@ -1181,9 +1206,15 @@ def plot_mcmc_traces(
 ):
     """
     Walker traces of every parameter and of the log-posterior over the full run: a random
-    subset of walkers (grey), the ensemble median with its 16-84% band (blue), the truth
+    subset of walkers (grey), the ensemble mean with its +/-3 sigma band (blue), the truth
     (black) and the batch estimate (vermillion). The burn-in is shaded. Y-limits follow the
-    post-burn-in ensemble, so the initial transient enters from outside the panel.
+    post-burn-in ensemble.
+
+    The log-posterior is not Gaussian across walkers: near the mode
+    log p = log p_max - chi2_d / 2, capped above with a long lower tail. A symmetric
+    mean +/- 3 sigma band would sit partly above log p_max, where no walker can go, and miss
+    the lower tail. Its band is therefore the equal-tailed 99.73 % interval (same mass as
+    +/-3 sigma).
     """
     n_steps = model.sampler.get_chain().shape[0]
     stride = max(1, n_steps // max_points)
@@ -1205,20 +1236,64 @@ def plot_mcmc_traces(
     )
     axes = axes.ravel()
 
-    def _panel(ax, y, ylabel, ref_true=None, ref_batch=None):
+    p3 = 100.0 * norm.sf(3.0)  # one tail of +/-3 sigma (0.135 %)
+    band_alpha = 0.28  # shade only, drawn over the walkers: opaque enough to read on them
+
+    def _windows(h):
+        """[i0, i1) of a +/-h window around each thinned step, never crossing the end of the
+        burn-in, so the post-burn-in band uses post-burn-in samples only."""
+        n, nb = len(steps), int(np.argmax(post)) if post.any() else len(steps)
+        idx = np.arange(n)
+        seg0 = np.where(idx < nb, 0, nb)
+        seg1 = np.where(idx < nb, nb, n)
+        return np.maximum(idx - h, seg0), np.minimum(idx + h + 1, seg1)
+
+    def _band(y, skewed, min_pool=4000):
+        """
+        Ensemble mean per step, and a +/-3 sigma band pooled over enough neighbouring
+        (thinned) steps to hold ~min_pool samples, so the band edges are smooth lines rather
+        than per-step noise. For a skewed quantity (log p) the band is the equal-tailed
+        99.73 % interval (same mass as +/-3 sigma), from a 4x wider pool and then a 2x wider
+        running mean: a 0.135 % sample quantile rests on a handful of tail samples, so it
+        otherwise wobbles as they enter and leave the pool.
+        """
+        n, m = y.shape
+        mu = np.mean(y, axis=1)
+        h = int(np.ceil(0.5 * min_pool / m))
+        if skewed:
+            h *= 2
+        i0, i1 = _windows(h)
+        if not skewed:
+            c1 = np.concatenate([[0.0], np.cumsum(y.sum(axis=1))])
+            c2 = np.concatenate([[0.0], np.cumsum((y**2).sum(axis=1))])
+            cnt = (i1 - i0) * m
+            mean_w = (c1[i1] - c1[i0]) / cnt
+            sig_w = np.sqrt(np.maximum((c2[i1] - c2[i0]) / cnt - mean_w**2, 0.0))
+            return mu, mean_w - 3.0 * sig_w, mean_w + 3.0 * sig_w
+        j0, j1 = _windows(2 * h)
+        q = np.array([np.percentile(y[a:b], [p3, 100.0 - p3]) for a, b in zip(j0, j1)])
+        cq = np.vstack([np.zeros((1, 2)), np.cumsum(q, axis=0)])
+        q = (cq[i1] - cq[i0]) / (i1 - i0)[:, None]
+        return mu, q[:, 0], q[:, 1]
+
+    def _panel(ax, y, ylabel, ref_true=None, ref_batch=None, skewed=False):
+        # Walkers first and faint; the band (shade only, no edge lines) and the mean go on
+        # top, so the band stays visible even where the walker traces fill it completely.
         ax.axvspan(0, burn_in, color=C_SPAN, lw=0, zorder=0)
         ax.plot(
             steps,
             y[:, pick],
-            color="0.7",
+            color="0.72",
             lw=0.25,
-            alpha=0.5,
+            alpha=0.45,
             zorder=1,
             rasterized=True,
         )
-        q16, q50, q84 = np.percentile(y, [16, 50, 84], axis=1)
-        ax.fill_between(steps, q16, q84, color=C_POST, alpha=0.25, lw=0, zorder=2)
-        ax.plot(steps, q50, color=C_POST, lw=0.9, zorder=3)
+        mu, band_lo, band_hi = _band(y, skewed)
+        ax.fill_between(
+            steps, band_lo, band_hi, color=C_POST, alpha=band_alpha, lw=0, zorder=2
+        )
+        ax.plot(steps, mu, color=C_POST, lw=1.0, zorder=3)
         if ref_batch is not None:
             ax.axhline(ref_batch, color=C_BATCH, lw=0.9, ls="--", zorder=4)
         if ref_true is not None:
@@ -1230,7 +1305,6 @@ def plot_mcmc_traces(
         pad = 0.35 * (hi - lo)
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_ylabel(ylabel)
-        ax.set_xlabel("Step [-]")
         ax.yaxis.set_major_locator(mticker.MaxNLocator(4))
 
     for i in range(n_par):
@@ -1241,7 +1315,19 @@ def plot_mcmc_traces(
             None if true_theta is None else true_theta[i] * PARAM_SCALE[i],
             None if batch_theta is None else batch_theta[i] * PARAM_SCALE[i],
         )
-    _panel(axes[n_par], lp, r"$\log p(\bm{\theta}\,|\,\bm{y})$")
+    logp_true = None
+    if true_theta is not None:
+        try:
+            logp_true = float(model.log_prob(np.asarray(true_theta, dtype=float)))
+        except Exception:
+            logp_true = None
+    _panel(
+        axes[n_par],
+        lp,
+        r"$\log p(\theta \mid y)$",
+        ref_true=logp_true,
+        skewed=True,
+    )
     for ax in axes[n_par + 1 :]:
         ax.set_visible(False)
 
@@ -1257,7 +1343,7 @@ def plot_mcmc_traces(
             [], [], color="0.7", lw=0.8, label=f"Walkers ({len(pick)} of {ch.shape[1]})"
         ),
         (
-            Patch(facecolor=C_POST, alpha=0.25, lw=0),
+            Patch(facecolor=mcolors.to_rgba(C_POST, band_alpha), lw=0),
             Line2D([], [], color=C_POST, lw=0.9),
         ),
         Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label="Batch Least Squares"),
@@ -1266,7 +1352,7 @@ def plot_mcmc_traces(
     ]
     labels = [
         handles[0].get_label(),
-        "Ensemble median, 16--84\\%",
+        "Ensemble Mean, $\\pm 3\\sigma$",
         handles[2].get_label(),
         handles[3].get_label(),
         handles[4].get_label(),
@@ -1325,26 +1411,66 @@ def plot_mcmc_autocorrelation(model, burn_in, thin, name="fig_mcmc_autocorrelati
     )
     ax.set_xlim(0, max_lag)
     ax.set_ylim(-0.2, 1.02)
-    ax.set_xlabel("Lag [Steps]")
+    ax.set_xlabel("Lag [-]")
     ax.set_ylabel("Autocorrelation [-]")
-    ax.legend(
-        loc="upper right", ncol=2, fontsize=6.5, columnspacing=0.8, handlelength=2.2
+    handles, labels = ax.get_legend_handles_labels()
+    ncol = max(1, int(np.ceil(len(labels) / 2)))
+    fig.legend(
+        handles,
+        labels,
+        loc="outside upper center",
+        ncol=ncol,
+        fontsize=6.5,
+        columnspacing=0.8,
+        handlelength=2.2,
     )
     return save_figure(fig, name)
 
 
-def _inner_ticks(lo, hi, margin=0.12):
-    """2-3 'nice' ticks in [lo, hi], each at least `margin` (axis fraction) from the edges."""
-    d = margin * (hi - lo)
-    t = np.array([0.5 * (lo + hi)])
-    for n in (3, 4, 5, 6):
-        c = mticker.MaxNLocator(n).tick_values(lo, hi)
-        c = c[(c >= lo + d) & (c <= hi - d)]
-        if c.size >= 2:
-            return c[:3] if c.size <= 3 else c[::2][:3]
+def _label_width(s, digit_w=0.063):
+    """Width of a math-mode tick label as a fraction of a corner panel's width (~63 pt).
+    Measured from the usetex renderer at 6.5 pt: digit 3.96 pt, '.' 0.62 digit, minus sign
+    1.57 digit."""
+    return digit_w * sum(0.62 if ch == "." else 1.57 if ch == "-" else 1.0 for ch in s)
+
+
+def _inner_ticks(lo, hi, margin=0.1, min_gap=0.05):
+    """
+    2-3 round ticks (multiples of {1, 2, 2.5, 3, 4, 5, 6, 8} x 10^k) in [lo, hi], at least
+    `margin` (axis fraction) from the edges and spaced so the blank space between adjacent
+    labels is at least `min_gap` (axis fraction, ~one digit) in a corner panel. Prefers
+    3 ticks over 2 (else 1), then the roundest multiplier, then the widest spacing. When
+    three ticks crowd their labels, their outer pair (e.g. -0.1, 0.1) is tried as well.
+    """
+    span = hi - lo
+    a, b, mid = lo + margin * span, hi - margin * span, 0.5 * (lo + hi)
+    e = np.floor(np.log10(span))
+    rank = {1: 0, 2: 0, 5: 0, 2.5: 1, 4: 2, 8: 2, 3: 3, 6: 3}  # lower = rounder
+    steps = [(m * 10.0**k, rank[m]) for k in np.arange(e - 2, e + 1) for m in rank]
+    best, best_key = None, None
+    for step, rnd in steps:
+        c = step * np.arange(np.ceil(a / step), np.floor(b / step) + 1)
+        if c.size < 2:
+            continue
+        if c.size > 3:  # keep three, centred on the middle of the axis
+            k = int(np.clip(np.argmin(np.abs(c - mid)) - 1, 0, c.size - 3))
+            c = c[k : k + 3]
+        for cand in (c, c[[0, -1]]) if c.size == 3 else (c,):
+            d = _tick_decimals(cand, span)
+            w = np.array([_label_width(_num(v, d)) for v in cand])
+            sp = np.diff(cand)
+            if sp.min() < 0.2 * span or np.min(sp / span - 0.5 * (w[:-1] + w[1:])) < min_gap:
+                continue
+            key = (cand.size, -rnd, sp.min())
+            if best_key is None or key > best_key:
+                best, best_key = cand, key
+    if best is not None:
+        return best
+    for step, _ in sorted(steps, reverse=True):  # one tick, as round as possible, mid-axis
+        c = step * np.arange(np.ceil(a / step), np.floor(b / step) + 1)
         if c.size:
-            t = c
-    return t
+            return c[[np.argmin(np.abs(c - mid))]]
+    return np.array([mid])
 
 
 def _hpd_levels(H, masses):
@@ -1353,6 +1479,64 @@ def _hpd_levels(H, masses):
     c = np.cumsum(h)
     c /= c[-1]
     return np.array([h[min(np.searchsorted(c, m), h.size - 1)] for m in masses])
+
+
+def _decimals(x, sig=2):
+    """Decimals that show the positive number `x` with `sig` significant digits."""
+    if not np.isfinite(x) or x <= 0:
+        return 2
+    return max(0, sig - 1 - int(np.floor(np.log10(x))))
+
+
+def _num(x, d):
+    """Fixed-point string with `d` decimals; never prints a signed zero ('-0.00')."""
+    v = round(float(x), d)
+    return f"{0.0 if v == 0 else v:.{d}f}"
+
+
+def _tick_decimals(ticks, span):
+    """Fewest decimals that represent every tick exactly (2 significant digits of span if none)."""
+    t = np.asarray(ticks, dtype=float)
+    tol = 1e-6 * max(np.max(np.abs(t)), span)
+    d = next((k for k in range(7) if np.all(np.abs(np.round(t, k) - t) <= tol)), None)
+    return _decimals(span, sig=2) if d is None else d
+
+
+def _fixed_formatter(ticks, span):
+    """Math-mode fixed-point tick labels sharing one number of decimals (proper minus sign)."""
+    d = _tick_decimals(ticks, span)
+    return mticker.FuncFormatter(lambda v, _, d=d: f"${_num(v, d)}$")
+
+
+def _sig_num(x, d_min=0, sig=2, sci_below=1e-2):
+    """
+    Math-mode number with `sig` significant digits (and at least `d_min` decimals), written
+    as a\times10^{k} when |x| < `sci_below`, so a small value never prints as 0.00.
+    """
+    x = float(x)
+    if x == 0.0 or not np.isfinite(x):
+        return _num(x, 0)
+    mant, ex = f"{x:.{sig - 1}e}".split("e")
+    if abs(float(f"{mant}e{ex}")) < sci_below:
+        return rf"{mant}\times10^{{{int(ex)}}}"
+    return _num(x, max(d_min, _decimals(abs(float(f"{mant}e{ex}")), sig)))
+
+
+def _summary_title(sym, x):
+    """
+    'sym = median +/- half-width' of the 16-84 % interval (asymmetric if they differ > 5 %).
+    Every number keeps 2 significant digits; the median also keeps the uncertainty's
+    decimals, and values below 0.01 go to scientific notation.
+    """
+    q16, q50, q84 = np.percentile(x, [16, 50, 84])
+    em, ep = q50 - q16, q84 - q50
+    d = _decimals(min(em, ep), sig=2)
+    med = _sig_num(q50, d_min=d)
+    if abs(ep - em) <= 0.05 * 0.5 * (ep + em):
+        return rf"${sym} = {med} \pm {_sig_num(0.5 * (ep + em), d_min=d)}$"
+    # after a power of ten, hang the errors on an empty group so they don't read as exponents
+    med = rf"{med}\,{{}}" if "times" in med else med
+    return rf"${sym} = {med}^{{+{_sig_num(ep, d_min=d)}}}_{{-{_sig_num(em, d_min=d)}}}$"
 
 
 def plot_corner(
@@ -1366,8 +1550,9 @@ def plot_corner(
 ):
     """
     Corner plot of the MCMC posterior (blue: 1/2/3-sigma highest-density regions, i.e.
-    39.3 / 86.5 / 98.9% of the 2D mass) against the Gauss-Newton batch covariance
+    39.3 / 86.5 / 98.9 % of the 2D mass) against the batch least-squares covariance
     (vermillion ellipses with the same masses) and the truth (black). Displayed in m, mm/s, %.
+    Diagonal titles: posterior median and half-widths of the 16-84 % interval.
 
     The 2D densities are estimated in pair-whitened coordinates (histogram + Gaussian
     smoothing) and mapped back, so near-degenerate pairs (|rho| ~ 1) stay smooth.
@@ -1393,10 +1578,12 @@ def plot_corner(
         lo, hi = np.minimum(lo, tr), np.maximum(hi, tr)
     pad = 0.06 * (hi - lo)
     lo, hi = lo - pad, hi + pad
+    ticks = [_inner_ticks(lo[k], hi[k]) for k in range(n_par)]
+    fmts = [_fixed_formatter(ticks[k], hi[k] - lo[k]) for k in range(n_par)]
 
     fig, axes = plt.subplots(n_par, n_par, figsize=(TXT_W, TXT_W))
     fig.subplots_adjust(
-        left=0.085, right=0.99, bottom=0.075, top=0.965, wspace=0.07, hspace=0.07
+        left=0.085, right=0.995, bottom=0.075, top=0.97, wspace=0.08, hspace=0.08
     )
 
     for i in range(n_par):
@@ -1407,7 +1594,9 @@ def plot_corner(
                 ax.set_visible(False)
                 continue
             ax.set_xlim(lo[j], hi[j])
-            ax.set_xticks(_inner_ticks(lo[j], hi[j]))
+            ax.set_xticks(ticks[j])
+            ax.xaxis.set_major_formatter(fmts[j])
+            ax.tick_params(labelsize=6.5, length=2.5, pad=2)
 
             if i == j:  # ---- marginal
                 ax.hist(
@@ -1433,17 +1622,15 @@ def plot_corner(
                 ax.set_ylim(bottom=0.0)
                 ax.set_yticks([])
                 ax.spines["left"].set_visible(False)
-                q16, q50, q84 = np.percentile(X[:, i], [16, 50, 84])
-                em, ep = q50 - q16, q84 - q50
-                dec = int(np.clip(1 - np.floor(np.log10(min(em, ep))), 0, 6))
+                # left-aligned: overflow goes right, into the hidden upper triangle (the last
+                # one past the grid; the tight bbox at save keeps it on the page)
                 ax.set_title(
-                    rf"${PARAM_SYM[i]} = {q50:.{dec}f}^{{+{ep:.{dec}f}}}_{{-{em:.{dec}f}}}$",
-                    fontsize=6.5,
-                    pad=3,
+                    _summary_title(PARAM_SYM[i], X[:, i]), loc="left", fontsize=7, pad=3
                 )
             else:  # ---- joint (x: param j, y: param i)
                 ax.set_ylim(lo[i], hi[i])
-                ax.set_yticks(_inner_ticks(lo[i], hi[i]))
+                ax.set_yticks(ticks[i])
+                ax.yaxis.set_major_formatter(fmts[i])
                 P2 = X[:, [j, i]]
                 m2 = P2.mean(0)
                 Lc = np.linalg.cholesky(np.cov(P2, rowvar=False))
@@ -1457,10 +1644,8 @@ def plot_corner(
                 GU, GV = np.meshgrid(cu, cv, indexing="ij")
                 GX = m2[0] + Lc[0, 0] * GU
                 GY = m2[1] + Lc[1, 0] * GU + Lc[1, 1] * GV
-                lev = _hpd_levels(
-                    H, masses
-                )  # descending in mass -> ascending in density
-                lev = np.r_[np.sort(lev), H.max() * 1.0001]
+                # descending in mass -> ascending in density
+                lev = np.r_[np.sort(_hpd_levels(H, masses)), H.max() * 1.0001]
                 if np.all(np.diff(lev) > 0):
                     ax.contourf(GX, GY, H, levels=lev, colors=fills, zorder=1)
                     ax.contour(
@@ -1485,7 +1670,7 @@ def plot_corner(
                         tr[i],
                         ls="none",
                         marker="*",
-                        ms=5.5,
+                        ms=6.5,
                         mfc=C_TRUTH,
                         mec="white",
                         mew=0.4,
@@ -1494,19 +1679,14 @@ def plot_corner(
 
             # outer labels only
             if i == n_par - 1:
-                ax.set_xlabel(param_label(j))
-                ax.tick_params(axis="x", labelrotation=45, labelsize=6.5)
-                for lab in ax.get_xticklabels():
-                    lab.set_ha("right")
-                    lab.set_rotation_mode("anchor")
+                ax.set_xlabel(param_label(j), labelpad=3)
             else:
-                ax.set_xticklabels([])
+                ax.tick_params(labelbottom=False)
             if j == 0 and i > 0:
-                ax.set_ylabel(param_label(i))
-                ax.tick_params(axis="y", labelsize=6.5)
-            elif i != j:
-                ax.set_yticklabels([])
-    fig.align_ylabels(axes[:, 0])
+                ax.set_ylabel(param_label(i), labelpad=3)
+            else:
+                ax.tick_params(labelleft=False)
+    fig.align_ylabels(axes[1:, 0])
     fig.align_xlabels(axes[-1, :])
 
     handles = [
@@ -1516,27 +1696,25 @@ def plot_corner(
             Patch(facecolor=fills[0], lw=0),
         ),
         Line2D([], [], color=C_BATCH, lw=0.9),
-        Line2D([], [], ls="none", marker="*", ms=7, mfc=C_TRUTH, mec="white", mew=0.4),
+        Line2D([], [], ls="none", marker="*", ms=8, mfc=C_TRUTH, mec="white", mew=0.4),
     ]
+    # The upper-right triangle is empty: anchor the legend to the top-right (hidden) panel.
+    corner_box = axes[0, -1].get_position()
     fig.legend(
         handles,
-        ["MCMC Posterior", "Batch Least Squares", "Truth"],
+        [
+            r"MCMC Posterior ($1\sigma$, $2\sigma$, $3\sigma$)",
+            r"Batch Least Squares ($1\sigma$, $2\sigma$, $3\sigma$)",
+            "Truth",
+        ],
         loc="upper right",
-        bbox_to_anchor=(0.97, 0.93),
+        bbox_to_anchor=(corner_box.x1, corner_box.y1),
+        bbox_transform=fig.transFigure,
         fontsize=8,
         handler_map={tuple: HandlerTuple(ndivide=None, pad=0.0)},
-        handlelength=2.6,
-    )
-    fig.text(
-        0.97,
-        0.93 - 0.085,
-        r"Contours: $1\sigma$, $2\sigma$, $3\sigma$ regions"
-        "\n"
-        r"(39.3, 86.5, 98.9\% of the 2D mass)",
-        ha="right",
-        va="top",
-        fontsize=7,
-        color="0.3",
+        handlelength=3.0,
+        handleheight=1.0,
+        labelspacing=0.6,
     )
     return save_figure(fig, name)
 
@@ -2018,7 +2196,7 @@ def plot_gmm_propagation(
     draws), the single-Gaussian ellipse with the same mass, and the truth.
     """
     r_ell = np.sqrt(chi2.ppf(prob, 2))
-    pct = f"{100 * prob:g}\\%"
+    pct = rf"{100 * prob:g}$\%$"
     pairs = [(0, 1), (0, 2), (1, 2)]
     names = [r"$\delta x$ [m]", r"$\delta y$ [m]", r"$\delta z$ [m]"]
     rng = np.random.default_rng(seed)
@@ -2172,7 +2350,7 @@ def plot_prediction_history(
     ax0.text(
         0.5 * (t_hr[0] + t_obs_end_hr),
         0.96,
-        "observation arc",
+        "Observation arc",
         color="0.3",
         fontsize=7,
         ha="center",
@@ -2201,7 +2379,7 @@ def plot_prediction_history(
         label="Single Gaussian + STM",
         zorder=4,
     )
-    ax0.set_ylabel(r"$\sqrt{\mathrm{tr}\,\bm{P}_{rr}}$ [m]")
+    ax0.set_ylabel(r"$\sqrt{\mathrm{tr}(P_{rr})}$ [m]")
     ax0.set_yscale("log")
     ax0.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
     ax0.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
@@ -2210,9 +2388,9 @@ def plot_prediction_history(
 
     ax1.axhline(0.0, color="0.45", lw=0.6)
     ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=C_POST, lw=1.2)
-    ax1.set_ylabel(r"$\Delta\,\overline{\log p}$ [nats]")
+    ax1.set_ylabel(r"$\Delta \overline{\log p}$ [nats]")
     ax1.set_xlabel("Time since Epoch [h]")
-    ax1.set_title(r"(b) Mean Log-density of MC Positions, GMM $-$ Single", loc="left")
+    ax1.set_title(r"(b) Mean Log-Density of MC Positions, GMM $-$ Single", loc="left")
 
     fig.legend(loc="outside upper center", ncol=3, columnspacing=0.8, handlelength=1.5)
     return save_figure(fig, name)
