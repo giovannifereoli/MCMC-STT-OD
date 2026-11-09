@@ -64,8 +64,6 @@ from itertools import product
 
 import spiceypy as spice
 import trimesh
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 from scipy.optimize import least_squares
 from scipy.stats import norm
 
@@ -73,30 +71,12 @@ from STTPropagationND import STTPropagatorND
 from STTPropagationADS import STTPropagatorADS
 from MCMC import MCMCModel
 
-# Publication-ish defaults
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "serif",
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.linewidth": 0.8,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }
-)
-plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure): shared with the
+# other Bennu/Ryugu scripts. MCMC.py sets its own rcParams on import; jf.configure() in the
+# main re-applies the journal style after it.
+import journal_figures as jf
+
+jf.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 # ============================================================
 # Geometry / utility
@@ -548,322 +528,6 @@ def load_kernels(kernel_root: Path):
         safe_furnsh(k)
 
     return kernels
-
-
-# ============================================================
-# PLOTS
-# ============================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-
-def set_axes_equal_3d(ax):
-    """Make 3D axes have equal scale so the mesh doesn't look like a pancake."""
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-
-    x_mid = np.mean(x_limits)
-    y_mid = np.mean(y_limits)
-    z_mid = np.mean(z_limits)
-
-    plot_radius = 0.5 * max([x_range, y_range, z_range])
-
-    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
-    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
-    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
-
-
-def add_trimesh_to_ax(
-    ax, mesh, color=(0.7, 0.7, 0.7, 1.0), alpha=0.35, edge_alpha=0.15, max_faces=30000
-):
-    """
-    Render a trimesh.Trimesh on a matplotlib 3D axis.
-    Downsamples faces if mesh is huge (matplotlib dies otherwise).
-    """
-    # Downsample faces if necessary
-    faces = mesh.faces
-    verts = mesh.vertices
-
-    if faces.shape[0] > max_faces:
-        idx = np.random.default_rng(0).choice(
-            faces.shape[0], size=max_faces, replace=False
-        )
-        faces = faces[idx]
-
-    poly3d = verts[faces]  # (F,3,3)
-    coll = Poly3DCollection(poly3d, linewidths=0.2)
-    coll.set_facecolor(color)
-    coll.set_alpha(alpha)
-    coll.set_edgecolor((0.0, 0.0, 0.0, edge_alpha))
-    ax.add_collection3d(coll)
-
-
-def plot_bennu_scene_body_fixed(
-    bennu_mesh,
-    sc_state_full,
-    x_true_full,
-    x_map,
-    tau_full,
-    tau_map,
-    alpha,
-    delta,
-    omega,
-    vis_mask=None,
-    title="OSIRIS-REx + Particle around Bennu (BODY-FIXED)",
-    mesh_target_radius_km=None,
-    mesh_scale_mode="rms",
-    downsample=1,
-):
-    """
-    BODY-FIXED visualization (publication-ready).
-
-    Notes
-    -----
-    - Assumes `bennu_mesh` is already in Bennu body-fixed frame and centered at origin.
-    - `make_bennu_rotation_matrix(alpha, delta, omega, t)` is assumed to return a DCM
-      that maps BODY->INERTIAL (R_bi) or INERTIAL->BODY (R_ib). Many implementations
-      return BODY->INERTIAL; in that common case, the correct inertial->body transform
-      is the transpose.
-    """
-
-    # ------------------------------------------------------------
-    # Downsample
-    # ------------------------------------------------------------
-    sl = slice(None, None, max(1, int(downsample)))
-
-    sc_i = np.asarray(sc_state_full)[sl, :3]
-    pt_i = np.asarray(x_true_full)[sl, :3]
-    tau_i = np.asarray(tau_full)[sl]
-
-    x_map = np.asarray(x_map)
-    tau_map = np.asarray(tau_map)
-    mesh = bennu_mesh
-
-    # ------------------------------------------------------------
-    # Rotate INERTIAL -> BODY-FIXED
-    # ------------------------------------------------------------
-    sc_b = np.zeros_like(sc_i)
-    pt_b = np.zeros_like(pt_i)
-
-    for k, tk in enumerate(tau_i):
-        R_ib = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
-        sc_b[k] = R_ib @ sc_i[k]
-        pt_b[k] = R_ib @ pt_i[k]
-
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
-
-    fig = plt.figure(figsize=(7.2, 5.4))
-    ax = fig.add_subplot(111, projection="3d")
-
-    add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
-
-    # Trajectories: force colors explicitly
-    ax.plot(
-        sc_b[:, 0],
-        sc_b[:, 1],
-        sc_b[:, 2],
-        linewidth=1.8,
-        alpha=0.95,
-        color="tab:blue",
-        label="OSIRIS-REx (-64)",
-    )
-    ax.plot(
-        pt_b[:, 0],
-        pt_b[:, 1],
-        pt_b[:, 2],
-        linewidth=1.6,
-        alpha=0.95,
-        color="tab:red",
-        label="Particle Truth",
-    )
-
-    # ------------------------------------------------------------
-    # Visible / occulted points (both black)
-    # ------------------------------------------------------------
-    if vis_mask is not None:
-        vis_mask = np.asarray(vis_mask).astype(bool)
-        vis_mask_ds = (
-            vis_mask[sl]
-            if vis_mask.shape[0] >= tau_full[sl].shape[0]
-            else vis_mask[: sc_b.shape[0]]
-        )
-
-        sc_vis = sc_b[vis_mask_ds]
-        sc_occ = sc_b[~vis_mask_ds]
-
-        if sc_vis.size:
-            ax.scatter(
-                sc_vis[:, 0],
-                sc_vis[:, 1],
-                sc_vis[:, 2],
-                s=16,
-                marker="o",
-                color="black",
-                alpha=0.9,
-                label="Measurement Included",
-            )
-        if sc_occ.size:
-            ax.scatter(
-                sc_occ[:, 0],
-                sc_occ[:, 1],
-                sc_occ[:, 2],
-                s=18,
-                marker="x",
-                color="black",
-                alpha=0.9,
-                label="Measurement Unavailable",
-            )
-
-    # ------------------------------------------------------------
-    # Axes / view / limits
-    # ------------------------------------------------------------
-    ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_zlabel(r"$Z_\mathscr{B}$ [km]", labelpad=10)
-    fig.canvas.draw()
-
-    # No title (caption-driven for papers)
-    # ax.set_title(title)
-
-    ax.view_init(elev=10, azim=-120)
-
-    mesh_v = np.asarray(mesh.vertices)
-    all_xyz = np.vstack([mesh_v, sc_b, pt_b])
-
-    mins = np.min(all_xyz, axis=0)
-    maxs = np.max(all_xyz, axis=0)
-    span = maxs - mins
-    span_max = float(np.max(span)) if np.all(np.isfinite(span)) else 1.0
-    pad = 0.08 * span_max
-
-    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
-    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
-    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-
-    set_axes_equal_3d(ax)
-
-    # Legend: bigger and closer (inside, not outside)
-    ax.legend(
-        loc="upper right",
-        bbox_to_anchor=(0.98, 0.98),
-        frameon=True,
-        borderaxespad=0.2,
-    )
-
-    fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
-
-    # Save figure with timestamp (won't overwrite previous)
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig.canvas.draw()
-    fig.savefig(
-        f"results/bennu_scene_body_fixed_{timestamp}.pdf",
-        format="pdf",
-        # bbox_inches="tight",
-        pad_inches=0.20,
-    )
-    print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
-
-    plt.show()
-
-
-def plot_error_svd_explained(
-    x0_true,
-    x0_ref,
-    V_svd,
-    save_dir="results",
-    filename=None,
-    annotate_ratio=True,
-):
-    from matplotlib.patches import Patch
-
-    # ----------------------------
-    # Error in SVD basis
-    # ----------------------------
-    e = np.asarray(x0_true) - np.asarray(x0_ref)
-    z_err = np.asarray(V_svd).T @ e
-
-    idx = np.arange(len(z_err))
-    z_abs = np.abs(z_err)
-
-    # ----------------------------
-    # L2 percentage normalization
-    # ----------------------------
-    z2 = z_err**2
-    total = np.sum(z2)
-    y = 100 * z2 / total
-    ylabel = r"Explained Squared Error (SVD Basis) [\%]"
-
-    # ----------------------------
-    # Plot
-    # ----------------------------
-    fig, ax = plt.subplots(figsize=(9, 4.8))
-
-    colors = ["tab:blue"] * len(idx)
-    colors[-1] = "red"
-
-    bars = ax.bar(idx, y, color=colors, alpha=0.85, width=0.75)
-
-    ax.set_yscale("linear")
-    ax.set_ylim(0, 100)
-    ax.set_xticks(idx)
-    ax.set_xticklabels([str(i) for i in idx])
-
-    ax.set_xlabel("SVD Coordinate Index")
-    ax.set_ylabel(ylabel)
-
-    ax.grid(True, which="both", linestyle=":", alpha=0.7)
-
-    # ----------------------------
-    # Cleaner annotations
-    # ----------------------------
-    # optional ratio annotation for the null-space bar
-    if annotate_ratio:
-        ax.text(
-            idx[-1],
-            y[-1],
-            rf"{y[-1]:.1f}\%",
-            ha="center",
-            va="bottom",
-            fontsize=11,
-            color="red",
-            fontweight="bold",
-        )
-        for i, yi in enumerate(y):
-            if yi < 1:
-                ax.text(idx[i], 1.0, rf"{yi:.3f}\%", ha="center", fontsize=8)
-
-    # legend with correct color
-    legend_handles = [
-        Patch(facecolor="tab:blue", edgecolor="tab:blue", label="Other components"),
-        Patch(facecolor="red", edgecolor="red", label="Null-space component"),
-    ]
-    ax.legend(handles=legend_handles, frameon=True)
-
-    plt.tight_layout()
-
-    # ----------------------------
-    # Save
-    # ----------------------------
-    os.makedirs(save_dir, exist_ok=True)
-    if filename is None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"error_svd_explained_{ts}.pdf"
-
-    filepath = os.path.join(save_dir, filename)
-    fig.savefig(filepath, format="pdf", bbox_inches="tight", pad_inches=0.2)
-    print(f"Saved: {filepath}")
-
-    plt.show()
 
 
 # ============================================================
@@ -1319,6 +983,54 @@ if __name__ == "__main__":
     thin = 100
     spherical_spread = 1e-1
 
+    # Posterior split (GMM) + STM propagation to a given epoch
+    # NOTE: the truth particle escapes Bennu (no surface crossing up to utc_target); the SH
+    # field is not valid inside the body, so keep the target before any impact.
+    utc_target = "2019-03-01T03:00:00"
+    gmm_n_components = 8  # fixed K (narrow components keep each STM accurate)
+    gmm_select_bic = False  # True: pick K in 1..12 by BIC instead
+    n_mc_prop = 300  # posterior samples propagated nonlinearly (Monte Carlo check)
+    n_t_prop = 46  # output epochs on [epoch, target]
+    gmm_prob = 0.99  # probability mass of the plotted regions
+
+    # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
+    # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
+    # one PDF per figure in a timestamped folder (jf.SHOW_FIGS at the top of the file)
+    PARAM_SYM = [
+        r"\delta x_0",
+        r"\delta y_0",
+        r"\delta z_0",
+        r"\delta v_{x,0}",
+        r"\delta v_{y,0}",
+        r"\delta v_{z,0}",
+        r"\delta\mu",
+        r"\delta C_{20}",
+        r"\delta C_{21}",
+        r"\delta S_{21}",
+        r"\delta C_{22}",
+        r"\delta S_{22}",
+    ]
+    PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
+    PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+    jf.configure(
+        PARAM_SYM,
+        PARAM_BASE_UNIT,
+        PARAM_BASE_SCALE,
+        rotation=make_bennu_rotation_matrix,
+        body="Bennu",
+        target="Particle",
+        obs_word="Image",
+        site_label="Ejection Site",
+        resid_labels=("RA", "Dec"),
+        fallback_dir=Path.home() / "bennu_figures_fallback",
+    )
+    fig_dir = jf.set_figure_dir(
+        Path(__file__).resolve().parent
+        / "results"
+        / f"bennu_particle_ads_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Figures] -> {fig_dir}")
+
     # --------------------------
     # Load SPICE & spacecraft truth (SPICE remains in ET)
     # --------------------------
@@ -1328,6 +1040,9 @@ if __name__ == "__main__":
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
+    tau_target = spice.utc2et(utc_target) - et0  # seconds since start
+    if tau_target <= 0.0:
+        raise ValueError("utc_target must be after utc0.")
 
     sc_state_full = np.zeros((n_obs, 6))
     for i, et in enumerate(ets_full):
@@ -1451,6 +1166,61 @@ if __name__ == "__main__":
     print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
+    # Observation scene + geometry (truth on a dense grid over the arc)
+    # --------------------------
+    tau_dense = np.linspace(tau_full[0], tau_full[-1], 400)
+    sol_dense = propagator.propagate_state_only(
+        x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+    pt_dense = sol_dense.y[:3, :].T
+    r_dense = np.linalg.norm(pt_dense, axis=1)
+    # Epoch 0 is the launch point, on the surface itself, where the inside test is a coin
+    # flip: check the arc after it.
+    n_in_dense = int(
+        np.sum(
+            jf.points_inside_mesh(
+                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
+            )
+        )
+    )
+    print(
+        f"[Scene] truth |r| over the arc: {r_dense.min() * 1e3:.1f}-"
+        f"{r_dense.max() * 1e3:.1f} m; inside the shape model at "
+        f"{n_in_dense}/{tau_dense.size - 1} epochs after launch"
+    )
+    if n_in_dense:
+        print("[WARNING] The truth trajectory crosses the shape model during the arc.")
+    sc_dense = np.array(
+        [
+            spice.spkezr(SC_NAME, float(et0 + t), FRAME_I, ABCORR, CENTER)[0]
+            for t in tau_dense
+        ],
+        dtype=float,
+    )
+    jf.plot_scene_body_fixed(
+        bennu_mesh,
+        tau_obs=tau_full,
+        sc_obs=sc_state_full,
+        vis_mask=vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
+        detach_bf=pos_detach_bf,
+    )
+    jf.plot_observation_geometry(
+        tau_full,
+        sc_state_full,
+        x_true_full,
+        vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+    )
+
+    # --------------------------
     # Generate noisy RA/DEC measurements
     # --------------------------
     # Generate measurements for ALL epochs (including occulted ones)
@@ -1552,11 +1322,12 @@ if __name__ == "__main__":
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
     print("[Stage 1] delta_hat1:\n", delta_hat1)
-    # plot_error_svd_explained(
-    #    x0_true=x0_true,
-    #    x0_ref=x0_ref1,
-    #    V_svd=V_svd,
-    # )
+
+    # Display units: rescale each parameter by a power of ten so its batch sigma reads well
+    disp_scale, disp_unit = jf.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    jf.configure(PARAM_SYM, disp_unit, disp_scale)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1  --  WITH ADS
@@ -1699,77 +1470,158 @@ if __name__ == "__main__":
     print("\n[Truth] true_delta about ref1:\n", true_delta)
 
     # --------------------------
-    # Diagnostics
+    # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
     # --------------------------
-    model.plot_convergence()
-    model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
-    # model.plot_log_likelihood()
+    # Samples are deviations about the batch solution ref1, so the batch estimate is 0 with
+    # covariance cov1.
     model.summary()
     model.print_regression_diagnostics()
-    model.plot_autocorrelation()
-    model.plot_log_likelihood()
-
-    # --------------------------
-    # Plot scene (using MCMC mean estimate)
-    # --------------------------
-    _, x_map = propagator_ads.propagate_deviation(sol_ref, stts_ref, theta_hat)
-
-    plot_bennu_scene_body_fixed(
-        bennu_mesh=bennu_mesh,
-        sc_state_full=sc_state_full,
-        x_true_full=x_true_full,
-        x_map=x_map,
-        tau_full=tau_full,
-        tau_map=tau,
-        alpha=alpha_true,
-        delta=delta_true,
-        omega=omega_true,
-        vis_mask=vis_mask,
-        mesh_target_radius_km=R_bennu,
-        mesh_scale_mode="rms",
-        downsample=1,
+    model.plot_journal_diagnostics(
+        burn_in,
+        thin,
+        tau,
+        vis_mask,
+        true_theta=true_delta,
+        batch_cov=cov1,
     )
 
     # --------------------------
-    # Plot visibility mask
+    # Posterior at epoch -> GMM split -> STM propagation to utc_target
     # --------------------------
-    t_hr = tau_full / 3600.0
-    plt.figure(figsize=(10, 2.6))
-    plt.plot(t_hr, vis_mask.astype(int), "o-")
-    plt.ylim(-0.1, 1.1)
-    plt.yticks([0, 1], ["occulted", "visible"])
-    plt.xlabel("Time since start [hr]")
-    plt.title("Occultation / Visibility Mask (sphere proxy)")
-    plt.grid(True, linestyle=":")
-    plt.tight_layout()
-    plt.show()
+    # Samples are deviations about ref1 at tau = 0. Every mixture component k is propagated
+    # about its own mean with its own STM (P_k(t) = Phi_k P_k Phi_k^T); the single-Gaussian
+    # baseline is the same with K = 1 (sample mean + covariance). A nonlinear Monte Carlo of
+    # posterior samples is the reference both are checked against.
+    post = np.asarray(model.samples, dtype=float)
+    n_state = x0_true.size
+    print(
+        f"\n[GMM] Splitting {post.shape[0]} posterior samples at epoch ({utc0}) and "
+        f"propagating to {utc_target} (+{tau_target / 3600.0:.2f} h)"
+    )
+    w_g, mu_g, P_g = jf.fit_posterior_gmm(
+        post, n_components=gmm_n_components, select_bic=gmm_select_bic
+    )
+    print("[GMM] weights:", np.array2string(w_g, precision=3))
 
-    # --------------------------
-    # Corner plot
-    # --------------------------
-    try:
-        labels = [
-            r"$\delta x_0$",
-            r"$\delta y_0$",
-            r"$\delta z_0$",
-            r"$\delta v_{x0}$",
-            r"$\delta v_{y0}$",
-            r"$\delta v_{z0}$",
-            r"$\delta \mu$",
-            r"$\delta C_{20}$",
-            r"$\delta C_{21}$",
-            r"$\delta S_{21}$",
-            r"$\delta C_{22}$",
-            r"$\delta S_{22}$",
-        ]
-        model.plot_corner_with_batch(
-            batch_mean=np.zeros(12),
-            batch_cov=cov1,
-            use_median_as_truth=False,
-            true_theta=true_delta,
+    w_1 = np.ones(1)
+    mu_1 = post.mean(axis=0, keepdims=True)
+    P_1 = np.cov(post, rowvar=False)[None]
+
+    t_prop = np.linspace(0.0, tau_target, n_t_prop)
+    ivp_prop = dict(rtol=1e-8, atol=1e-10, method="LSODA")
+
+    m_g_t, P_g_t = jf.propagate_gmm_stm(
+        propagator, x0_ref1, w_g, mu_g, P_g, t_prop, **ivp_prop
+    )
+    m_1_t, P_1_t = jf.propagate_gmm_stm(
+        propagator, x0_ref1, w_1, mu_1, P_1, t_prop, label="Single Gaussian", **ivp_prop
+    )
+
+    rng_mc = np.random.default_rng(2024)
+    idx_mc = rng_mc.choice(
+        post.shape[0], size=min(n_mc_prop, post.shape[0]), replace=False
+    )
+    X_mc = jf.propagate_samples_mc(propagator, x0_ref1, post[idx_mc], t_prop, **ivp_prop)
+    ok_mc = np.all(np.isfinite(X_mc[:, :, 0]), axis=1)
+    if not np.all(ok_mc):
+        print(f"[MC] {np.sum(~ok_mc)} sample propagations failed and are dropped.")
+    X_mc = X_mc[ok_mc]
+
+    sol_tp = propagator.propagate_state_only(
+        x0_true, t_prop, show_progress=False, **ivp_prop
+    )
+    x_true_prop = sol_tp.y[:n_state, :].T  # (n_t_prop, n)
+
+    # The SH field is only valid outside the body: flag any impact along the prediction
+    # (after epoch 0, the launch point on the surface, where the inside test is ambiguous)
+    n_in_truth = int(
+        np.sum(
+            jf.points_inside_mesh(
+                bennu_mesh, x_true_prop[1:, :3], t_prop[1:], alpha_true, delta_true, omega_true
+            )
+        )
+    )
+    n_in_mc = sum(
+        bool(
+            np.any(
+                jf.points_inside_mesh(
+                    bennu_mesh, X_mc[i, 1:, :3], t_prop[1:], alpha_true, delta_true, omega_true
+                )
+            )
+        )
+        for i in range(X_mc.shape[0])
+    )
+    print(
+        f"[GMM] inside-mesh epochs along the prediction: truth {n_in_truth}, "
+        f"MC samples that impact {n_in_mc}/{X_mc.shape[0]}"
+    )
+    if n_in_truth or n_in_mc:
+        print("[WARNING] Prediction crosses the surface: move utc_target earlier.")
+
+    # Metrics at the target epoch (position, meters)
+    pos_mc = X_mc[:, -1, :3]
+    m_mc = pos_mc.mean(axis=0)
+    mg_T, Pg_T = jf.gmm_moments(w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])
+    m1_T, P1_T = m_1_t[0, -1, :3], P_1_t[0, -1, :3, :3]
+    sig_mc_T = np.sqrt(np.diag(np.cov(pos_mc, rowvar=False)))
+    print(f"\n[GMM] Position at target ({utc_target}), per-axis 1-sigma [m]:")
+    print("   MC             :", np.array2string(sig_mc_T * 1e3, precision=2))
+    print(
+        "   GMM + STMs     :",
+        np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2),
+    )
+    print(
+        "   Single Gaussian:",
+        np.array2string(np.sqrt(np.diag(P1_T)) * 1e3, precision=2),
+    )
+    print("[GMM] Mean offset from the MC mean [m]:")
+    print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
+    print("   Single Gaussian:", np.array2string((m1_T - m_mc) * 1e3, precision=2))
+
+    ll_g = np.mean(jf.gmm_logpdf(pos_mc, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3]))
+    ll_1 = np.mean(jf.gmm_logpdf(pos_mc, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3]))
+    print(
+        f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f} | single {ll_1:.3f} "
+        f"(GMM - single = {ll_g - ll_1:+.3f} nats)"
+    )
+
+    r_tr = x_true_prop[-1, :3]
+    d_tr = r_tr - m1_T
+    maha_1 = float(np.sqrt(d_tr @ np.linalg.solve(P1_T, d_tr)))
+    lp_tr_g = jf.gmm_logpdf(r_tr, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])[0]
+    lp_tr_1 = jf.gmm_logpdf(r_tr, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3])[0]
+    print(
+        f"[GMM] Truth at target: log p GMM {lp_tr_g:.3f} | single {lp_tr_1:.3f} | "
+        f"Mahalanobis (single) {maha_1:.2f}"
+    )
+
+    # Figures
+    def _panel(j, title):
+        return dict(
+            mc=X_mc[:, j, :3],
+            w=w_g,
+            mu=m_g_t[:, j, :3],
+            P=P_g_t[:, j, :3, :3],
+            mu1=m_1_t[0, j, :3],
+            P1=P_1_t[0, j, :3, :3],
+            truth=x_true_prop[j, :3],
+            center=X_mc[:, j, :3].mean(axis=0),
+            title=title,
         )
 
-    except Exception as e:
-        print("\n[Corner] Skipped.", e)
+    jf.plot_gmm_propagation(
+        [
+            _panel(0, f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"),
+            _panel(
+                -1,
+                f"Predicted at {utc_target.replace('T', ' ')} UTC "
+                f"(+{tau_target / 3600.0:.2f} h)",
+            ),
+        ],
+        prob=gmm_prob,
+    )
+
+    hist = jf.position_prediction_history(X_mc, w_g, m_g_t, P_g_t, m_1_t, P_1_t)
+    jf.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
 
     spice.kclear()

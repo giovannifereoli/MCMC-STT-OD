@@ -72,30 +72,11 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
-# Publication-ish defaults
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "serif",
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.linewidth": 0.8,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }
-)
-plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMC.py;
+# MCMC.configure() in the main applies the journal style.
+import MCMC
+
+MCMC.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 # ============================================================
 # Geometry / utility
@@ -550,322 +531,6 @@ def load_kernels(kernel_root: Path):
 
 
 # ============================================================
-# PLOTS
-# ============================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-
-def set_axes_equal_3d(ax):
-    """Make 3D axes have equal scale so the mesh doesn't look like a pancake."""
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-
-    x_mid = np.mean(x_limits)
-    y_mid = np.mean(y_limits)
-    z_mid = np.mean(z_limits)
-
-    plot_radius = 0.5 * max([x_range, y_range, z_range])
-
-    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
-    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
-    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
-
-
-def add_trimesh_to_ax(
-    ax, mesh, color=(0.7, 0.7, 0.7, 1.0), alpha=0.35, edge_alpha=0.15, max_faces=30000
-):
-    """
-    Render a trimesh.Trimesh on a matplotlib 3D axis.
-    Downsamples faces if mesh is huge (matplotlib dies otherwise).
-    """
-    # Downsample faces if necessary
-    faces = mesh.faces
-    verts = mesh.vertices
-
-    if faces.shape[0] > max_faces:
-        idx = np.random.default_rng(0).choice(
-            faces.shape[0], size=max_faces, replace=False
-        )
-        faces = faces[idx]
-
-    poly3d = verts[faces]  # (F,3,3)
-    coll = Poly3DCollection(poly3d, linewidths=0.2)
-    coll.set_facecolor(color)
-    coll.set_alpha(alpha)
-    coll.set_edgecolor((0.0, 0.0, 0.0, edge_alpha))
-    ax.add_collection3d(coll)
-
-
-def plot_bennu_scene_body_fixed(
-    bennu_mesh,
-    sc_state_full,
-    x_true_full,
-    x_map,
-    tau_full,
-    tau_map,
-    alpha,
-    delta,
-    omega,
-    vis_mask=None,
-    title="OSIRIS-REx + Particle around Bennu (BODY-FIXED)",
-    mesh_target_radius_km=None,
-    mesh_scale_mode="rms",
-    downsample=1,
-):
-    """
-    BODY-FIXED visualization (publication-ready).
-
-    Notes
-    -----
-    - Assumes `bennu_mesh` is already in Bennu body-fixed frame and centered at origin.
-    - `make_bennu_rotation_matrix(alpha, delta, omega, t)` is assumed to return a DCM
-      that maps BODY->INERTIAL (R_bi) or INERTIAL->BODY (R_ib). Many implementations
-      return BODY->INERTIAL; in that common case, the correct inertial->body transform
-      is the transpose.
-    """
-
-    # ------------------------------------------------------------
-    # Downsample
-    # ------------------------------------------------------------
-    sl = slice(None, None, max(1, int(downsample)))
-
-    sc_i = np.asarray(sc_state_full)[sl, :3]
-    pt_i = np.asarray(x_true_full)[sl, :3]
-    tau_i = np.asarray(tau_full)[sl]
-
-    x_map = np.asarray(x_map)
-    tau_map = np.asarray(tau_map)
-    mesh = bennu_mesh
-
-    # ------------------------------------------------------------
-    # Rotate INERTIAL -> BODY-FIXED
-    # ------------------------------------------------------------
-    sc_b = np.zeros_like(sc_i)
-    pt_b = np.zeros_like(pt_i)
-
-    for k, tk in enumerate(tau_i):
-        R_ib = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
-        sc_b[k] = R_ib @ sc_i[k]
-        pt_b[k] = R_ib @ pt_i[k]
-
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
-
-    fig = plt.figure(figsize=(7.2, 5.4))
-    ax = fig.add_subplot(111, projection="3d")
-
-    add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
-
-    # Trajectories: force colors explicitly
-    ax.plot(
-        sc_b[:, 0],
-        sc_b[:, 1],
-        sc_b[:, 2],
-        linewidth=1.8,
-        alpha=0.95,
-        color="tab:blue",
-        label="OSIRIS-REx (-64)",
-    )
-    ax.plot(
-        pt_b[:, 0],
-        pt_b[:, 1],
-        pt_b[:, 2],
-        linewidth=1.6,
-        alpha=0.95,
-        color="tab:red",
-        label="Particle Truth",
-    )
-
-    # ------------------------------------------------------------
-    # Visible / occulted points (both black)
-    # ------------------------------------------------------------
-    if vis_mask is not None:
-        vis_mask = np.asarray(vis_mask).astype(bool)
-        vis_mask_ds = (
-            vis_mask[sl]
-            if vis_mask.shape[0] >= tau_full[sl].shape[0]
-            else vis_mask[: sc_b.shape[0]]
-        )
-
-        sc_vis = sc_b[vis_mask_ds]
-        sc_occ = sc_b[~vis_mask_ds]
-
-        if sc_vis.size:
-            ax.scatter(
-                sc_vis[:, 0],
-                sc_vis[:, 1],
-                sc_vis[:, 2],
-                s=16,
-                marker="o",
-                color="black",
-                alpha=0.9,
-                label="Measurement Included",
-            )
-        if sc_occ.size:
-            ax.scatter(
-                sc_occ[:, 0],
-                sc_occ[:, 1],
-                sc_occ[:, 2],
-                s=18,
-                marker="x",
-                color="black",
-                alpha=0.9,
-                label="Measurement Unavailable",
-            )
-
-    # ------------------------------------------------------------
-    # Axes / view / limits
-    # ------------------------------------------------------------
-    ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_zlabel(r"$Z_\mathscr{B}$ [km]", labelpad=10)
-    fig.canvas.draw()
-
-    # No title (caption-driven for papers)
-    # ax.set_title(title)
-
-    ax.view_init(elev=10, azim=-120)
-
-    mesh_v = np.asarray(mesh.vertices)
-    all_xyz = np.vstack([mesh_v, sc_b, pt_b])
-
-    mins = np.min(all_xyz, axis=0)
-    maxs = np.max(all_xyz, axis=0)
-    span = maxs - mins
-    span_max = float(np.max(span)) if np.all(np.isfinite(span)) else 1.0
-    pad = 0.08 * span_max
-
-    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
-    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
-    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-
-    set_axes_equal_3d(ax)
-
-    # Legend: bigger and closer (inside, not outside)
-    ax.legend(
-        loc="upper right",
-        bbox_to_anchor=(0.98, 0.98),
-        frameon=True,
-        borderaxespad=0.2,
-    )
-
-    fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
-
-    # Save figure with timestamp (won't overwrite previous)
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig.canvas.draw()
-    fig.savefig(
-        f"results/bennu_scene_body_fixed_{timestamp}.pdf",
-        format="pdf",
-        # bbox_inches="tight",
-        pad_inches=0.20,
-    )
-    print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
-
-    plt.show()
-
-
-def plot_error_svd_explained(
-    x0_true,
-    x0_ref,
-    V_svd,
-    save_dir="results",
-    filename=None,
-    annotate_ratio=True,
-):
-    from matplotlib.patches import Patch
-
-    # ----------------------------
-    # Error in SVD basis
-    # ----------------------------
-    e = np.asarray(x0_true) - np.asarray(x0_ref)
-    z_err = np.asarray(V_svd).T @ e
-
-    idx = np.arange(len(z_err))
-    z_abs = np.abs(z_err)
-
-    # ----------------------------
-    # L2 percentage normalization
-    # ----------------------------
-    z2 = z_err**2
-    total = np.sum(z2)
-    y = 100 * z2 / total
-    ylabel = r"Explained Squared Error (SVD Basis) [\%]"
-
-    # ----------------------------
-    # Plot
-    # ----------------------------
-    fig, ax = plt.subplots(figsize=(9, 4.8))
-
-    colors = ["tab:blue"] * len(idx)
-    colors[-1] = "red"
-
-    bars = ax.bar(idx, y, color=colors, alpha=0.85, width=0.75)
-
-    ax.set_yscale("linear")
-    ax.set_ylim(0, 100)
-    ax.set_xticks(idx)
-    ax.set_xticklabels([str(i) for i in idx])
-
-    ax.set_xlabel("SVD Coordinate Index")
-    ax.set_ylabel(ylabel)
-
-    ax.grid(True, which="both", linestyle=":", alpha=0.7)
-
-    # ----------------------------
-    # Cleaner annotations
-    # ----------------------------
-    # optional ratio annotation for the null-space bar
-    if annotate_ratio:
-        ax.text(
-            idx[-1],
-            y[-1],
-            rf"{y[-1]:.1f}\%",
-            ha="center",
-            va="bottom",
-            fontsize=11,
-            color="red",
-            fontweight="bold",
-        )
-        for i, yi in enumerate(y):
-            if yi < 1:
-                ax.text(idx[i], 1.0, rf"{yi:.3f}\%", ha="center", fontsize=8)
-
-    # legend with correct color
-    legend_handles = [
-        Patch(facecolor="tab:blue", edgecolor="tab:blue", label="Other components"),
-        Patch(facecolor="red", edgecolor="red", label="Null-space component"),
-    ]
-    ax.legend(handles=legend_handles, frameon=True)
-
-    plt.tight_layout()
-
-    # ----------------------------
-    # Save
-    # ----------------------------
-    os.makedirs(save_dir, exist_ok=True)
-    if filename is None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"error_svd_explained_{ts}.pdf"
-
-    filepath = os.path.join(save_dir, filename)
-    fig.savefig(filepath, format="pdf", bbox_inches="tight", pad_inches=0.2)
-    print(f"Saved: {filepath}")
-
-    plt.show()
-
-
-# ============================================================
 # Gauss-Newton batch solver with STMs
 # ============================================================
 
@@ -1065,67 +730,15 @@ def solve_stage1_gn_with_stm(
 
         postfit = (res_pf / w) * obs_weights
 
-        # Reshape [r0, r1, r2, r3, ...] -> (2, N)
-        residuals_matrix = postfit.reshape(-1, 2).T
-        time_hr = np.asarray(tau).ravel() / 3600.0
-
-        # Remove zero residuals
-        mask0 = residuals_matrix[0] != 0.0
-        mask1 = residuals_matrix[1] != 0.0
-
-        r0, t0 = residuals_matrix[0, mask0], time_hr[mask0]
-        r1, t1 = residuals_matrix[1, mask1], time_hr[mask1]
-
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
-
-        # Top panel
-        ax0.scatter(t0, r0, s=50, alpha=0.85)
-        ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax0.set_ylabel(r"Whitened RA Residual [$\sigma$]")
-        ax0.grid(True, linestyle=":")
-
-        if r0.size > 0:
-            lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax0.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        # Bottom panel
-        ax1.scatter(t1, r1, s=50, alpha=0.85)
-        ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
-        ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
-        ax1.set_ylabel(r"Whitened DEC Residual [$\sigma$]")
-        ax1.set_xlabel("Time since epoch [hours]")
-        ax1.grid(True, linestyle=":")
-
-        if r1.size > 0:
-            lim = np.max(np.abs(np.quantile(r1, [0.01, 0.99])))
-            lim = max(lim, 3.2)
-            ax1.set_ylim(-1.1 * lim, 1.1 * lim)
-
-        legend_items = [
-            Line2D(
-                [0],
-                [0],
-                color="red",
-                linestyle=":",
-                linewidth=3.2,
-                label=r"$\pm 3\sigma$",
-            ),
-        ]
-
-        ax0.legend(
-            handles=legend_items,
-            loc="upper right",
-            frameon=True,
+        # Journal-style batch residuals (same styling as fig_postfit_residuals), saved into
+        # the run's figure folder set by MCMC.set_figure_dir.
+        MCMC.plot_postfit_residuals(
+            tau,
+            postfit,
+            None,
+            obs_weights[0::2] > 0.0,
+            name="fig_postfit_residuals_batch",
         )
-
-        os.makedirs("results", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"results/postfit_residuals_batch_{timestamp}.pdf"
-        fig.savefig(fname, format="pdf", bbox_inches="tight")
-        fig.tight_layout()
-        plt.show()
 
     return x0_ref, delta_total, cov_full  # , V_svd
 
@@ -1317,6 +930,47 @@ if __name__ == "__main__":
     burn_in = 2000
     thin = 100
     spherical_spread = 1e-1
+    # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
+    # such a file to skip the sampling and redo the diagnostics and figures from it.
+    LOAD_CHAIN = None  # e.g. "results/bennu_particle_<stamp>/chain.npz"
+
+    # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
+    # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
+    # one PDF per figure in a timestamped folder (MCMC.SHOW_FIGS at the top of the file)
+    PARAM_SYM = [
+        r"\delta x_0",
+        r"\delta y_0",
+        r"\delta z_0",
+        r"\delta v_{x,0}",
+        r"\delta v_{y,0}",
+        r"\delta v_{z,0}",
+        r"\delta\mu",
+        r"\delta C_{20}",
+        r"\delta C_{21}",
+        r"\delta S_{21}",
+        r"\delta C_{22}",
+        r"\delta S_{22}",
+    ]
+    PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
+    PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+    MCMC.configure(
+        PARAM_SYM,
+        PARAM_BASE_UNIT,
+        PARAM_BASE_SCALE,
+        rotation=make_bennu_rotation_matrix,
+        body="Bennu",
+        target="Particle",
+        obs_word="Image",
+        site_label="Ejection Site",
+        resid_labels=("RA", "Dec"),
+        fallback_dir=Path.home() / "bennu_figures_fallback",
+    )
+    fig_dir = MCMC.set_figure_dir(
+        Path(__file__).resolve().parent
+        / "results"
+        / f"bennu_particle_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Figures] -> {fig_dir}")
 
     # --------------------------
     # Load SPICE & spacecraft truth (SPICE remains in ET)
@@ -1450,6 +1104,61 @@ if __name__ == "__main__":
     print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
+    # Observation scene + geometry (truth on a dense grid over the arc)
+    # --------------------------
+    tau_dense = np.linspace(tau_full[0], tau_full[-1], 400)
+    sol_dense = propagator.propagate_state_only(
+        x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+    pt_dense = sol_dense.y[:3, :].T
+    r_dense = np.linalg.norm(pt_dense, axis=1)
+    # Epoch 0 is the launch point, on the surface itself, where the inside test is a coin
+    # flip: check the arc after it.
+    n_in_dense = int(
+        np.sum(
+            MCMC.points_inside_mesh(
+                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
+            )
+        )
+    )
+    print(
+        f"[Scene] truth |r| over the arc: {r_dense.min() * 1e3:.1f}-"
+        f"{r_dense.max() * 1e3:.1f} m; inside the shape model at "
+        f"{n_in_dense}/{tau_dense.size - 1} epochs after launch"
+    )
+    if n_in_dense:
+        print("[WARNING] The truth trajectory crosses the shape model during the arc.")
+    sc_dense = np.array(
+        [
+            spice.spkezr(SC_NAME, float(et0 + t), FRAME_I, ABCORR, CENTER)[0]
+            for t in tau_dense
+        ],
+        dtype=float,
+    )
+    MCMC.plot_scene_body_fixed(
+        bennu_mesh,
+        tau_obs=tau_full,
+        sc_obs=sc_state_full,
+        vis_mask=vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
+        detach_bf=pos_detach_bf,
+    )
+    MCMC.plot_observation_geometry(
+        tau_full,
+        sc_state_full,
+        x_true_full,
+        vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+    )
+
+    # --------------------------
     # Generate noisy RA/DEC measurements
     # --------------------------
     # Generate measurements for ALL epochs (including occulted ones)
@@ -1551,11 +1260,12 @@ if __name__ == "__main__":
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
     print("[Stage 1] delta_hat1:\n", delta_hat1)
-    # plot_error_svd_explained(
-    #    x0_true=x0_true,
-    #    x0_ref=x0_ref1,
-    #    V_svd=V_svd,
-    # )
+
+    # Display units: rescale each parameter by a power of ten so its batch sigma reads well
+    disp_scale, disp_unit = MCMC.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    MCMC.configure(PARAM_SYM, disp_unit, disp_scale)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1
@@ -1615,14 +1325,19 @@ if __name__ == "__main__":
         observed_data=y_obs,
     )
     model.setup_whitening_from_priors()
-    model.run(
-        n_samples=n_samples,
-        n_walkers=n_walkers,
-        burn_in=burn_in,
-        thin=thin,
-        spherical_spread=spherical_spread,
-        method_optimize="Powell",
-    )
+    if LOAD_CHAIN:
+        model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
+        burn_in, thin = model.burn_in, model.thin
+    else:
+        model.run(
+            n_samples=n_samples,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            thin=thin,
+            spherical_spread=spherical_spread,
+            method_optimize="Powell",
+        )
+        model.save_chain(fig_dir / "chain.npz")
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
 
@@ -1638,77 +1353,19 @@ if __name__ == "__main__":
     print("\n[Truth] true_delta about ref1:\n", true_delta)
 
     # --------------------------
-    # Diagnostics
+    # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
     # --------------------------
-    model.plot_convergence()
-    model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
-    # model.plot_log_likelihood()
+    # Samples are deviations about the batch solution ref1, so the batch estimate is 0 with
+    # covariance cov1.
     model.summary()
     model.print_regression_diagnostics()
-    model.plot_autocorrelation()
-    model.plot_log_likelihood()
-
-    # --------------------------
-    # Plot scene (using MCMC mean estimate)
-    # --------------------------
-    _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, theta_hat)
-
-    plot_bennu_scene_body_fixed(
-        bennu_mesh=bennu_mesh,
-        sc_state_full=sc_state_full,
-        x_true_full=x_true_full,
-        x_map=x_map,
-        tau_full=tau_full,
-        tau_map=tau,
-        alpha=alpha_true,
-        delta=delta_true,
-        omega=omega_true,
-        vis_mask=vis_mask,
-        mesh_target_radius_km=R_bennu,
-        mesh_scale_mode="rms",
-        downsample=1,
+    model.plot_journal_diagnostics(
+        burn_in,
+        thin,
+        tau,
+        vis_mask,
+        true_theta=true_delta,
+        batch_cov=cov1,
     )
-
-    # --------------------------
-    # Plot visibility mask
-    # --------------------------
-    t_hr = tau_full / 3600.0
-    plt.figure(figsize=(10, 2.6))
-    plt.plot(t_hr, vis_mask.astype(int), "o-")
-    plt.ylim(-0.1, 1.1)
-    plt.yticks([0, 1], ["occulted", "visible"])
-    plt.xlabel("Time since start [hr]")
-    plt.title("Occultation / Visibility Mask (sphere proxy)")
-    plt.grid(True, linestyle=":")
-    plt.tight_layout()
-    plt.show()
-
-    # --------------------------
-    # Corner plot
-    # --------------------------
-    try:
-        labels = [
-            r"$\delta x_0$",
-            r"$\delta y_0$",
-            r"$\delta z_0$",
-            r"$\delta v_{x0}$",
-            r"$\delta v_{y0}$",
-            r"$\delta v_{z0}$",
-            r"$\delta \mu$",
-            r"$\delta C_{20}$",
-            r"$\delta C_{21}$",
-            r"$\delta S_{21}$",
-            r"$\delta C_{22}$",
-            r"$\delta S_{22}$",
-        ]
-        model.plot_corner_with_batch(
-            batch_mean=np.zeros(12),
-            batch_cov=cov1,
-            use_median_as_truth=False,
-            true_theta=true_delta,
-        )
-
-    except Exception as e:
-        print("\n[Corner] Skipped.", e)
 
     spice.kclear()

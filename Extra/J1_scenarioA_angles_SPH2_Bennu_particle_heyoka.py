@@ -1,49 +1,65 @@
 """
-Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
+HEYOKA VARIANT of J1_scenarioA_angles_SPH2_Bennu_particle.
+
+Identical scenario/physics, but the naive SymPy + scipy.solve_ivp STT propagator
+(generate_stt_functions_bennu_deg2 + STTPropagatorND) is replaced by a
+heyoka.py-based propagator:
+
+    from STTPropagationHeyoka import HeyokaSTTPropagator, build_bennu_deg2_heyoka
+
+heyoka integrates with a high-order adaptive Taylor method and builds the
+variational equations automatically, so the STM (and higher STTs) come for free
+to machine precision -- no hand-derived Jacobian/Hessian tensors. It is a drop-in:
+propagate() / propagate_deviation() / sol.y / stts[1] behave as before. Validated
+against the SymPy propagator to ~1e-13 relative (trajectory, STM, deviation),
+~70x faster to set up and ~1000x faster to integrate.
+
+Install heyoka (conda-forge; see https://bluescarni.github.io/heyoka.py/install.html):
+    conda install -c conda-forge heyoka.py
+Run this script from an environment that has heyoka.py AND the scenario deps
+(spiceypy, trimesh, emcee, corner, matplotlib, statsmodels, dynesty).
+
+Scenario (uses heyoka STT propagator + your MCMCModel):
 
 - Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
-- GravityPopper detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
+- Particle detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
 - Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
-- GravityPopper dynamics uses degree-2 AND degree-3 gravity potential in body-fixed:
-    U = mu/r * (1
-              + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ)
-              + (R_ref/r)^3 * sum_{m=0..3} P3m(sinφ)*(C3m cos mλ + S3m sin mλ))
+- Particle dynamics uses degree-2 gravity potential in body-fixed:
+    U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
   Acceleration is computed as a = ∇U in body-fixed, then rotated to inertial.
 
 - You estimate:
-    theta = [δr0(3), δv0(3), δmu(1),
-             δC20, δC21, δS21, δC22, δS22,          (5 degree-2 Stokes coefficients)
-             δC30, δC31, δS31, δC32, δS32, δC33, δS33]  (7 degree-3 Stokes coefficients)
-    -> 19 params total
-  about a reference x0_ref (also 19D state):
-    x = [x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22, C30, C31, S31, C32, S32, C33, S33]
+    theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
+  about a reference x0_ref (also 12D state).
 
-- Measurements: Radiometric range and range-rate (SC <-> GravityPopper),
-  generated at all epochs but zero-weighted during occultation by Bennu.
+- Measurements: RA/DEC from spacecraft to particle, with occultation mask (sphere proxy).
 
 Pipeline:
-  1) Propagate truth GravityPopper (19D) with truth params via STTPropagatorND.
-  2) Query SPICE for spacecraft truth state at the same epochs.
-  3) Generate noisy radiometric measurements (range + range-rate) at all epochs;
-     build visibility mask (sphere proxy) and zero-weight occulted epochs.
-  4) Build reference x0_ref (perturb truth) and propagate ref + STTs with STTPropagatorND.
-  5) Stage-1 Gauss-Newton batch MAP (STM-based): iterate linearized normal equations
-     with prior regularization to convergence about x0_ref.
-  6) Stage-2 STT-based MAP: relinearize about Stage-1 solution (x0_ref1),
-     use propagate_deviation with STTPropagatorND for fast residual evaluation.
-  7) MCMC (emcee) around the STT-based residual function to sample the posterior.
+  1) Propagate truth particle with truth params.
+  2) Query SPICE for spacecraft truth at the same epochs.
+  3) Generate noisy RA/DEC on visible epochs only.
+  4) Build reference (perturb truth) and propagate ref + STTs with STTPropagator.
+  5) Stage-1 full nonlinear MAP (optional, slow): re-propagate each evaluation.
+  6) Stage-2 STT-based MAP: use propagate_deviation with your STTPropagator.
+  7) MCMC around STT-based residual function.
 
 IMPORTANT REQUIREMENT:
-- STTPropagatorND must support time-dependent dynamics: f(x,t), A(x,t), Bk(x,t).
-  All generated functions are called as f_func(*x, t), A_func(*x, t), B_funcs[k](*x, t).
+- Your STTPropagator must support time-dependent dynamics: f(x,t), A(x,t), Bk(x,t).
+  If your STTPropagator currently calls f_func(*x) without t, you must patch it to pass t:
+      f = f_func(*x, t)
+      A = A_func(*x, t)
+      Bk = B_funcs[k](*x, t)
+  Everything else in this script assumes that.
 
-You MUST provide SPICE kernels (see load_kernels()):
-  - OSIRIS-REx SPK + attitude + clock kernels
-  - Bennu SPK, shape model DSK, PCK
-  - Leapseconds (naif0012.tls), planetary ephemeris (de424.bsp / de432s.bsp)
-  - Names consistent with kernels: SC_NAME="OSIRIS-REX", CENTER="BENNU", FRAME="J2000"
+You MUST provide:
+- A meta-kernel that furnsh() loads:
+    * OSIRIS-REx SPK (spacecraft)
+    * Bennu SPK (if needed by your setup) / leapseconds
+- Names consistent with kernels:
+    SC_NAME, CENTER, FRAME (J2000 typically).
 
-Units throughout: km, km/s, seconds (ET for SPICE; seconds-since-epoch for dynamics)
+Units:
+- km, km/s, seconds (ET)
 """
 
 import os
@@ -52,52 +68,35 @@ from pathlib import Path
 from datetime import datetime
 
 
-import sympy as sp
 import numpy as np
-from itertools import product
 
 import spiceypy as spice
 import trimesh
-import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 from scipy.stats import norm
 
-from STTPropagationND import STTPropagatorND
+from STTPropagationHeyoka import HeyokaSTTPropagator, build_bennu_deg2_heyoka
 from MCMC import MCMCModel
 
-# Publication-ish defaults
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "serif",
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.linewidth": 0.8,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }
-)
-plt.rcParams["text.latex.preamble"] = r"\usepackage{mathrsfs}"
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure): shared with the
+# other Bennu/Ryugu scripts. MCMC.py sets its own rcParams on import; jf.configure() in the
+# main re-applies the journal style after it.
+import journal_figures as jf
+
+jf.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 # ============================================================
 # Geometry / utility
 # ============================================================
 
 
+def wrap_to_pi(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
 def occultation_mask(sc_pos, part_pos, R_body):
     """
-    Visibility test: does the segment SC->GravityPopper intersect sphere of radius R_body at origin?
+    Visibility test: does the segment SC->particle intersect sphere of radius R_body at origin?
     sc_pos:   (N,3)
     part_pos: (N,3)
     returns: mask True if visible
@@ -161,7 +160,7 @@ def occultation_mask_shape(
     Inputs
     ------
     sc_pos_i    : (N,3) spacecraft position in inertial (Bennu-centered, J2000)
-    part_pos_i  : (N,3) GravityPopper position in inertial (Bennu-centered, J2000)
+    part_pos_i  : (N,3) particle position in inertial (Bennu-centered, J2000)
     bennu_mesh_bf : trimesh.Trimesh, Bennu shape in BODY-FIXED frame, centered at origin
     alpha,delta,omega,w0 : Bennu pole/spin model used by make_bennu_rotation_matrix
     tau         : (N,) seconds since start (same "tau" you use for dynamics); if None assumes t=0 for all
@@ -171,7 +170,7 @@ def occultation_mask_shape(
     Returns
     -------
     visible : (N,) bool
-        True if GravityPopper is visible (NOT occulted by the mesh).
+        True if particle is visible (NOT occulted by the mesh).
     """
     sc_pos_i = np.asarray(sc_pos_i, dtype=float)
     part_pos_i = np.asarray(part_pos_i, dtype=float)
@@ -206,7 +205,7 @@ def occultation_mask_shape(
     # Ray origins and directions in BODY-FIXED
     d = pt_b - sc_b
     rng = np.linalg.norm(d, axis=1)
-    # Handle degenerate SC==GravityPopper
+    # Handle degenerate SC==particle
     good = rng > 0.0
     dirs = np.zeros_like(d)
     dirs[good] = d[good] / rng[good, None]
@@ -218,8 +217,8 @@ def occultation_mask_shape(
 
     # Visible if:
     # - no hit at all   OR
-    # - first hit is beyond the GravityPopper range (with margin eps)
-    # Occulted if hit occurs before GravityPopper.
+    # - first hit is beyond the particle range (with margin eps)
+    # Occulted if hit occurs before particle.
     # Note: dist_hit is in same units as mesh coords (km if you scaled mesh).
     visible = np.ones(N, dtype=bool)
     # If intersects_first returns -1 sometimes depending on backend, treat as "no hit"
@@ -233,253 +232,92 @@ def occultation_mask_shape(
 
 
 # ============================================================
-# Degree-3 potential in body-fixed + symbolic derivatives up to any STT order
-# (time dependence enters only through R_ib(t) which we embed symbolically via cos/sin(omega*t + w0))
+# Degree-2 potential in body-fixed -- dynamics + STTs via heyoka
 # ============================================================
-
-
-def generate_stt_functions_bennu_deg3(
-    order, R_ref_km, alpha_rad, delta_rad, omega_rad_s, w0_rad=0.0
-):
-    t = sp.Symbol("t", real=True)
-    x, y, z, vx, vy, vz = sp.symbols("x y z vx vy vz", real=True)
-    mu, C20, C21, S21, C22, S22, C30, C31, S31, C32, S32, C33, S33 = sp.symbols(
-        "mu C20 C21 S21 C22 S22 C30 C31 S31 C32 S32 C33 S33", real=True
-    )
-
-    n_state = 19
-    X = sp.Matrix(
-        [
-            x,
-            y,
-            z,
-            vx,
-            vy,
-            vz,
-            mu,
-            C20,
-            C21,
-            S21,
-            C22,
-            S22,
-            C30,
-            C31,
-            S31,
-            C32,
-            S32,
-            C33,
-            S33,
-        ]
-    )
-    r_i = sp.Matrix([x, y, z])
-
-    alpha = sp.Float(alpha_rad)
-    delta = sp.Float(delta_rad)
-    omega = sp.Float(omega_rad_s)
-    w0 = sp.Float(w0_rad)
-    W = w0 + omega * t
-
-    def Rz(th):
-        c, s = sp.cos(th), sp.sin(th)
-        return sp.Matrix([[c, -s, 0], [s, c, 0], [0, 0, 1]])
-
-    def Rx(th):
-        c, s = sp.cos(th), sp.sin(th)
-        return sp.Matrix([[1, 0, 0], [0, c, -s], [0, s, c]])
-
-    R_ib = Rz(W) * Rx(sp.pi / 2 - delta) * Rz(alpha + sp.pi / 2)
-    R_bi = R_ib.T
-
-    xb_s, yb_s, zb_s = sp.symbols("xb yb zb", real=True)
-
-    r2 = xb_s**2 + yb_s**2 + zb_s**2
-    r = sp.sqrt(r2)
-    lam = sp.atan2(yb_s, xb_s)
-    phi = sp.atan2(zb_s, sp.sqrt(xb_s**2 + yb_s**2))
-    sphi = sp.sin(phi)
-    cphi = sp.cos(phi)
-
-    # --- degree-2 Legendre functions (unnormalized) ---
-    P20 = sp.Rational(1, 2) * (3 * sphi**2 - 1)
-    P21 = 3 * sphi * cphi
-    P22 = 3 * cphi**2
-
-    # --- degree-3 Legendre functions (unnormalized) ---
-    P30 = sp.Rational(1, 2) * sphi * (5 * sphi**2 - 3)
-    P31 = sp.Rational(3, 2) * cphi * (5 * sphi**2 - 1)
-    P32 = 15 * sphi * cphi**2
-    P33 = 15 * cphi**3
-
-    cos1, sin1 = sp.cos(lam), sp.sin(lam)
-    cos2, sin2 = sp.cos(2 * lam), sp.sin(2 * lam)
-    cos3, sin3 = sp.cos(3 * lam), sp.sin(3 * lam)
-
-    R2 = sp.Float(R_ref_km**2)
-    R3 = sp.Float(R_ref_km**3)
-
-    F2 = C20 * P20 + P21 * (C21 * cos1 + S21 * sin1) + P22 * (C22 * cos2 + S22 * sin2)
-    F3 = (
-        C30 * P30
-        + P31 * (C31 * cos1 + S31 * sin1)
-        + P32 * (C32 * cos2 + S32 * sin2)
-        + P33 * (C33 * cos3 + S33 * sin3)
-    )
-
-    U_b = mu / r * (1 + (R2 / r2) * F2 + (R3 / r**3) * F3)
-
-    a_b_s = sp.Matrix([sp.diff(U_b, xb_s), sp.diff(U_b, yb_s), sp.diff(U_b, zb_s)])
-
-    r_b_expr = R_ib * r_i
-    subs_rb = {xb_s: r_b_expr[0], yb_s: r_b_expr[1], zb_s: r_b_expr[2]}
-    a_b = sp.Matrix([a_b_s[i].subs(subs_rb) for i in range(3)])
-    a_i = R_bi * a_b
-
-    # 19D dynamics — gravity params are constants (zero time derivative)
-    f = sp.Matrix(
-        [vx, vy, vz, a_i[0], a_i[1], a_i[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    )
-
-    A = f.jacobian(X)
-    B_syms = {1: A}
-
-    for k in range(2, order + 1):
-        shape = (n_state,) * (k + 1)
-        Bk = sp.MutableDenseNDimArray.zeros(*shape)
-        for idx in product(range(n_state), repeat=k + 1):
-            i, *js = idx
-            deriv = sp.diff(f[i], *[X[j] for j in js])
-            Bk[idx] = deriv
-        B_syms[k] = Bk
-
-    args = (
-        x,
-        y,
-        z,
-        vx,
-        vy,
-        vz,
-        mu,
-        C20,
-        C21,
-        S21,
-        C22,
-        S22,
-        C30,
-        C31,
-        S31,
-        C32,
-        S32,
-        C33,
-        S33,
-        t,
-    )
-    f_func = sp.lambdify(args, f, "numpy")
-    A_func = sp.lambdify(args, B_syms[1], "numpy")
-    B_funcs = {
-        k: sp.lambdify(args, B_syms[k].tolist(), "numpy") for k in range(2, order + 1)
-    }
-
-    return f_func, A_func, B_funcs
+# The old SymPy generator (generate_stt_functions_bennu_deg2) that hand-built
+# f, A (Jacobian) and B_k (higher-order tensors) and lambdified them is no longer
+# needed: heyoka's `build_bennu_deg2_heyoka` defines the same 12D augmented
+# dynamics symbolically, and `HeyokaSTTPropagator` derives the STM/STTs from the
+# variational equations automatically. See STTPropagationHeyoka.py.
+#
+#   X = [x y z vx vy vz mu C20 C21 S21 C22 S22]
+#   U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)(C2m cos mλ + S2m sin mλ))
+#   a_inertial = grad_{r_i} U(R_ib(t) r_i)
 
 
 # ============================================================
-# Measurement generation (Range / Range-rate from SPICE SC to GravityPopper)
+# Measurement generation (RA/DEC from SPICE SC to particle)
 # ============================================================
 
 
-def generate_radio_measurements_from_sc(
-    x_part, sc_state, sigma_range, sigma_range_rate, rng, add_outliers=False
+def generate_opnav_measurements_from_sc(
+    x_part, sc_state, sigma_ra, sigma_dec, rng, add_outliers=False
 ):
     """
-    x_part:   (N,19) or (N,6) GravityPopper inertial state
-    sc_state: (N,6) spacecraft inertial state
-
-    returns:
-      y = [range_0, range_rate_0, range_1, range_rate_1, ...]
+    x_part: (N,12) or (N,6) particle in inertial
+    sc_state: (N,6) spacecraft inertial
     """
-    rel_state = x_part[:, :6] - sc_state[:, :6]
-    rho, rhodot, _, _ = range_rate_and_partials_from_rel_state(rel_state)
+    los = x_part[:, :3] - sc_state[:, :3]
+    ra, dec, _, _ = radec_and_partials_from_los(los)
 
-    rho_meas = rho + rng.normal(0.0, sigma_range, size=rho.shape)
-    rhodot_meas = rhodot + rng.normal(0.0, sigma_range_rate, size=rhodot.shape)
+    ra_meas = ra + rng.normal(0.0, sigma_ra, size=ra.shape)
+    dec_meas = dec + rng.normal(0.0, sigma_dec, size=dec.shape)
 
     if add_outliers:
         p_out = 0.02
-        out_scale_rho = 20.0 * sigma_range
-        out_scale_rhodot = 20.0 * sigma_range_rate
-        mask = rng.random(size=rho.shape) < p_out
-        rho_meas[mask] += rng.normal(0.0, out_scale_rho, size=np.sum(mask))
-        rhodot_meas[mask] += rng.normal(0.0, out_scale_rhodot, size=np.sum(mask))
+        mask = rng.random(size=ra.shape) < p_out
+        ra_meas[mask] += rng.normal(0, 20 * sigma_ra, size=np.sum(mask))
+        dec_meas[mask] += rng.normal(0, 20 * sigma_dec, size=np.sum(mask))
 
-    y = np.empty(2 * len(rho))
-    y[0::2] = rho_meas
-    y[1::2] = rhodot_meas
+    y = np.empty(2 * len(ra))
+    y[0::2] = ra_meas
+    y[1::2] = dec_meas
     return y
 
 
-def range_rate_and_partials_from_rel_state(rel_state):
+def radec_and_partials_from_los(los):
     """
-    rel_state: (N,6) = [dx, dy, dz, dvx, dvy, dvz]
-               relative state from SC to GravityPopper
-
+    los: (N,3) from SC to particle
     returns:
-      rho:           (N,)   range
-      rhodot:        (N,)   range rate
-      d_rho_d_r:     (N,3)  partial of range wrt relative position
-      d_rhodot_d_x:  (N,6)  partial of range rate wrt relative state
-                            [d/dx, d/dy, d/dz, d/dvx, d/dvy, d/dvz]
+      ra, dec: (N,)
+      d_ra_d_r, d_dec_d_r: (N,3) wrt particle position (same as wrt los)
     """
-    r = rel_state[:, :3]
-    v = rel_state[:, 3:6]
+    x = los[:, 0]
+    y = los[:, 1]
+    z = los[:, 2]
 
-    x = r[:, 0]
-    y = r[:, 1]
-    z = r[:, 2]
-
-    vx = v[:, 0]
-    vy = v[:, 1]
-    vz = v[:, 2]
-
-    rho2 = x * x + y * y + z * z
+    rxy2 = x * x + y * y
+    rxy = np.sqrt(np.maximum(rxy2, 1e-30))
+    rho2 = rxy2 + z * z
     rho = np.sqrt(np.maximum(rho2, 1e-30))
 
-    rv = x * vx + y * vy + z * vz
-    rhodot = rv / rho
+    # RA: use raw atan2, NO modulo
+    ra = np.arctan2(y, x)  # (-pi, pi]
+    denom_ra = np.maximum(rxy2, 1e-30)
+    d_ra_dx = -y / denom_ra
+    d_ra_dy = x / denom_ra
+    d_ra_dz = 0.0 * z
 
-    # ---- range partial wrt position ----
-    d_rho_dx = x / rho
-    d_rho_dy = y / rho
-    d_rho_dz = z / rho
-    d_rho_d_r = np.stack([d_rho_dx, d_rho_dy, d_rho_dz], axis=1)
+    # -DEC: use atan2(z, rxy)
+    dec = np.arctan2(z, rxy)
 
-    # ---- range-rate partial wrt state ----
-    # rhodot = (r·v)/rho
-    # d(rhodot)/dr = v/rho - (r·v) r / rho^3
-    # d(rhodot)/dv = r/rho
+    # ddec/dx, ddec/dy, ddec/dz
+    # dec = atan2(z, rxy)
+    # ddec/dz = rxy / (rxy^2 + z^2) = rxy / rho^2
+    # ddec/drxy = -z / (rxy^2 + z^2) = -z / rho^2
+    # drxy/dx = x/rxy, drxy/dy = y/rxy
+    denom_dec = np.maximum(rho2, 1e-30)
 
-    rho3 = np.maximum(rho**3, 1e-30)
+    d_dec_dz = rxy / denom_dec
+    d_dec_drxy = -z / denom_dec
 
-    d_rhodot_dx = vx / rho - rv * x / rho3
-    d_rhodot_dy = vy / rho - rv * y / rho3
-    d_rhodot_dz = vz / rho - rv * z / rho3
+    d_dec_dx = d_dec_drxy * (x / rxy)
+    d_dec_dy = d_dec_drxy * (y / rxy)
 
-    d_rhodot_dvx = x / rho
-    d_rhodot_dvy = y / rho
-    d_rhodot_dvz = z / rho
+    d_ra_d_r = np.stack([d_ra_dx, d_ra_dy, d_ra_dz], axis=1)
+    d_dec_d_r = np.stack([d_dec_dx, d_dec_dy, d_dec_dz], axis=1)
 
-    d_rhodot_d_x = np.stack(
-        [
-            d_rhodot_dx,
-            d_rhodot_dy,
-            d_rhodot_dz,
-            d_rhodot_dvx,
-            d_rhodot_dvy,
-            d_rhodot_dvz,
-        ],
-        axis=1,
-    )
-
-    return rho, rhodot, d_rho_d_r, d_rhodot_d_x
+    return ra, dec, d_ra_d_r, d_dec_d_r
 
 
 # ============================================================
@@ -604,232 +442,6 @@ def load_kernels(kernel_root: Path):
 
 
 # ============================================================
-# BETTER TRAJECTORY PLOT USING THE SHAPE MODEL (trimesh)
-# ============================================================
-
-import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-
-def set_axes_equal_3d(ax):
-    """Make 3D axes have equal scale so the mesh doesn't look like a pancake."""
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-
-    x_mid = np.mean(x_limits)
-    y_mid = np.mean(y_limits)
-    z_mid = np.mean(z_limits)
-
-    plot_radius = 0.5 * max([x_range, y_range, z_range])
-
-    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
-    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
-    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
-
-
-def add_trimesh_to_ax(
-    ax, mesh, color=(0.7, 0.7, 0.7, 1.0), alpha=0.35, edge_alpha=0.15, max_faces=30000
-):
-    """
-    Render a trimesh.Trimesh on a matplotlib 3D axis.
-    Downsamples faces if mesh is huge (matplotlib dies otherwise).
-    """
-    # Downsample faces if necessary
-    faces = mesh.faces
-    verts = mesh.vertices
-
-    if faces.shape[0] > max_faces:
-        idx = np.random.default_rng(0).choice(
-            faces.shape[0], size=max_faces, replace=False
-        )
-        faces = faces[idx]
-
-    poly3d = verts[faces]  # (F,3,3)
-    coll = Poly3DCollection(poly3d, linewidths=0.2)
-    coll.set_facecolor(color)
-    coll.set_alpha(alpha)
-    coll.set_edgecolor((0.0, 0.0, 0.0, edge_alpha))
-    ax.add_collection3d(coll)
-
-
-def plot_bennu_scene_body_fixed(
-    bennu_mesh,
-    sc_state_full,
-    x_true_full,
-    x_map,
-    tau_full,
-    tau_map,
-    alpha,
-    delta,
-    omega,
-    vis_mask=None,
-    title="OSIRIS-REx + GravityPopper around Bennu (BODY-FIXED)",
-    mesh_target_radius_km=None,
-    mesh_scale_mode="rms",
-    downsample=3,
-):
-    """
-    BODY-FIXED visualization (publication-ready).
-
-    Notes
-    -----
-    - Assumes `bennu_mesh` is already in Bennu body-fixed frame and centered at origin.
-    - `make_bennu_rotation_matrix(alpha, delta, omega, t)` is assumed to return a DCM
-      that maps BODY->INERTIAL (R_bi) or INERTIAL->BODY (R_ib). Many implementations
-      return BODY->INERTIAL; in that common case, the correct inertial->body transform
-      is the transpose.
-    """
-
-    # ------------------------------------------------------------
-    # Downsample
-    # ------------------------------------------------------------
-    sl = slice(None, None, max(1, int(downsample)))
-
-    sc_i = np.asarray(sc_state_full)[sl, :3]
-    pt_i = np.asarray(x_true_full)[sl, :3]
-    tau_i = np.asarray(tau_full)[sl]
-
-    x_map = np.asarray(x_map)
-    tau_map = np.asarray(tau_map)
-    mesh = bennu_mesh
-
-    # ------------------------------------------------------------
-    # Rotate INERTIAL -> BODY-FIXED
-    # ------------------------------------------------------------
-    sc_b = np.zeros_like(sc_i)
-    pt_b = np.zeros_like(pt_i)
-
-    for k, tk in enumerate(tau_i):
-        R_ib = np.asarray(make_bennu_rotation_matrix(alpha, delta, omega, float(tk)))
-        sc_b[k] = R_ib @ sc_i[k]
-        pt_b[k] = R_ib @ pt_i[k]
-
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
-
-    fig = plt.figure(figsize=(7.2, 5.4))
-    ax = fig.add_subplot(111, projection="3d")
-
-    add_trimesh_to_ax(ax, mesh, alpha=0.35, edge_alpha=0.08, max_faces=25000)
-
-    # Trajectories: force colors explicitly
-    ax.plot(
-        sc_b[:, 0],
-        sc_b[:, 1],
-        sc_b[:, 2],
-        linewidth=1.8,
-        alpha=0.95,
-        color="tab:blue",
-        label="OSIRIS-REx (-64)",
-    )
-    ax.plot(
-        pt_b[:, 0],
-        pt_b[:, 1],
-        pt_b[:, 2],
-        linewidth=1.6,
-        alpha=0.95,
-        color="tab:red",
-        label="GravityPopper Truth",
-    )
-
-    # ------------------------------------------------------------
-    # Visible / occulted points (both black)
-    # ------------------------------------------------------------
-    if vis_mask is not None:
-        vis_mask = np.asarray(vis_mask).astype(bool)
-        vis_mask_ds = (
-            vis_mask[sl]
-            if vis_mask.shape[0] >= tau_full[sl].shape[0]
-            else vis_mask[: sc_b.shape[0]]
-        )
-
-        sc_vis = sc_b[vis_mask_ds]
-        sc_occ = sc_b[~vis_mask_ds]
-
-        if sc_vis.size:
-            ax.scatter(
-                sc_vis[:, 0],
-                sc_vis[:, 1],
-                sc_vis[:, 2],
-                s=16,
-                marker="o",
-                color="black",
-                alpha=0.9,
-                label="Measurement Used",
-            )
-        if sc_occ.size:
-            ax.scatter(
-                sc_occ[:, 0],
-                sc_occ[:, 1],
-                sc_occ[:, 2],
-                s=18,
-                marker="x",
-                color="black",
-                alpha=0.9,
-                label="Measurement Unavailable",
-            )
-
-    # ------------------------------------------------------------
-    # Axes / view / limits
-    # ------------------------------------------------------------
-    ax.set_xlabel(r"$X_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_ylabel(r"$Y_\mathscr{B}$ [km]", labelpad=10)
-    ax.set_zlabel(r"$Z_\mathscr{B}$ [km]", labelpad=10)
-    fig.canvas.draw()
-
-    # No title (caption-driven for papers)
-    # ax.set_title(title)
-
-    ax.view_init(elev=10, azim=-120)
-
-    mesh_v = np.asarray(mesh.vertices)
-    all_xyz = np.vstack([mesh_v, sc_b, pt_b])
-
-    mins = np.min(all_xyz, axis=0)
-    maxs = np.max(all_xyz, axis=0)
-    span = maxs - mins
-    span_max = float(np.max(span)) if np.all(np.isfinite(span)) else 1.0
-    pad = 0.08 * span_max
-
-    ax.set_xlim(mins[0] - pad, maxs[0] + pad)
-    ax.set_ylim(mins[1] - pad, maxs[1] + pad)
-    ax.set_zlim(mins[2] - pad, maxs[2] + pad)
-
-    set_axes_equal_3d(ax)
-
-    # Legend: bigger and closer (inside, not outside)
-    ax.legend(
-        loc="upper right",
-        bbox_to_anchor=(0.98, 0.98),
-        frameon=True,
-        borderaxespad=0.2,
-    )
-
-    fig.subplots_adjust(top=0.96, bottom=0.08, left=0.08, right=0.94)
-
-    # Save figure with timestamp (won't overwrite previous)
-    os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fig.canvas.draw()
-    fig.savefig(
-        f"results/bennu_scene_body_fixed_{timestamp}.pdf",
-        format="pdf",
-        # bbox_inches="tight",
-        pad_inches=0.20,
-    )
-    print(f"Saved: results/bennu_scene_body_fixed_{timestamp}.pdf")
-
-    plt.show()
-
-
-# ============================================================
 # Gauss-Newton batch solver with STMs
 # ============================================================
 
@@ -839,12 +451,12 @@ def solve_stage1_gn_with_stm(
     x0_ref,
     tau,  # (N,) seconds since start (NOT ET)
     sc_state,  # (N,6) inertial, same epochs as tau
-    y_obs,  # (2N,) stacked [range0,range_rate0, range1,range_rate1,...]
-    sigma_range,
-    sigma_range_rate,
+    y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
+    sigma_ra,
+    sigma_dec,
     obs_weights,  # Pass visibility weights
     priors=None,  # list of scipy.stats.norm length n_update, OR None
-    update_idx=None,  # indices of the 19D delta you're solving for (e.g. range(6) or range(19))
+    update_idx=None,  # indices of the 12D delta you're solving for (e.g. range(6) or range(12))
     max_iter=10,
     tol=1e-12,
     rtol=1e-12,
@@ -860,7 +472,7 @@ def solve_stage1_gn_with_stm(
     4) update x0_ref += embed(d)
     """
     if update_idx is None:
-        update_idx = np.arange(19)
+        update_idx = np.arange(12)
     update_idx = np.asarray(update_idx, dtype=int)
     n_upd = len(update_idx)
 
@@ -872,42 +484,40 @@ def solve_stage1_gn_with_stm(
         prior_mean = np.array([p.mean() for p in priors], dtype=float)
         prior_sig = np.array([p.std() for p in priors], dtype=float)
 
-    delta_total = np.zeros(19)
+    delta_total = np.zeros(12)
 
     # weights
     w = np.empty_like(y_obs, dtype=float)
-    w[0::2] = sigma_range
-    w[1::2] = sigma_range_rate
+    w[0::2] = sigma_ra
+    w[1::2] = sigma_dec
 
     for it in range(1, max_iter + 1):
         # propagate ref (truth model) and obtain STM history
         sol_ref, stts_ref = propagator.propagate(
             x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
         )
-        x_ref = sol_ref.y[:19, :].T  # (N,19)
+        x_ref = sol_ref.y[:12, :].T  # (N,12)
 
         # You need Phi(t,0) for each epoch.
-        # Below assumes your stts_ref contains order-1 STM as a flattened 19x19 for each epoch.
+        # Below assumes your stts_ref contains order-1 STM as a flattened 12x12 for each epoch.
         # Adjust if your STTPropagatorND stores it differently.
         Phi_list = []
         for k in range(len(tau)):
             Phi_k = stts_ref[1][k]  # (n,n)
-            Phi_k = np.array(Phi_k, dtype=float).reshape(19, 19)
+            Phi_k = np.array(Phi_k, dtype=float).reshape(12, 12)
             Phi_list.append(Phi_k)
-        Phi_list = np.array(Phi_list)  # (N,19,19)
+        Phi_list = np.array(Phi_list)  # (N,12,12)
 
         # build residuals and Jacobian
-        rel_state = x_ref[:, :6] - sc_state[:, :6]
-        range_model, range_rate_model, d_range_dx, d_range_rate_dx = (
-            range_rate_and_partials_from_rel_state(rel_state)
-        )
+        los = x_ref[:, :3] - sc_state[:, :3]
+        ra_model, dec_model, d_ra_dr, d_dec_dr = radec_and_partials_from_los(los)
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = range_model
-        y_model[1::2] = range_rate_model
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = y_obs[0::2] - y_model[0::2]
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         r = res / w * obs_weights  # normalized residual vector (2N,)
@@ -916,22 +526,22 @@ def solve_stage1_gn_with_stm(
         J = np.zeros((2 * len(tau), n_upd), dtype=float)
 
         # For each epoch: Hy = dy/dx_k, then chain with Phi_k wrt x0.
-        # dy/dx_k only depends on position components (x,y,z) of GravityPopper state.
+        # dy/dx_k only depends on position components (x,y,z) of particle state.
         for k in range(len(tau)):
-            # dy/dxk: 2x19
-            Hy = np.zeros((2, 19), dtype=float)
-            Hy[0, 0:3] = d_range_dx[k, :]
-            Hy[1, 0:6] = d_range_rate_dx[k, :]
+            # dy/dxk: 2x12
+            Hy = np.zeros((2, 12), dtype=float)
+            Hy[0, 0:3] = d_ra_dr[k, :]
+            Hy[1, 0:3] = d_dec_dr[k, :]
 
-            # chain to x0: 2x19
+            # chain to x0: 2x12
             Hx0 = Hy @ Phi_list[k]
 
             # select solve-for columns
             J[2 * k : 2 * k + 2, :] = Hx0[:, update_idx]
 
         # normalize Jacobian rows by sigma
-        J[0::2, :] /= sigma_range
-        J[1::2, :] /= sigma_range_rate
+        J[0::2, :] /= sigma_ra
+        J[1::2, :] /= sigma_dec
         J = J * obs_weights[:, None]
 
         # linearized MAP solve: (J; W_prior) d = (r; r_prior)
@@ -959,8 +569,17 @@ def solve_stage1_gn_with_stm(
         # Solve least squares
         d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
 
-        # Embed into 19D delta, update ref
-        d_full = np.zeros(19)
+        # Solve least squares
+        # Normal equations
+        # ATA = A.T @ A
+        # ATb = A.T @ b
+        # Damping parameter
+        # lam = 1e-3  # tune this!
+        # Damped solve
+        # d_upd = np.linalg.solve(ATA + lam * np.eye(ATA.shape[0]), ATb)
+
+        # Embed into 12D delta, update ref
+        d_full = np.zeros(12)
         d_full[update_idx] = d_upd
         x0_ref = x0_ref + d_full
         delta_total = delta_total + d_full
@@ -976,18 +595,25 @@ def solve_stage1_gn_with_stm(
         if step_norm < tol:
             break
 
+    # Rotation Matrix (optional, for degenerate cases)
+    # _, _, Vt = np.linalg.svd(A, full_matrices=False)
+    # V_svd = Vt.T
+
     # Compute covariance at convergence
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
-    try:
-        AtA = A.T @ A
-        cov_upd = np.linalg.inv(AtA)
-    except np.linalg.LinAlgError:
-        print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-        cov_upd = np.linalg.pinv(A.T @ A)
+    if max_iter == 0:
+        cov_upd = np.diag(prior_sig**2)
+    else:
+        try:
+            AtA = A.T @ A
+            cov_upd = np.linalg.inv(AtA)
+        except np.linalg.LinAlgError:
+            print("[WARNING] Covariance matrix is singular, using pseudoinverse")
+            cov_upd = np.linalg.pinv(A.T @ A)
 
-    # Embed into full 19x19 covariance (infinite variance for non-updated params)
-    cov_full = np.full((19, 19), np.inf)
+    # Embed into full 12x12 covariance (infinite variance for non-updated params)
+    cov_full = np.full((12, 12), np.inf)
     for i, idx_i in enumerate(update_idx):
         for j, idx_j in enumerate(update_idx):
             cov_full[idx_i, idx_j] = cov_upd[i, j]
@@ -1000,50 +626,84 @@ def solve_stage1_gn_with_stm(
         sol_pf, _ = propagator.propagate(
             x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
         )
-        x_pf = sol_pf.y[:19, :].T
+        x_pf = sol_pf.y[:12, :].T
 
-        rel_state_pf = x_pf[:, :6] - sc_state[:, :6]
-        range_pf, range_rate_pf, _, _ = range_rate_and_partials_from_rel_state(
-            rel_state_pf
-        )
+        los_pf = x_pf[:, :3] - sc_state[:, :3]
+        ra_pf, dec_pf, _, _ = radec_and_partials_from_los(los_pf)
 
         y_pf = np.empty_like(y_obs)
-        y_pf[0::2] = range_pf
-        y_pf[1::2] = range_rate_pf
+        y_pf[0::2] = ra_pf
+        y_pf[1::2] = dec_pf
 
         res_pf = np.empty_like(y_obs)
-        res_pf[0::2] = y_obs[0::2] - y_pf[0::2]
+        res_pf[0::2] = wrap_to_pi(y_obs[0::2] - y_pf[0::2])
         res_pf[1::2] = y_obs[1::2] - y_pf[1::2]
 
         postfit = (res_pf / w) * obs_weights
 
-        # reshape to (2,N) and plot
-        post_m = postfit.reshape(-1, 2).T
-        time_hr = np.asarray(tau) / 3600.0
+        # Reshape [r0, r1, r2, r3, ...] -> (2, N)
+        residuals_matrix = postfit.reshape(-1, 2).T
+        time_hr = np.asarray(tau).ravel() / 3600.0
 
-        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        # Remove zero residuals
+        mask0 = residuals_matrix[0] != 0.0
+        mask1 = residuals_matrix[1] != 0.0
 
-        ax0.plot(time_hr, post_m[0], "o", ms=3.5, label="Postfit")
-        ax0.axhline(0, c="k", ls="--")
-        ax0.axhline(3, c="r", ls=":")
-        ax0.axhline(-3, c="r", ls=":")
-        ax0.set_ylabel(r"Range Residual [$\sigma$]")
-        ax0.grid(True)
-        ax0.legend()
+        r0, t0 = residuals_matrix[0, mask0], time_hr[mask0]
+        r1, t1 = residuals_matrix[1, mask1], time_hr[mask1]
 
-        ax1.plot(time_hr, post_m[1], "o", ms=3.5, label="Postfit")
-        ax1.axhline(0, c="k", ls="--")
-        ax1.axhline(3, c="r", ls=":")
-        ax1.axhline(-3, c="r", ls=":")
-        ax1.set_ylabel(r"Range Rate Residual [$\sigma$]")
-        ax1.set_xlabel("Time [hours since epoch]")
-        ax1.grid(True)
-        ax1.legend()
+        fig, (ax0, ax1) = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
 
-        plt.tight_layout()
-        # plt.show()
+        # Top panel
+        ax0.scatter(t0, r0, s=50, alpha=0.85)
+        ax0.axhline(3, color="red", linestyle=":", linewidth=3.0)
+        ax0.axhline(-3, color="red", linestyle=":", linewidth=3.0)
+        ax0.set_ylabel(r"Whitened RA Residual [$\sigma$]")
+        ax0.grid(True, linestyle=":")
 
-    return x0_ref, delta_total, cov_full
+        if r0.size > 0:
+            lim = np.max(np.abs(np.quantile(r0, [0.01, 0.99])))
+            lim = max(lim, 3.2)
+            ax0.set_ylim(-1.1 * lim, 1.1 * lim)
+
+        # Bottom panel
+        ax1.scatter(t1, r1, s=50, alpha=0.85)
+        ax1.axhline(3, color="red", linestyle=":", linewidth=3.0)
+        ax1.axhline(-3, color="red", linestyle=":", linewidth=3.0)
+        ax1.set_ylabel(r"Whitened DEC Residual [$\sigma$]")
+        ax1.set_xlabel("Time since epoch [hours]")
+        ax1.grid(True, linestyle=":")
+
+        if r1.size > 0:
+            lim = np.max(np.abs(np.quantile(r1, [0.01, 0.99])))
+            lim = max(lim, 3.2)
+            ax1.set_ylim(-1.1 * lim, 1.1 * lim)
+
+        legend_items = [
+            Line2D(
+                [0],
+                [0],
+                color="red",
+                linestyle=":",
+                linewidth=3.2,
+                label=r"$\pm 3\sigma$",
+            ),
+        ]
+
+        ax0.legend(
+            handles=legend_items,
+            loc="upper right",
+            frameon=True,
+        )
+
+        os.makedirs("results", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fname = f"results/postfit_residuals_batch_{timestamp}.pdf"
+        fig.savefig(fname, format="pdf", bbox_inches="tight")
+        fig.tight_layout()
+        plt.show()
+
+    return x0_ref, delta_total, cov_full  # , V_svd
 
 
 def solve_stage1_full_nonlinear_lsq(
@@ -1068,7 +728,7 @@ def solve_stage1_full_nonlinear_lsq(
     Now includes observation weights to handle occultation.
     """
     if update_idx is None:
-        update_idx = np.arange(19)
+        update_idx = np.arange(12)
     update_idx = np.asarray(update_idx, dtype=int)
     n_upd = len(update_idx)
 
@@ -1093,19 +753,17 @@ def solve_stage1_full_nonlinear_lsq(
         sol = propagator.propagate_state_only(
             x0=x0, t_eval=tau, rtol=rtol, atol=atol, method=method
         )
-        x = sol.y[:19, :].T
+        x = sol.y[:12, :].T
 
-        rel_state = x[:, :6] - sc_state[:, :6]
-        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(
-            rel_state
-        )
+        los = x[:, :3] - sc_state[:, :3]
+        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = range_model
-        y_model[1::2] = range_rate_model
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = y_obs[0::2] - y_model[0::2]
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         # Apply both sigma weighting AND visibility weighting
@@ -1132,7 +790,7 @@ def solve_stage1_full_nonlinear_lsq(
     )
 
     delta_hat_upd = result.x
-    delta_hat_full = np.zeros(19)
+    delta_hat_full = np.zeros(12)
     delta_hat_full[update_idx] = delta_hat_upd
 
     x0_ref1 = x0_ref + delta_hat_full
@@ -1143,7 +801,7 @@ def solve_stage1_full_nonlinear_lsq(
     except np.linalg.LinAlgError:
         cov_upd = np.linalg.pinv(J.T @ J)
 
-    cov_full = np.full((19, 19), np.inf)
+    cov_full = np.full((12, 12), np.inf)
     for i, ii in enumerate(update_idx):
         for j, jj in enumerate(update_idx):
             cov_full[ii, jj] = cov_upd[i, j]
@@ -1166,10 +824,11 @@ if __name__ == "__main__":
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
+    # TODO: 7 days was a nightmare for batch, see where it's a better example. maybe look at the 20 particles of gravity
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T03:00:00"
-    n_obs = 180
+    utc1 = "2019-03-01T01:30:00"
+    n_obs = 22  # NOTE: 22 batch not working, 23 is working!
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -1184,53 +843,25 @@ if __name__ == "__main__":
     # Dynamics / STT order
     stt_order = 1
 
-    # ============================================================
-    # Bennu Gravity Field Truth Values (degree 2×2 + degree 3×3)
-    # ============================================================
-    # CONVENTION: unnormalized Stokes coefficients.
-    # Reference radius R_ref = 0.2459 km.
-
-    mu_true = 4.89044967462e-09  # km^3/s^2
-
-    # Degree 2
-    C20_true = 0.060908668621940644  # = -J2
-    C21_true = -2.8120664615284112e-14
-    S21_true = 3.874234999952248e-15
-    C22_true = 0.001978445533807606
-    S22_true = -0.0007064992913094132
-
-    # Degree 3
-    C30_true = -0.004572082563573552  # = -J3
-    C31_true = 0.0008801840896940344
-    S31_true = -0.0005870017273132463
-    C32_true = -0.0003193368868974497
-    S32_true = -0.000183688614279846
-    C33_true = 0.0001632924069308578
-    S33_true = -4.32290988621995e-05
-
+    # Truth gravity params
+    mu_true = 4.89044967462e-09
+    C20_true = 6.09086686e-02
+    C21_true = -2.81206646e-14
+    S21_true = 3.87423500e-15
+    C22_true = 1.97844553e-03
+    S22_true = -7.06499291e-04
     params_true = np.array(
-        [
-            mu_true,
-            C20_true,
-            C21_true,
-            S21_true,
-            C22_true,
-            S22_true,
-            C30_true,
-            C31_true,
-            S31_true,
-            C32_true,
-            S32_true,
-            C33_true,
-            S33_true,
-        ],
-        dtype=float,
+        [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
     )
 
-    # Measurement noise levels (1-sigma)
-    # NOTE: 60-sec integration time, Gravity Imaging Radio Observer
-    sigma_range = 1e-5  # km  (1 cm)
-    sigma_range_rate = 1e-11  # km/s  (0.01 μm/s)
+    # Measurement noise
+    sigma_pix = 0.1  # pixel noise (1-sigma)
+    fov_deg = 44.0  # full FOV [deg]  (e.g. NavCam ~44 deg)
+    n_pix = 2592  # pixels across FOV (e.g. NavCam)
+    fov_rad = np.deg2rad(fov_deg)
+    sigma_angle = sigma_pix * (fov_rad / n_pix)  # radians
+    sigma_ra = sigma_angle
+    sigma_dec = sigma_angle
 
     # reference is perturbed by these fractions of |truth|
     rng_ref = np.random.default_rng(42)
@@ -1240,9 +871,9 @@ if __name__ == "__main__":
     ref_pct_c = 0.01  # 1% of each C/S coefficient
 
     # priors (on deltas about the reference) are these fractions of |truth|
-    # NOTE: ach component of the GravityPopper's position is assigned a 250 m a priori
+    # NOTE: ach component of the particle's position is assigned a 250 m a priori
     # uncertainty, which in three dimensions roughly equates to Bennu's volume.
-    # Each component of the GravityPopper's velocity is assigned a 30 cm/s a priori
+    # Each component of the particle's velocity is assigned a 30 cm/s a priori
     # uncertainty, which is the same order of magnitude as the escape speeds on
     # Bennu's surface.
     # prior_pct_r = ref_pct_r  # 1% of each position component
@@ -1251,18 +882,65 @@ if __name__ == "__main__":
     # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
     sig_prior_r = np.full(3, 0.250)  # km
     sig_prior_v = np.full(3, 3.0e-4)  # km/s
-    sig_prior_mu = np.abs(mu_true) * 1  # 100% prior on mu
-    sig_prior_c = np.abs(params_true[1:]) * 1  # 100% on C/S terms
+    sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
-    # NOTE: This took 11:21:02<00:00, 19.58it/s!
     n_walkers = 128  # 10 *
-    n_samples = 800000  # 5 *
-    burn_in = 30000
-    thin = 2000
-    spherical_spread = 1e-4
+    n_samples = 20000  # 5 *
+    burn_in = 2000
+    thin = 100
+    spherical_spread = 1e-1
+
+    # Posterior split (GMM) + STM propagation to a given epoch
+    # NOTE: the truth particle escapes Bennu (no surface crossing up to utc_target); the SH
+    # field is not valid inside the body, so keep the target before any impact.
+    utc_target = "2019-03-01T03:00:00"
+    gmm_n_components = 8  # fixed K (narrow components keep each STM accurate)
+    gmm_select_bic = False  # True: pick K in 1..12 by BIC instead
+    n_mc_prop = 300  # posterior samples propagated nonlinearly (Monte Carlo check)
+    n_t_prop = 46  # output epochs on [epoch, target]
+    gmm_prob = 0.99  # probability mass of the plotted regions
+
+    # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
+    # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
+    # one PDF per figure in a timestamped folder (jf.SHOW_FIGS at the top of the file)
+    PARAM_SYM = [
+        r"\delta x_0",
+        r"\delta y_0",
+        r"\delta z_0",
+        r"\delta v_{x,0}",
+        r"\delta v_{y,0}",
+        r"\delta v_{z,0}",
+        r"\delta\mu",
+        r"\delta C_{20}",
+        r"\delta C_{21}",
+        r"\delta S_{21}",
+        r"\delta C_{22}",
+        r"\delta S_{22}",
+    ]
+    PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
+    PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+    jf.configure(
+        PARAM_SYM,
+        PARAM_BASE_UNIT,
+        PARAM_BASE_SCALE,
+        rotation=make_bennu_rotation_matrix,
+        body="Bennu",
+        target="Particle",
+        obs_word="Image",
+        site_label="Ejection Site",
+        resid_labels=("RA", "Dec"),
+        fallback_dir=Path.home() / "bennu_figures_fallback",
+    )
+    fig_dir = jf.set_figure_dir(
+        Path(__file__).resolve().parent
+        / "results"
+        / f"bennu_particle_heyoka_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Figures] -> {fig_dir}")
 
     # --------------------------
     # Load SPICE & spacecraft truth (SPICE remains in ET)
@@ -1273,6 +951,9 @@ if __name__ == "__main__":
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
+    tau_target = spice.utc2et(utc_target) - et0  # seconds since start
+    if tau_target <= 0.0:
+        raise ValueError("utc_target must be after utc0.")
 
     sc_state_full = np.zeros((n_obs, 6))
     for i, et in enumerate(ets_full):
@@ -1280,7 +961,7 @@ if __name__ == "__main__":
         sc_state_full[i, :] = np.array(st, dtype=float)
 
     # --------------------------
-    # GravityPopper detach point on Bennu surface
+    # Particle detach point on Bennu surface
     # --------------------------
     mesh_path = "ObjFiles/BennuRadar.obj"
     bennu_mesh = trimesh.load(mesh_path, force="mesh")
@@ -1296,8 +977,8 @@ if __name__ == "__main__":
     )
     vertices = np.asarray(bennu_mesh.vertices)
 
-    lat_desired = np.deg2rad(5.0)
-    lon_desired = np.deg2rad(0.0)
+    lat_desired = np.deg2rad(45.0)
+    lon_desired = np.deg2rad(80.0)
     pos_target = np.array(
         [
             R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
@@ -1322,6 +1003,13 @@ if __name__ == "__main__":
     # Outward initial velocity (random hemisphere w.r.t. r0_true)
     rng = np.random.default_rng(7)
     vmag = 2e-4  # km/s
+    """"
+    u = rng.normal(size=3)
+    u /= np.linalg.norm(u)
+    if np.dot(u, r0_true) < 0:
+        u = -u
+    v0_true = vmag * u
+    """
 
     # tangent launch direction (physically plausible: lofting off surface)
     rhat = r0_true / np.linalg.norm(r0_true)
@@ -1338,14 +1026,15 @@ if __name__ == "__main__":
 
     v0_true = vmag * u
 
-    # Full truth initial state (19)
+    # Full truth initial state (12)
     x0_true = np.hstack([r0_true, v0_true, params_true])
 
     # --------------------------
-    # Build STT functions + propagator (must accept t argument)
+    # Build heyoka dynamics + STT propagator
     # --------------------------
-    f_func, A_func, B_funcs = generate_stt_functions_bennu_deg3(
-        order=stt_order,
+    # heyoka JIT-compiles the variational system once here; the STM/STTs are then
+    # obtained from the Taylor map (no hand-derived Jacobian/Hessian tensors).
+    sys_heyoka, state_vars = build_bennu_deg2_heyoka(
         R_ref_km=R_ref,
         alpha_rad=alpha_true,
         delta_rad=delta_true,
@@ -1353,18 +1042,18 @@ if __name__ == "__main__":
         w0_rad=0.0,
     )
 
-    propagator = STTPropagatorND(
-        order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=19
+    propagator = HeyokaSTTPropagator(
+        order=stt_order, sys=sys_heyoka, state_vars=state_vars, n=12
     )
 
     # --------------------------
-    # Propagate GravityPopper truth (DYNAMICS on tau_full)
+    # Propagate particle truth (DYNAMICS on tau_full)
     # --------------------------
-    print("\nPropagating GravityPopper truth...")
+    print("\nPropagating particle truth...")
     sol_true, stts_true = propagator.propagate(
         x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
-    x_true_full = sol_true.y[:19, :].T  # (N,19)
+    x_true_full = sol_true.y[:12, :].T  # (N,12)
 
     # --------------------------
     # Observability mask (occultation by Bennu sphere proxy)
@@ -1389,56 +1078,111 @@ if __name__ == "__main__":
     print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
 
     # --------------------------
-    # Generate noisy RADIOMETRIC measurements
+    # Observation scene + geometry (truth on a dense grid over the arc)
+    # --------------------------
+    tau_dense = np.linspace(tau_full[0], tau_full[-1], 400)
+    sol_dense = propagator.propagate_state_only(
+        x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+    pt_dense = sol_dense.y[:3, :].T
+    r_dense = np.linalg.norm(pt_dense, axis=1)
+    # Epoch 0 is the launch point, on the surface itself, where the inside test is a coin
+    # flip: check the arc after it.
+    n_in_dense = int(
+        np.sum(
+            jf.points_inside_mesh(
+                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
+            )
+        )
+    )
+    print(
+        f"[Scene] truth |r| over the arc: {r_dense.min() * 1e3:.1f}-"
+        f"{r_dense.max() * 1e3:.1f} m; inside the shape model at "
+        f"{n_in_dense}/{tau_dense.size - 1} epochs after launch"
+    )
+    if n_in_dense:
+        print("[WARNING] The truth trajectory crosses the shape model during the arc.")
+    sc_dense = np.array(
+        [
+            spice.spkezr(SC_NAME, float(et0 + t), FRAME_I, ABCORR, CENTER)[0]
+            for t in tau_dense
+        ],
+        dtype=float,
+    )
+    jf.plot_scene_body_fixed(
+        bennu_mesh,
+        tau_obs=tau_full,
+        sc_obs=sc_state_full,
+        vis_mask=vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
+        detach_bf=pos_detach_bf,
+    )
+    jf.plot_observation_geometry(
+        tau_full,
+        sc_state_full,
+        x_true_full,
+        vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+    )
+
+    # --------------------------
+    # Generate noisy RA/DEC measurements
     # --------------------------
     # Generate measurements for ALL epochs (including occulted ones)
     # We'll handle visibility in the residual weighting
     rng_meas = np.random.default_rng(123)
-    y_obs_full = generate_radio_measurements_from_sc(
+    y_obs_full = generate_opnav_measurements_from_sc(
         x_part=x_true,
         sc_state=sc_state,
-        sigma_range=sigma_range,
-        sigma_range_rate=sigma_range_rate,
+        sigma_ra=sigma_ra,
+        sigma_dec=sigma_dec,
         rng=rng_meas,
     )
 
     # Create a weight vector: zero weight for occulted observations
     obs_weights = np.ones_like(y_obs_full)
-    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted range
-    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted range rate
+    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted RA
+    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted DEC
 
     y_obs = y_obs_full  # Use all measurements, rely on weights
 
     # --------------------------
     # Reference initial condition (perturb truth)
     # --------------------------
-    print("\nBuilding reference initial state (19D)...")
+    print("\nBuilding reference initial state (12D)...")
 
     sig_ref_r = np.abs(x0_true[0:3] * ref_pct_r)
     sig_ref_v = np.abs(x0_true[3:6] * ref_pct_v)
     sig_ref_mu = np.abs(x0_true[6:7] * ref_pct_mu)
-    sig_ref_c = np.abs(x0_true[7:19] * ref_pct_c)
+    sig_ref_c = np.abs(x0_true[7:12] * ref_pct_c)
 
     ref_dev = np.hstack(
         [
             rng_ref.normal(scale=sig_ref_r, size=3),
             rng_ref.normal(scale=sig_ref_v, size=3),
             rng_ref.normal(scale=sig_ref_mu, size=1),
-            rng_ref.normal(scale=sig_ref_c, size=12),
+            rng_ref.normal(scale=sig_ref_c, size=5),
         ]
     )
-    x0_ref = x0_true - 0 * ref_dev
+    x0_ref = x0_true - ref_dev
     print("\n[Reference] deviation from truth:", ref_dev)
 
     # --------------------------
-    # Priors on 19D delta0
+    # Priors on 12D delta0
     # --------------------------
     # r_scale = np.linalg.norm(x0_true[0:3])
     # v_scale = np.linalg.norm(x0_true[3:6])
     # sig_prior_r = prior_pct_r * r_scale * np.ones(3)
     # sig_prior_v = prior_pct_v * v_scale * np.ones(3)
     # sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
-    # sig_prior_c = np.abs(x0_true[7:19] * prior_pct_c)
+    # sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
 
     prior_sigma = prior_looseness * np.hstack(
         [sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c]
@@ -1459,12 +1203,12 @@ if __name__ == "__main__":
         tau=tau,  # seconds since start
         sc_state=sc_state,
         y_obs=y_obs,
-        sigma_range=sigma_range,
-        sigma_range_rate=sigma_range_rate,
+        sigma_ra=sigma_ra,
+        sigma_dec=sigma_dec,
         obs_weights=obs_weights,  # Pass visibility weights
         priors=priors,  # match update_idx length
-        max_iter=15,
-        tol=1e-6,
+        max_iter=30,
+        tol=1e-8,
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
@@ -1480,7 +1224,7 @@ if __name__ == "__main__":
         sigma_ra=sigma_ra,
         sigma_dec=sigma_dec,
         priors=priors,
-        update_idx=np.arange(19),
+        update_idx=np.arange(12),
         rtol=1e-8,
         atol=1e-10,
         max_nfev=4000,
@@ -1490,6 +1234,12 @@ if __name__ == "__main__":
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
     print("[Stage 1] delta_hat1:\n", delta_hat1)
+
+    # Display units: rescale each parameter by a power of ten so its batch sigma reads well
+    disp_scale, disp_unit = jf.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    jf.configure(PARAM_SYM, disp_unit, disp_scale)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1
@@ -1502,25 +1252,34 @@ if __name__ == "__main__":
     # --------------------------
     # Residual function (STT-based) with visibility weighting
     # --------------------------
-    def residuals_normalized(delta0):
-        _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
+    # For stt_order == 1 the Taylor map is EXACT and linear:
+    #     x(t_k) = x_nom(t_k) + Phi(t_k, 0) @ delta0
+    # The STMs are frozen about ref1, so precompute the nominal position history
+    # and the position-block STMs once. Each MCMC residual evaluation then costs a
+    # single vectorized matmul over all epochs instead of ~N heyoka Taylor-map
+    # calls across the Python/C++ boundary (large MCMC speedup, identical result).
+    assert stt_order == 1, "Vectorized residual assumes order-1 (linear) STT map."
+    x_nom_pos = sol_ref.y[:3, :].T                       # (N, 3) nominal positions
+    Phi_pos = np.ascontiguousarray(stts_ref[1][:, :3, :])  # (N, 3, 12) position STMs
 
-        rel_state = x_est[:, :6] - sc_state[:, :6]
-        range_model, range_rate_model, _, _ = range_rate_and_partials_from_rel_state(
-            rel_state
-        )
+    def residuals_normalized(delta0):
+        delta0 = np.asarray(delta0, dtype=float)
+        x_est_pos = x_nom_pos + Phi_pos @ delta0         # (N, 3), all epochs at once
+
+        los = x_est_pos - sc_state[:, :3]
+        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
 
         y_model = np.empty_like(y_obs)
-        y_model[0::2] = range_model
-        y_model[1::2] = range_rate_model
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
 
         res = np.empty_like(y_obs)
-        res[0::2] = y_obs[0::2] - y_model[0::2]
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
         res[1::2] = y_obs[1::2] - y_model[1::2]
 
         w = np.empty_like(y_obs)
-        w[0::2] = sigma_range
-        w[1::2] = sigma_range_rate
+        w[0::2] = sigma_ra
+        w[1::2] = sigma_dec
 
         # Apply visibility weighting
         return (res / w) * obs_weights
@@ -1528,9 +1287,9 @@ if __name__ == "__main__":
     # --------------------------
     # Chi2 at ref1
     # --------------------------
-    chi2_at_ref = np.sum(residuals_normalized(np.zeros(19)) ** 2)
+    chi2_at_ref = np.sum(residuals_normalized(np.zeros(12)) ** 2)
     n_visible = np.sum(vis_mask)
-    dof = 2 * n_visible - 19  # Only count visible observations
+    dof = 2 * n_visible - 12  # Only count visible observations
     print(
         f"\n[Stage 2] At ref1 (delta=0): chi2_red = {chi2_at_ref/dof:.3f}  "
         f"(chi2={chi2_at_ref:.2f}, dof={dof}, n_vis={n_visible})"
@@ -1546,7 +1305,7 @@ if __name__ == "__main__":
     print("\n[MCMC] Running (starting from zeros about ref1)...")
     model = MCMCModel(
         residuals_func=residuals_normalized,
-        initial_params=np.zeros(19),
+        initial_params=np.zeros(12),
         param_priors=priors_ref1,
         observed_data=y_obs,
     )
@@ -1557,9 +1316,7 @@ if __name__ == "__main__":
         burn_in=burn_in,
         thin=thin,
         spherical_spread=spherical_spread,
-        method_optimize="LSQ",
-        use_demoves=True,
-        stretch_a=1.2,
+        method_optimize="Powell",
     )
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
@@ -1576,82 +1333,158 @@ if __name__ == "__main__":
     print("\n[Truth] true_delta about ref1:\n", true_delta)
 
     # --------------------------
-    # Diagnostics
+    # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
     # --------------------------
-    model.plot_convergence()
-    model.plot_postfit_residuals_time(t_obs_used=tau, opnav_data=True)
+    # Samples are deviations about the batch solution ref1, so the batch estimate is 0 with
+    # covariance cov1.
     model.summary()
     model.print_regression_diagnostics()
-    model.plot_autocorrelation()
-    model.plot_log_likelihood()
-
-    # --------------------------
-    # Plot scene (using MCMC mean estimate)
-    # --------------------------
-    _, x_map = propagator.propagate_deviation(sol_ref, stts_ref, theta_hat)
-
-    plot_bennu_scene_body_fixed(
-        bennu_mesh=bennu_mesh,
-        sc_state_full=sc_state_full,
-        x_true_full=x_true_full,
-        x_map=x_map,
-        tau_full=tau_full,
-        tau_map=tau,
-        alpha=alpha_true,
-        delta=delta_true,
-        omega=omega_true,
-        vis_mask=vis_mask,
-        mesh_target_radius_km=R_bennu,
-        mesh_scale_mode="rms",
-        downsample=2,
+    model.plot_journal_diagnostics(
+        burn_in,
+        thin,
+        tau,
+        vis_mask,
+        true_theta=true_delta,
+        batch_cov=cov1,
     )
 
     # --------------------------
-    # Plot visibility mask
+    # Posterior at epoch -> GMM split -> STM propagation to utc_target
     # --------------------------
-    t_hr = tau_full / 3600.0
-    plt.figure(figsize=(10, 2.6))
-    plt.plot(t_hr, vis_mask.astype(int), "o-")
-    plt.ylim(-0.1, 1.1)
-    plt.yticks([0, 1], ["occulted", "visible"])
-    plt.xlabel("Time since start [hr]")
-    plt.title("Occultation / Visibility Mask (sphere proxy)")
-    plt.grid(True, linestyle=":")
-    plt.tight_layout()
-    plt.show()
+    # Samples are deviations about ref1 at tau = 0. Every mixture component k is propagated
+    # about its own mean with its own STM (P_k(t) = Phi_k P_k Phi_k^T); the single-Gaussian
+    # baseline is the same with K = 1 (sample mean + covariance). A nonlinear Monte Carlo of
+    # posterior samples is the reference both are checked against.
+    post = np.asarray(model.samples, dtype=float)
+    n_state = x0_true.size
+    print(
+        f"\n[GMM] Splitting {post.shape[0]} posterior samples at epoch ({utc0}) and "
+        f"propagating to {utc_target} (+{tau_target / 3600.0:.2f} h)"
+    )
+    w_g, mu_g, P_g = jf.fit_posterior_gmm(
+        post, n_components=gmm_n_components, select_bic=gmm_select_bic
+    )
+    print("[GMM] weights:", np.array2string(w_g, precision=3))
 
-    # --------------------------
-    # Corner plot
-    # --------------------------
-    try:
-        labels = [
-            r"$\delta x_0$",
-            r"$\delta y_0$",
-            r"$\delta z_0$",
-            r"$\delta v_{x0}$",
-            r"$\delta v_{y0}$",
-            r"$\delta v_{z0}$",
-            r"$\delta \mu$",
-            r"$\delta C_{20}$",
-            r"$\delta C_{21}$",
-            r"$\delta S_{21}$",
-            r"$\delta C_{22}$",
-            r"$\delta S_{22}$",
-            r"$\delta C_{30}$",
-            r"$\delta C_{31}$",
-            r"$\delta S_{31}$",
-            r"$\delta C_{32}$",
-            r"$\delta S_{32}$",
-            r"$\delta C_{33}$",
-            r"$\delta S_{33}$",
-        ]
-        model.plot_corner_with_batch(
-            batch_mean=np.zeros(19),
-            batch_cov=cov1,
-            use_median_as_truth=False,
-            true_theta=true_delta,
+    w_1 = np.ones(1)
+    mu_1 = post.mean(axis=0, keepdims=True)
+    P_1 = np.cov(post, rowvar=False)[None]
+
+    t_prop = np.linspace(0.0, tau_target, n_t_prop)
+    ivp_prop = dict(rtol=1e-8, atol=1e-10, method="LSODA")
+
+    m_g_t, P_g_t = jf.propagate_gmm_stm(
+        propagator, x0_ref1, w_g, mu_g, P_g, t_prop, **ivp_prop
+    )
+    m_1_t, P_1_t = jf.propagate_gmm_stm(
+        propagator, x0_ref1, w_1, mu_1, P_1, t_prop, label="Single Gaussian", **ivp_prop
+    )
+
+    rng_mc = np.random.default_rng(2024)
+    idx_mc = rng_mc.choice(
+        post.shape[0], size=min(n_mc_prop, post.shape[0]), replace=False
+    )
+    X_mc = jf.propagate_samples_mc(propagator, x0_ref1, post[idx_mc], t_prop, **ivp_prop)
+    ok_mc = np.all(np.isfinite(X_mc[:, :, 0]), axis=1)
+    if not np.all(ok_mc):
+        print(f"[MC] {np.sum(~ok_mc)} sample propagations failed and are dropped.")
+    X_mc = X_mc[ok_mc]
+
+    sol_tp = propagator.propagate_state_only(
+        x0_true, t_prop, show_progress=False, **ivp_prop
+    )
+    x_true_prop = sol_tp.y[:n_state, :].T  # (n_t_prop, n)
+
+    # The SH field is only valid outside the body: flag any impact along the prediction
+    # (after epoch 0, the launch point on the surface, where the inside test is ambiguous)
+    n_in_truth = int(
+        np.sum(
+            jf.points_inside_mesh(
+                bennu_mesh, x_true_prop[1:, :3], t_prop[1:], alpha_true, delta_true, omega_true
+            )
         )
-    except Exception as e:
-        print("\n[Corner] Skipped.", e)
+    )
+    n_in_mc = sum(
+        bool(
+            np.any(
+                jf.points_inside_mesh(
+                    bennu_mesh, X_mc[i, 1:, :3], t_prop[1:], alpha_true, delta_true, omega_true
+                )
+            )
+        )
+        for i in range(X_mc.shape[0])
+    )
+    print(
+        f"[GMM] inside-mesh epochs along the prediction: truth {n_in_truth}, "
+        f"MC samples that impact {n_in_mc}/{X_mc.shape[0]}"
+    )
+    if n_in_truth or n_in_mc:
+        print("[WARNING] Prediction crosses the surface: move utc_target earlier.")
+
+    # Metrics at the target epoch (position, meters)
+    pos_mc = X_mc[:, -1, :3]
+    m_mc = pos_mc.mean(axis=0)
+    mg_T, Pg_T = jf.gmm_moments(w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])
+    m1_T, P1_T = m_1_t[0, -1, :3], P_1_t[0, -1, :3, :3]
+    sig_mc_T = np.sqrt(np.diag(np.cov(pos_mc, rowvar=False)))
+    print(f"\n[GMM] Position at target ({utc_target}), per-axis 1-sigma [m]:")
+    print("   MC             :", np.array2string(sig_mc_T * 1e3, precision=2))
+    print(
+        "   GMM + STMs     :",
+        np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2),
+    )
+    print(
+        "   Single Gaussian:",
+        np.array2string(np.sqrt(np.diag(P1_T)) * 1e3, precision=2),
+    )
+    print("[GMM] Mean offset from the MC mean [m]:")
+    print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
+    print("   Single Gaussian:", np.array2string((m1_T - m_mc) * 1e3, precision=2))
+
+    ll_g = np.mean(jf.gmm_logpdf(pos_mc, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3]))
+    ll_1 = np.mean(jf.gmm_logpdf(pos_mc, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3]))
+    print(
+        f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f} | single {ll_1:.3f} "
+        f"(GMM - single = {ll_g - ll_1:+.3f} nats)"
+    )
+
+    r_tr = x_true_prop[-1, :3]
+    d_tr = r_tr - m1_T
+    maha_1 = float(np.sqrt(d_tr @ np.linalg.solve(P1_T, d_tr)))
+    lp_tr_g = jf.gmm_logpdf(r_tr, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])[0]
+    lp_tr_1 = jf.gmm_logpdf(r_tr, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3])[0]
+    print(
+        f"[GMM] Truth at target: log p GMM {lp_tr_g:.3f} | single {lp_tr_1:.3f} | "
+        f"Mahalanobis (single) {maha_1:.2f}"
+    )
+
+    # Figures
+    def _panel(j, title):
+        return dict(
+            mc=X_mc[:, j, :3],
+            w=w_g,
+            mu=m_g_t[:, j, :3],
+            P=P_g_t[:, j, :3, :3],
+            mu1=m_1_t[0, j, :3],
+            P1=P_1_t[0, j, :3, :3],
+            truth=x_true_prop[j, :3],
+            center=X_mc[:, j, :3].mean(axis=0),
+            title=title,
+        )
+
+    jf.plot_gmm_propagation(
+        [
+            _panel(0, f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"),
+            _panel(
+                -1,
+                f"Predicted at {utc_target.replace('T', ' ')} UTC "
+                f"(+{tau_target / 3600.0:.2f} h)",
+            ),
+        ],
+        prob=gmm_prob,
+    )
+
+    hist = jf.position_prediction_history(X_mc, w_g, m_g_t, P_g_t, m_1_t, P_1_t)
+    jf.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
 
     spice.kclear()
