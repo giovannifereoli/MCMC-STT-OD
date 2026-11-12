@@ -583,6 +583,10 @@ if __name__ == "__main__":
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
     LOAD_CHAIN = None  # e.g. "results/bennu_particle_<stamp>/chain.npz"
+    # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
+    # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
+    # central body (MCMCPlots.rtn_corner_map).
+    CORNER_RTN = True
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
     # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
@@ -1006,6 +1010,12 @@ if __name__ == "__main__":
     # covariance cov1.
     model.summary()
     model.print_regression_diagnostics()
+    # RTN corner: display units sized to the batch sigmas in R, T, N (as disp_unit is to
+    # the x, y, z ones)
+    A_rtn = MCMCPlots.rtn_corner_map(x0_ref1, model.ndim)
+    rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(A_rtn @ cov1 @ A_rtn.T))
+    )
     model.plot_journal_diagnostics(
         burn_in,
         thin,
@@ -1013,6 +1023,8 @@ if __name__ == "__main__":
         vis_mask,
         true_theta=true_delta,
         batch_cov=cov1,
+        corner_rtn=x0_ref1 if CORNER_RTN else None,
+        corner_rtn_kw=dict(param_unit=rtn_unit, param_scale=rtn_scale),
     )
 
     spice.kclear()

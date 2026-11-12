@@ -1298,8 +1298,9 @@ class MCMCModel:
 
     def plot_journal_diagnostics(self, *args, **kwargs):
         """
-        The MCMC journal figures (residuals, traces, autocorrelation, corner, and the
-        corner with the prior unless corner_prior=False).
+        The MCMC journal figures (residuals, traces, autocorrelation, corner, the corner
+        with the prior unless corner_prior=False, and the corner in the RTN frame when
+        corner_rtn is given).
 
         Thin wrapper around MCMCPlots.plot_mcmc_diagnostics(self, *args, **kwargs); see
         there for the arguments.

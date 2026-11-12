@@ -469,6 +469,10 @@ if __name__ == "__main__":
     # to skip the STT-vs-nonlinear timing (both None: full run).
     LOAD_CHAIN = None  # e.g. "results/stt_benchmark_<stamp>/chain.npz"
     LOAD_BENCHMARK = None  # e.g. "results/stt_benchmark_<stamp>/benchmark.npz"
+    # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
+    # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
+    # central body (MCMCPlots.rtn_corner_map).
+    CORNER_RTN = True
 
     # Parameter symbols and display units (km -> m, km/s -> mm/s; rescaled by powers of ten
     # from the posterior sigmas after the run); one PDF per figure in a timestamped folder.
@@ -658,7 +662,26 @@ if __name__ == "__main__":
         finally:
             MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
 
-    for label, draw in (
+    def corner_rtn():
+        # the error in the RTN frame of the orbit through ref1, units sized to its spread
+        A_rtn = MCMCPlots.rtn_corner_map(x0_ref1, len(true_delta))
+
+        def to_rtn(theta):
+            return to_error(theta) @ A_rtn.T
+
+        rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+            PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.std(to_rtn(model.samples), axis=0)
+        )
+        model.plot_journal_corner(
+            true_theta=zero,
+            transform=to_rtn,
+            name="fig_corner_rtn",
+            param_sym=MCMCPlots.RTN_SYM,
+            param_unit=rtn_unit,
+            param_scale=rtn_scale,
+        )
+
+    figures = (
         (
             "traces",
             lambda: model.plot_journal_traces(
@@ -671,7 +694,10 @@ if __name__ == "__main__":
             lambda: model.plot_journal_corner(true_theta=zero, transform=to_error),
         ),
         ("corner + prior", corner_with_prior),
-    ):
+    )
+    if CORNER_RTN:
+        figures += (("corner RTN", corner_rtn),)
+    for label, draw in figures:
         try:
             draw()
         except Exception as err:

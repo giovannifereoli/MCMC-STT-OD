@@ -703,7 +703,7 @@ if __name__ == "__main__":
     # 261110: 事前分布の σ を 7 成分すべて 100 倍にしたケース（位置 32 km・速度 29 m/s・eta 10）。
     #   eta も 100 倍なので、負の eta（物理的にありえない）も事前分布の範囲に入る
     #   （それ以前の 261110 の実行は 1）
-    prior_looseness = 100
+    prior_looseness = 1
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
@@ -715,6 +715,10 @@ if __name__ == "__main__":
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
     LOAD_CHAIN = None  # e.g. HERE / "results/<YYMMDDHHMMSS>/chain.npz"
+    # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
+    # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
+    # central body (MCMCPlots.rtn_corner_map).
+    CORNER_RTN = True
 
     # Posterior split (GMM) + STM propagation to a given epoch
     # 261110: 予測時刻を開始（utc0）から 3 日後にした（元は 03:45）
@@ -724,6 +728,17 @@ if __name__ == "__main__":
     n_mc_prop = 300  # posterior samples propagated nonlinearly (Monte Carlo check)
     n_t_prop = 46  # output epochs on [epoch, target]
     gmm_prob = 0.99  # probability mass of the plotted regions
+    # Also propagate the Stage-1 batch LSQ Gaussian N(x0_ref1, cov1) with the STM about ref1
+    # (P(t) = Phi cov1 Phi^T) and draw it in fig_gmm_stm_propagation(_rtn) and
+    # fig_gmm_prediction_history.
+    GMM_BATCH = True
+    # Also save fig_gmm_stm_propagation_rtn: the same projections in the RTN frame of the
+    # (propagated) batch solution ref1 at each row's epoch (MCMCPlots.rtn_matrix).
+    GMM_RTN = True
+    # fig_gmm_stm_propagation(_rtn) contents: the Monte Carlo cloud and every GMM component's
+    # ellipse (off: only the mixture, single Gaussian, batch and truth, less crowded)
+    GMM_SHOW_MC = False
+    GMM_SHOW_COMPONENTS = False
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s, eta -> %), one PDF
     # per figure in a timestamped folder (MCMCPlots.SHOW_FIGS at the top of the file)
@@ -778,18 +793,6 @@ if __name__ == "__main__":
     sys.stderr = _Tee(sys.__stderr__, _run_log)
 
     print(f"[Figures] -> {fig_dir}")
-
-    # 261110: この実行で実際に動いたコード（本スクリプト＋import した MCMC.py・MCMCPlots.py・GMM.py・
-    # BatchLSQ.py・STTPropagationND.py）を
-    # 結果フォルダの code/ に写す。どの図がどのコードから出たかを、結果フォルダだけで追えるようにする
-    import shutil
-
-    code_dir = Path(fig_dir) / "code"
-    code_dir.mkdir(parents=True, exist_ok=True)
-    _mods = ("MCMC", "MCMCPlots", "GMM", "BatchLSQ", "STTPropagationND")
-    for src in [__file__] + [sys.modules[m].__file__ for m in _mods]:
-        shutil.copy2(src, code_dir / Path(src).name)
-    print(f"[Code] snapshot -> {code_dir}")
 
     # --------------------------
     # Load SPICE (ET) + time grid
@@ -1294,6 +1297,18 @@ if __name__ == "__main__":
 
     # Samples are deviations about the batch solution ref1, so the batch estimate is 0 with
     # covariance cov1 (corner: deltas dx0, dy0, dz0, dvx0, dvy0, dvz0, deta).
+    # The corner plots show the position in the camera's line-of-sight frame at t0 (about
+    # ref1): along the LOS, and across it towards increasing RA and Dec (J2000). The images
+    # fix the cross-LOS position to ~0.2 m but the range only to ~300 m, so in x, y, z the
+    # position pairs collapse to lines (|corr| > 0.99998) whose width no axis can show.
+    # Velocities and eta are unchanged; the traces stay in x, y, z.
+    e_los = x0_ref1[:3] - sc_state[0, :3]
+    e_los /= np.linalg.norm(e_los)
+    e_ra = np.cross([0.0, 0.0, 1.0], e_los)
+    e_ra /= np.linalg.norm(e_ra)
+    e_dec = np.cross(e_los, e_ra)
+    A_los = np.eye(N_STATE)
+    A_los[:3, :3] = np.vstack([e_los, e_ra, e_dec])
     model.plot_journal_diagnostics(
         burn_in,
         thin,
@@ -1301,6 +1316,14 @@ if __name__ == "__main__":
         vis_mask,
         true_theta=true_delta,
         batch_cov=cov1,
+        corner_map=A_los,
+        corner_sym=[
+            r"\delta r_{\mathrm{LOS},0}",
+            r"\delta r_{\mathrm{RA},0}",
+            r"\delta r_{\mathrm{Dec},0}",
+            *MCMCPlots.PARAM_SYM[3:],
+        ],
+        corner_rtn=x0_ref1 if CORNER_RTN else None,
     )
 
     # --------------------------
@@ -1326,6 +1349,15 @@ if __name__ == "__main__":
     gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp_prop)
     single_t = single.propagate_stm(
         propagator, x0_ref1, t_prop, label="Single Gaussian", **ivp_prop
+    )
+    # Batch LSQ Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
+    # STM about ref1. Its mean also defines the RTN frame of fig_gmm_stm_propagation_rtn.
+    batch_t = (
+        GMM.gaussian(np.zeros(N_STATE), cov1).propagate_stm(
+            propagator, x0_ref1, t_prop, label="Batch LSQ", **ivp_prop
+        )
+        if GMM_BATCH or GMM_RTN
+        else None
     )
 
     rng_mc = np.random.default_rng(2024)
@@ -1417,9 +1449,29 @@ if __name__ == "__main__":
         f"Mahalanobis (single) {maha_1:.2f}"
     )
 
+    if GMM_BATCH:
+        batch_T = batch_t[-1].marginal(slice(0, 3))
+        mb_T, Pb_T = batch_T.moments()
+        d_trb = r_tr - mb_T
+        print("[GMM] Batch LSQ + STM at target (same metrics):")
+        print(
+            "   1-sigma [m]          :",
+            np.array2string(np.sqrt(np.diag(Pb_T)) * 1e3, precision=2),
+        )
+        print(
+            "   mean - MC mean [m]   :",
+            np.array2string((mb_T - m_mc) * 1e3, precision=2),
+        )
+        print(
+            f"   mean log-density of the MC positions {np.mean(batch_T.logpdf(pos_mc)):.3f} | "
+            f"truth log p {batch_T.logpdf(r_tr)[0]:.3f} | truth Mahalanobis "
+            f"{float(np.sqrt(d_trb @ np.linalg.solve(Pb_T, d_trb))):.2f}"
+        )
+
     # Figures
-    def _panel(j, title):
-        return dict(
+    def _panel(j, title, C=None):
+        """Position panel at output epoch j; C (3, 3) rotates it (e.g. to RTN)."""
+        p = dict(
             mc=X_mc[:, j, :3],
             gmm=gmm_t[j].marginal(slice(0, 3)),
             single=single_t[j].marginal(slice(0, 3)),
@@ -1427,20 +1479,56 @@ if __name__ == "__main__":
             center=X_mc[:, j, :3].mean(axis=0),
             title=title,
         )
+        if GMM_BATCH:
+            p["batch"] = batch_t[j].marginal(slice(0, 3))
+        if C is not None:
+            p.update(
+                mc=p["mc"] @ C.T,
+                truth=C @ p["truth"],
+                center=C @ p["center"],
+                **{k: p[k].linear_map(C) for k in ("gmm", "single", "batch") if k in p},
+            )
+        return p
 
-    MCMCPlots.plot_gmm_propagation(
-        [
-            _panel(0, f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"),
-            _panel(
-                -1,
-                f"Predicted at {utc_target.replace('T', ' ')} UTC "
-                f"(+{tau_target / 3600.0:.2f} h)",
-            ),
-        ],
-        prob=gmm_prob,
+    title_0 = f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"
+    title_T = (
+        f"Predicted at {utc_target.replace('T', ' ')} UTC (+{tau_target / 3600.0:.2f} h)"
     )
+    MCMCPlots.plot_gmm_propagation(
+        [_panel(0, title_0), _panel(-1, title_T)],
+        prob=gmm_prob,
+        show_mc=GMM_SHOW_MC,
+        show_components=GMM_SHOW_COMPONENTS,
+    )
+    if GMM_RTN:
+        # RTN frame of the batch solution propagated to each row's epoch
+        MCMCPlots.plot_gmm_propagation(
+            [
+                _panel(
+                    0,
+                    title_0 + ", RTN Frame of the Batch Solution",
+                    C=MCMCPlots.rtn_matrix(batch_t[0].means[0]),
+                ),
+                _panel(
+                    -1,
+                    title_T + ", RTN Frame of the Propagated Batch Solution",
+                    C=MCMCPlots.rtn_matrix(batch_t[-1].means[0]),
+                ),
+            ],
+            prob=gmm_prob,
+            name="fig_gmm_stm_propagation_rtn",
+            axis_names=[
+                r"$\delta r_R$ [m]",
+                r"$\delta r_T$ [m]",
+                r"$\delta r_N$ [m]",
+            ],
+            show_mc=GMM_SHOW_MC,
+            show_components=GMM_SHOW_COMPONENTS,
+        )
 
-    hist = position_prediction_history(X_mc, gmm_t, single_t)
+    hist = position_prediction_history(
+        X_mc, gmm_t, single_t, batch_t=batch_t if GMM_BATCH else None
+    )
     MCMCPlots.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
 
     spice.kclear()

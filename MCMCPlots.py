@@ -15,7 +15,8 @@ Sections:
     FIGURE STYLE           style, colors, configure(), auto_param_scales()
     FIGURE OUTPUT          set_figure_dir(), save_figure(), write_output()
     SCENE / MEASUREMENTS   scene, observation geometry, post-fit residuals
-    MCMC DIAGNOSTICS       traces, autocorrelation, corner, all-in-one plot_mcmc_diagnostics
+    MCMC DIAGNOSTICS       traces, autocorrelation, corner (+ prior, + RTN frame:
+                           rtn_corner_map), all-in-one plot_mcmc_diagnostics
     GMM PROPAGATION        figures of GMM.GMM.propagate_stm results
     STT BENCHMARK          STT surrogate vs full nonlinear likelihood (J1_benchmark_STTs.py)
     QUICK-LOOK (legacy)    the original MCMCModel.plot_* figures (Tests/, Extra/ scripts)
@@ -207,6 +208,7 @@ C_TRUTH = "k"  # truth
 C_SPAN = "0.93"  # background spans (observation arc, burn-in, +/-3 sigma)
 C_XYZ = ("#56B4E9", "#CC79A7", "#E69F00")  # x / y / z components (ACF figure only)
 C_PRIOR = "#CC79A7"  # hyperprior reference (corner + traces; dashed, reddish purple)
+C_LSQ = "#009E73"  # batch LSQ Gaussian in the GMM propagation figures (dash-dot, bluish green)
 
 # ------------------------------------------------------------
 # Per-script configuration (set by configure())
@@ -1865,6 +1867,9 @@ def plot_corner(
     prior_truth_label=None,
     prior=None,
     n_prior=200_000,
+    param_sym=None,
+    param_unit=None,
+    param_scale=None,
 ):
     """
     Corner plot of the posterior against the batch covariance and the truth (square, TXT_W).
@@ -1929,6 +1934,12 @@ def plot_corner(
         reparametrization (drawn like the posterior: smoothed histograms).
     n_prior : int
         Draws (fixed seed) used for the highest-density levels of a distribution prior.
+    param_sym : list of str, optional
+        Symbols of the displayed coordinates, when they differ from the configured ones
+        (PARAM_SYM, the default), e.g. after a rotation of the position.
+    param_unit, param_scale : optional
+        Display units and scales replacing PARAM_UNIT and PARAM_SCALE (the defaults), e.g.
+        auto_param_scales of the sigmas in rotated coordinates.
 
     Returns
     -------
@@ -1938,7 +1949,14 @@ def plot_corner(
     from scipy.ndimage import gaussian_filter1d
 
     _require_configured(np.shape(samples)[1])
-    s = PARAM_SCALE
+    n_dim = np.shape(samples)[1]
+    sym = PARAM_SYM if param_sym is None else list(param_sym)
+    if len(sym) != n_dim:
+        raise ValueError(f"param_sym: {len(sym)} symbols for {n_dim} parameters")
+    s = PARAM_SCALE if param_scale is None else np.asarray(param_scale, dtype=float)
+    units = PARAM_UNIT if param_unit is None else list(param_unit)
+    if len(s) != n_dim or len(units) != n_dim:
+        raise ValueError(f"param_unit/param_scale: need {n_dim} entries")
     X = np.asarray(samples, dtype=float) * s
     n_par = X.shape[1]
     tr = None if true_theta is None else np.asarray(true_theta) * s
@@ -1994,7 +2012,7 @@ def plot_corner(
     label_fs = 7.0 if big else plt.rcParams["axes.labelsize"]
     ms_star, lw_s = (4.5, 0.75) if big else (6.5, 1.0)  # truth marker, line-width factor
     wsp = 0.08
-    titles = [_summary_title(PARAM_SYM[k], X[:, k]) for k in range(n_par)]
+    titles = [_summary_title(sym[k], X[:, k]) for k in range(n_par)]
 
     fig, axes = plt.subplots(n_par, n_par, figsize=(TXT_W, TXT_W))
     left, right, bottom, top = 0.085, 0.995, 0.075, 0.97
@@ -2026,7 +2044,7 @@ def plot_corner(
     w_max = min(right - left, top - bottom) / n_eff * TXT_W * 72.0 - 2.0
     labels = [
         _wrap_label(
-            PARAM_SYM[k], None, w_max, lambda txt: _w_frac(txt, label_fs) * TXT_W * 72.0
+            sym[k], None, w_max, lambda txt: _w_frac(txt, label_fs) * TXT_W * 72.0
         )
         for k in range(n_par)
     ]
@@ -2244,14 +2262,14 @@ def plot_corner(
     # (at most 6 symbols per row), [-] when dimensionless.
     groups = []
     for k in range(n_par):
-        u = PARAM_UNIT[k] or "-"
+        u = units[k] or "-"
         if groups and groups[-1][1] == u:
             groups[-1][0].append(k)
         else:
             groups.append(([k], u))
     lines = []
     for ks, u in groups:
-        syms = [f"${PARAM_SYM[k]}$" for k in ks]
+        syms = [f"${sym[k]}$" for k in ks]
         rows = [", ".join(syms[a : a + 6]) for a in range(0, len(syms), 6)]
         lines += [r + "," for r in rows[:-1]] + [rows[-1] + f" [{u}]"]
     bb = leg.get_window_extent(rend).transformed(fig.transFigure.inverted())
@@ -2352,7 +2370,7 @@ def plot_mcmc_corner(
         Prior draws (fixed seed).
     **kwargs
         Passed to plot_corner (bins, smooth, name, prior_idx, prior_label,
-        prior_truth_label).
+        prior_truth_label, param_sym, param_unit, param_scale).
 
     Returns
     -------
@@ -2385,6 +2403,83 @@ def plot_mcmc_corner(
     )
 
 
+# Symbols of the RTN corner (fig_corner_rtn): the six state slots, epoch subscript 0 as in
+# the scripts' PARAM_SYM (\delta x_0 ... \delta v_{z,0}).
+RTN_SYM = [
+    r"\delta r_{R,0}",
+    r"\delta r_{T,0}",
+    r"\delta r_{N,0}",
+    r"\delta v_{R,0}",
+    r"\delta v_{T,0}",
+    r"\delta v_{N,0}",
+]
+
+
+def rtn_matrix(x_ref):
+    """
+    Rotation from the inertial frame to the RTN frame of the orbit through x_ref.
+
+    R = r / |r| (radial), N = r x v / |r x v| (orbit normal), T = N x R (along-track,
+    in-plane), with r, v the position and velocity of x_ref relative to the frame origin
+    (the central body).
+
+    Parameters
+    ----------
+    x_ref : array_like, shape (>=6,)
+        Reference state [r, v, ...] (any further entries are ignored).
+
+    Returns
+    -------
+    ndarray, shape (3, 3)
+        Rows R, T, N in inertial components, so that d_rtn = C @ d_inertial.
+    """
+    x_ref = np.asarray(x_ref, dtype=float)
+    r, v = x_ref[:3], x_ref[3:6]
+    e_r = r / np.linalg.norm(r)
+    h = np.cross(r, v)
+    e_n = h / np.linalg.norm(h)
+    e_t = np.cross(e_n, e_r)
+    return np.vstack([e_r, e_t, e_n])
+
+
+def rtn_corner_map(x_ref, ndim):
+    """
+    Corner map (see plot_mcmc_diagnostics) to the RTN frame of the orbit through x_ref.
+
+    The position deviation (slots 0-2) and the velocity deviation (slots 3-5) are both
+    resolved along R, T, N of rtn_matrix(x_ref) (the inertial velocity deviation in RTN
+    components, no omega x r term); the other parameters are unchanged.
+
+    Parameters
+    ----------
+    x_ref : array_like, shape (>=6,)
+        Reference state [r, v, ...], e.g. the batch solution about which the samples are
+        deviations.
+    ndim : int
+        Number of parameters (>= 6, the first six being the position and velocity).
+
+    Returns
+    -------
+    ndarray, shape (ndim, ndim)
+    """
+    C = rtn_matrix(x_ref)
+    A = np.eye(int(ndim))
+    A[0:3, 0:3] = C
+    A[3:6, 3:6] = C
+    return A
+
+
+def _mapped_corner_kw(A, true_theta, batch_mean, batch_cov):
+    """plot_mcmc_corner kwargs for displayed coordinates A @ theta."""
+    A = np.asarray(A, dtype=float)
+    return dict(
+        true_theta=None if true_theta is None else A @ np.asarray(true_theta),
+        batch_mean=A @ np.asarray(batch_mean),
+        batch_cov=None if batch_cov is None else A @ np.asarray(batch_cov) @ A.T,
+        transform=lambda S: np.asarray(S) @ A.T,
+    )
+
+
 def plot_mcmc_diagnostics(
     model,
     burn_in,
@@ -2397,10 +2492,15 @@ def plot_mcmc_diagnostics(
     components=None,
     acf_groups=None,
     corner_prior=True,
+    corner_map=None,
+    corner_sym=None,
+    corner_rtn=None,
+    corner_rtn_kw=None,
 ):
     """
     The MCMC journal figures: residuals, traces, autocorrelation, corner and (optionally)
-    the corner with the prior overlaid (fig_corner_prior).
+    the corner with the prior overlaid (fig_corner_prior) and the corner in the RTN frame
+    (fig_corner_rtn).
 
     For runs whose sampled parameters are the displayed ones (no transform). A figure that
     fails is reported and skipped, so a long run is never lost to a plotting error.
@@ -2427,6 +2527,24 @@ def plot_mcmc_diagnostics(
         Panels of the autocorrelation figure.
     corner_prior : bool
         Also save the corner plot with the prior (model.param_priors) overlaid.
+    corner_map : array_like, shape (ndim, ndim), optional
+        Linear map A from the model to the displayed coordinates of the two corner plots
+        (e.g. a rotation of the position into the observer's line-of-sight frame), applied
+        to the samples, the prior draws, the truth and the batch estimate, and as A C A^T to
+        the batch covariance. Each displayed coordinate keeps the unit and display scale of
+        the parameter in its slot. The traces and the autocorrelation stay in the model
+        coordinates.
+    corner_sym : list of str, optional
+        Symbols of the displayed corner coordinates (default PARAM_SYM).
+    corner_rtn : array_like, shape (>=6,), optional
+        Reference state [r, v, ...] relative to the central body (e.g. the batch solution
+        x0_ref1). If given, a third corner plot, fig_corner_rtn, is saved with the position
+        and velocity deviations (slots 0-5) resolved in the RTN frame of the orbit through
+        it (rtn_corner_map; independent of corner_map, no prior overlay). Off by default.
+    corner_rtn_kw : dict, optional
+        Further plot_corner kwargs of the RTN corner: param_sym (default RTN_SYM +
+        PARAM_SYM[6:]), and e.g. param_unit/param_scale when the display units were sized
+        to the x, y, z sigmas (auto_param_scales).
 
     Returns
     -------
@@ -2434,6 +2552,10 @@ def plot_mcmc_diagnostics(
     """
     batch = np.zeros(model.ndim) if batch_theta is None else np.asarray(batch_theta)
     corner_kw = dict(true_theta=true_theta, batch_mean=batch, batch_cov=batch_cov)
+    if corner_map is not None:
+        corner_kw = _mapped_corner_kw(corner_map, true_theta, batch, batch_cov)
+    if corner_sym is not None:
+        corner_kw["param_sym"] = corner_sym
     figures = (
         (
             "post-fit residuals",
@@ -2456,6 +2578,15 @@ def plot_mcmc_diagnostics(
     if corner_prior:
         figures += (
             ("corner + prior", lambda: plot_mcmc_corner(model, prior=True, **corner_kw)),
+        )
+    if corner_rtn is not None:
+        rtn_kw = _mapped_corner_kw(
+            rtn_corner_map(corner_rtn, model.ndim), true_theta, batch, batch_cov
+        )
+        rtn_kw["param_sym"] = RTN_SYM + list(PARAM_SYM[6:])
+        rtn_kw.update(corner_rtn_kw or {})
+        figures += (
+            ("corner RTN", lambda: plot_mcmc_corner(model, name="fig_corner_rtn", **rtn_kw)),
         )
     for label, draw in figures:
         try:
@@ -2480,7 +2611,14 @@ def _ellipse_2d(mean2, cov2, radius, n=181):
 
 
 def plot_gmm_propagation(
-    panels, prob=0.99, n_draw=20000, seed=0, name="fig_gmm_stm_propagation"
+    panels,
+    prob=0.99,
+    n_draw=20000,
+    seed=0,
+    name="fig_gmm_stm_propagation",
+    axis_names=None,
+    show_mc=True,
+    show_components=True,
 ):
     """
     Position projections (xy, xz, yz): propagated GMM, single Gaussian and Monte Carlo.
@@ -2488,15 +2626,16 @@ def plot_gmm_propagation(
     One row per panel dict (e.g. row 0 at an epoch, row 1 at the target epoch), drawn in m
     relative to its center: the MC cloud (grey), every GMM component's ellipse, the GMM
     highest-density region holding `prob` of the mass (level from mixture draws), the
-    single-Gaussian ellipse with the same mass (dashed vermillion) and the truth (star).
-    Full text width.
+    single-Gaussian ellipse with the same mass (dashed vermillion), optionally the batch LSQ
+    Gaussian's ellipse (dash-dot bluish green) and the truth (star). Full text width.
 
     Parameters
     ----------
     panels : list of dict
         At most 2 rows (panels lettered a-f). Keys, in km: "mc" (M, 3) Monte Carlo
         positions; "gmm" and "single" (GMM.GMM of the position: mixture and single
-        Gaussian); "truth" (3,); "center" (3,), e.g. the MC mean; "title" (str).
+        Gaussian); "truth" (3,); "center" (3,), e.g. the MC mean; "title" (str). Optional
+        "batch" (GMM.GMM, K = 1): the propagated batch least-squares Gaussian.
     prob : float
         Probability mass of the ellipses and of the GMM region.
     n_draw : int
@@ -2505,6 +2644,13 @@ def plot_gmm_propagation(
         Seed of those draws.
     name : str
         File name of the PDF.
+    axis_names : list of str, optional
+        Labels of the three position axes (default delta x, delta y, delta z in m), e.g. for
+        panels rotated to the RTN frame.
+    show_mc : bool
+        Draw the MC cloud (False: it is also left out of the axis limits and the legend).
+    show_components : bool
+        Draw every GMM component's ellipse (False: only the mixture region).
 
     Returns
     -------
@@ -2514,7 +2660,12 @@ def plot_gmm_propagation(
     r_ell = np.sqrt(chi2.ppf(prob, 2))
     pct = rf"{100 * prob:g}$\%$"
     pairs = [(0, 1), (0, 2), (1, 2)]
-    names = [r"$\delta x$ [m]", r"$\delta y$ [m]", r"$\delta z$ [m]"]
+    names = (
+        [r"$\delta x$ [m]", r"$\delta y$ [m]", r"$\delta z$ [m]"]
+        if axis_names is None
+        else list(axis_names)
+    )
+    has_batch = any("batch" in pnl for pnl in panels)
     rng = np.random.default_rng(seed)
 
     fig = plt.figure(figsize=(TXT_W, 4.9), layout="constrained")
@@ -2530,6 +2681,9 @@ def plot_gmm_propagation(
         mu1 = (pnl["single"].means[0] - c) * 1e3
         P1 = pnl["single"].covs[0] * 1e6
         tr = (pnl["truth"] - c) * 1e3
+        if "batch" in pnl:
+            mub = (pnl["batch"].means[0] - c) * 1e3
+            Pb = pnl["batch"].covs[0] * 1e6
         draws = GMM(w, mu, P).sample(n_draw, rng)
 
         for col, (i, j) in enumerate(pairs):
@@ -2537,41 +2691,44 @@ def plot_gmm_propagation(
             ix = [i, j]
             g2 = GMM(w, mu[:, ix], P[:, ix][:, :, ix])
             e1 = _ellipse_2d(mu1[ix], P1[np.ix_(ix, ix)], r_ell)
+            ext_lo = [
+                e1.min(1),
+                np.percentile(draws[:, ix], 0.1, axis=0),
+                tr[ix],
+            ]
+            ext_hi = [
+                e1.max(1),
+                np.percentile(draws[:, ix], 99.9, axis=0),
+                tr[ix],
+            ]
+            if show_mc:
+                ext_lo.insert(0, mc[:, ix].min(0))
+                ext_hi.insert(0, mc[:, ix].max(0))
+            if "batch" in pnl:
+                eb = _ellipse_2d(mub[ix], Pb[np.ix_(ix, ix)], r_ell)
+                ext_lo.append(eb.min(1))
+                ext_hi.append(eb.max(1))
 
-            lo = np.min(
-                [
-                    mc[:, ix].min(0),
-                    e1.min(1),
-                    np.percentile(draws[:, ix], 0.1, axis=0),
-                    tr[ix],
-                ],
-                axis=0,
-            )
-            hi = np.max(
-                [
-                    mc[:, ix].max(0),
-                    e1.max(1),
-                    np.percentile(draws[:, ix], 99.9, axis=0),
-                    tr[ix],
-                ],
-                axis=0,
-            )
+            lo = np.min(ext_lo, axis=0)
+            hi = np.max(ext_hi, axis=0)
             pad = 0.08 * (hi - lo)
             lo, hi = lo - pad, hi + pad
 
-            ax.scatter(
-                mc[:, i],
-                mc[:, j],
-                s=2.5,
-                color=C_MC,
-                alpha=0.7,
-                lw=0,
-                rasterized=True,
-                zorder=1,
-            )
-            for k in range(len(w)):
-                e = _ellipse_2d(g2.means[k], g2.covs[k], r_ell)
-                ax.plot(e[0], e[1], color=C_POST, lw=0.45, alpha=0.55, zorder=2)
+            if show_mc:
+                ax.scatter(
+                    mc[:, i],
+                    mc[:, j],
+                    s=2.5,
+                    color=C_MC,
+                    alpha=0.7,
+                    lw=0,
+                    rasterized=True,
+                    zorder=1,
+                )
+            if show_components:
+                for k in range(len(w)):
+                    e = _ellipse_2d(g2.means[k], g2.covs[k], r_ell)
+                    ax.plot(e[0], e[1], color=C_POST, lw=0.45, alpha=0.55, zorder=2)
 
             gx, gy = np.meshgrid(
                 np.linspace(lo[0], hi[0], 240), np.linspace(lo[1], hi[1], 240)
@@ -2584,6 +2741,8 @@ def plot_gmm_propagation(
             )
 
             ax.plot(e1[0], e1[1], color=C_BATCH, lw=1.1, ls="--", zorder=4)
+            if "batch" in pnl:
+                ax.plot(eb[0], eb[1], color=C_LSQ, lw=1.1, ls="-.", zorder=4)
             ax.plot(
                 tr[i],
                 tr[j],
@@ -2597,7 +2756,7 @@ def plot_gmm_propagation(
             )
             ax.set_xlim(lo[0], hi[0])
             ax.set_ylim(lo[1], hi[1])
-            ax.xaxis.set_major_locator(mticker.MaxNLocator(5))
+            ax.xaxis.set_major_locator(mticker.MaxNLocator(4))
             ax.yaxis.set_major_locator(mticker.MaxNLocator(5))
             ax.set_xlabel(names[i])
             ax.set_ylabel(names[j])
@@ -2635,7 +2794,28 @@ def plot_gmm_propagation(
             label="Truth",
         ),
     ]
-    fig.legend(handles=handles, loc="outside upper center", ncol=5, columnspacing=1.0)
+    if has_batch:
+        handles.insert(
+            4,
+            Line2D(
+                [],
+                [],
+                color=C_LSQ,
+                lw=1.1,
+                ls="-.",
+                label=f"Batch LSQ + STM ({pct} HDR)",
+            ),
+        )
+    if not show_components:
+        handles.pop(1)
+    if not show_mc:
+        handles.pop(0)
+    fig.legend(
+        handles=handles,
+        loc="outside upper center",
+        ncol=3 if len(handles) >= 6 else len(handles),
+        columnspacing=1.0,
+    )
     return save_figure(fig, name)
 
 
@@ -2648,7 +2828,9 @@ def plot_prediction_history(
     (a) sqrt(trace P_rr) [m] on a log scale: Monte Carlo (thick grey), GMM + STMs (blue),
     single Gaussian (dashed vermillion). (b) Difference of the mean log-density of the MC
     positions, GMM minus single Gaussian [nats] (> 0: the GMM fits the MC cloud better). The
-    observation arc is shaded. Single column.
+    observation arc is shaded. Single column. If hist holds the batch LSQ Gaussian
+    (sig_batch, ll_batch), it is added to both panels (dash-dot bluish green; in (b) batch
+    minus single Gaussian).
 
     Parameters
     ----------
@@ -2709,6 +2891,17 @@ def plot_prediction_history(
         label="Single Gaussian + STM",
         zorder=4,
     )
+    has_batch = "sig_batch" in hist
+    if has_batch:
+        ax0.plot(
+            t_hr,
+            hist["sig_batch"] * 1e3,
+            color=C_LSQ,
+            lw=1.2,
+            ls="-.",
+            label="Batch LSQ + STM",
+            zorder=4,
+        )
     ax0.set_ylabel(r"$\sqrt{\mathrm{tr}(P_{rr})}$ [m]")
     ax0.set_yscale("log")
     ax0.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
@@ -2718,11 +2911,23 @@ def plot_prediction_history(
 
     ax1.axhline(0.0, color="0.45", lw=0.6)
     ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=C_POST, lw=1.2)
+    if has_batch:
+        ax1.plot(t_hr, hist["ll_batch"] - hist["ll_1"], color=C_LSQ, lw=1.2, ls="-.")
     ax1.set_ylabel(r"$\Delta \overline{\log p}$ [nats]")
     ax1.set_xlabel("Time since Epoch [h]")
-    ax1.set_title(r"(b) Mean Log-Density of MC Positions, GMM $-$ Single", loc="left")
+    ax1.set_title(
+        r"(b) Mean Log-Density of MC Positions $-$ Single"
+        if has_batch
+        else r"(b) Mean Log-Density of MC Positions, GMM $-$ Single",
+        loc="left",
+    )
 
-    fig.legend(loc="outside upper center", ncol=3, columnspacing=0.8, handlelength=1.5)
+    fig.legend(
+        loc="outside upper center",
+        ncol=2 if has_batch else 3,
+        columnspacing=0.8,
+        handlelength=1.5,
+    )
     return save_figure(fig, name)
 
 

@@ -257,6 +257,26 @@ class GMM:
         idx = np.arange(self.dim)[idx]
         return GMM(self.weights, self.means[:, idx], self.covs[:, idx][:, :, idx])
 
+    def linear_map(self, A):
+        """
+        Image of the mixture under x -> A x (e.g. a rotation to another frame).
+
+        Parameters
+        ----------
+        A : array_like, shape (m, n)
+
+        Returns
+        -------
+        GMM
+            Same weights, means A mu_k, covariances A P_k A^T.
+        """
+        A = np.asarray(A, dtype=float)
+        return GMM(
+            self.weights,
+            self.means @ A.T,
+            np.einsum("ij,kjl,ml->kim", A, self.covs, A),
+        )
+
     def sample(self, n, rng=None):
         """
         Random draws from the mixture: multinomial component counts, then Gaussian draws.
@@ -386,7 +406,7 @@ def propagate_samples_mc(propagator, x0_ref, deltas, t_eval, **ivp):
     return out
 
 
-def position_prediction_history(X_mc, gmm_t, single_t):
+def position_prediction_history(X_mc, gmm_t, single_t, batch_t=None):
     """
     Per-epoch position (3D) check of the propagated GMM and Gaussian vs Monte Carlo.
 
@@ -398,6 +418,9 @@ def position_prediction_history(X_mc, gmm_t, single_t):
     gmm_t, single_t : list of GMM
         The per-epoch mixtures returned by GMM.propagate_stm for the GMM and for the single
         Gaussian.
+    batch_t : list of GMM, optional
+        A further propagated Gaussian (e.g. the batch least-squares solution and its
+        covariance), checked the same way.
 
     Returns
     -------
@@ -406,9 +429,13 @@ def position_prediction_history(X_mc, gmm_t, single_t):
         moment-matched GMM and of the single Gaussian.
         ll_gmm, ll_1 : mean log-density of the MC positions under the GMM / the single
         Gaussian position marginal (higher = better fit of the MC cloud).
+        sig_batch, ll_batch : the same for batch_t (only if given).
     """
     n_t = X_mc.shape[1]
-    out = {k: np.empty(n_t) for k in ("sig_mc", "sig_gmm", "sig_1", "ll_gmm", "ll_1")}
+    keys = ["sig_mc", "sig_gmm", "sig_1", "ll_gmm", "ll_1"]
+    if batch_t is not None:
+        keys += ["sig_batch", "ll_batch"]
+    out = {k: np.empty(n_t) for k in keys}
     pos_idx = slice(0, 3)
     for j in range(n_t):
         pos = X_mc[:, j, pos_idx]
@@ -419,6 +446,10 @@ def position_prediction_history(X_mc, gmm_t, single_t):
         out["sig_1"][j] = np.sqrt(np.trace(g1.moments()[1]))
         out["ll_gmm"][j] = np.mean(g.logpdf(pos))
         out["ll_1"][j] = np.mean(g1.logpdf(pos))
+        if batch_t is not None:
+            gb = batch_t[j].marginal(pos_idx)
+            out["sig_batch"][j] = np.sqrt(np.trace(gb.moments()[1]))
+            out["ll_batch"][j] = np.mean(gb.logpdf(pos))
     return out
 
 

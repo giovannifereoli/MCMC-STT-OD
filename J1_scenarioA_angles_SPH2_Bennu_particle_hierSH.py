@@ -722,6 +722,10 @@ if __name__ == "__main__":
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
     LOAD_CHAIN = None  # e.g. "results/bennu_particle_hiersh_<stamp>/chain.npz"
+    # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
+    # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
+    # central body (MCMCPlots.rtn_corner_map).
+    CORNER_RTN = True
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
     # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
@@ -1314,6 +1318,26 @@ if __name__ == "__main__":
             ),
         ),
     )
+    if CORNER_RTN:
+        # the corner with the position/velocity deviations in the RTN frame of the orbit
+        # through ref1, display units sized to the batch sigmas in R, T, N
+        A_rtn = MCMCPlots.rtn_corner_map(x0_ref1, ndim_full)
+        A12 = A_rtn[:12, :12]
+        rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+            PARAM_BASE_SCALE[:12], PARAM_BASE_UNIT[:12], np.sqrt(np.diag(A12 @ cov1 @ A12.T))
+        )
+        rtn_kw = dict(
+            corner_kw,
+            true_theta=A_rtn @ true_theta,
+            batch_mean=A_rtn @ batch_mean_full,
+            batch_cov=A_rtn @ batch_cov_full @ A_rtn.T,
+            transform=lambda S: np.asarray(S) @ A_rtn.T,
+            name="fig_corner_rtn",
+            param_sym=MCMCPlots.RTN_SYM + PARAM_SYM[6:],
+            param_unit=list(rtn_unit) + [""] * 3,
+            param_scale=np.hstack([rtn_scale, np.full(3, LOG10_SCALE)]),
+        )
+        journal_figs += (("corner RTN", lambda: model.plot_journal_corner(**rtn_kw)),)
     for label, draw in journal_figs:
         try:
             draw()
