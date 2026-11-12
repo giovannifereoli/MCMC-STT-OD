@@ -65,11 +65,11 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 
-# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMC.py;
-# MCMC.configure() in the main applies the journal style.
-import MCMC
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
+# MCMCPlots.configure() in the main applies the journal style.
+import MCMCPlots
 
-MCMC.SHOW_FIGS = True  # plt.show() after each figure is saved
+MCMCPlots.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 # ============================================================
 # Geometry / utility
@@ -1021,7 +1021,7 @@ if __name__ == "__main__":
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
     # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
-    # one PDF per figure in a timestamped folder (MCMC.SHOW_FIGS at the top of the file)
+    # one PDF per figure in a timestamped folder (MCMCPlots.SHOW_FIGS at the top of the file)
     PARAM_SYM = [
         r"\delta x_0",
         r"\delta y_0",
@@ -1045,7 +1045,7 @@ if __name__ == "__main__":
     ]
     PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 12)
     PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 12
-    MCMC.configure(
+    MCMCPlots.configure(
         PARAM_SYM,
         PARAM_BASE_UNIT,
         PARAM_BASE_SCALE,
@@ -1057,7 +1057,7 @@ if __name__ == "__main__":
         resid_labels=("Range", "Range-Rate"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
-    fig_dir = MCMC.set_figure_dir(
+    fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
         / f"bennu_a3_popper_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1201,7 +1201,7 @@ if __name__ == "__main__":
     # flip: check the arc after it.
     n_in_dense = int(
         np.sum(
-            MCMC.points_inside_mesh(
+            MCMCPlots.points_inside_mesh(
                 bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
             )
         )
@@ -1220,7 +1220,7 @@ if __name__ == "__main__":
         ],
         dtype=float,
     )
-    MCMC.plot_scene_body_fixed(
+    MCMCPlots.plot_scene_body_fixed(
         bennu_mesh,
         tau_obs=tau_full,
         sc_obs=sc_state_full,
@@ -1233,7 +1233,7 @@ if __name__ == "__main__":
         omega=omega_true,
         detach_bf=pos_detach_bf,
     )
-    MCMC.plot_observation_geometry(
+    MCMCPlots.plot_observation_geometry(
         tau_full,
         sc_state_full,
         x_true_full,
@@ -1347,10 +1347,10 @@ if __name__ == "__main__":
     print("[Stage 1] delta_hat1:\n", delta_hat1)
 
     # Display units: rescale each parameter by a power of ten so its batch sigma reads well
-    disp_scale, disp_unit = MCMC.auto_param_scales(
+    disp_scale, disp_unit = MCMCPlots.auto_param_scales(
         PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
     )
-    MCMC.configure(PARAM_SYM, disp_unit, disp_scale)
+    MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
 
     # --------------------------
     # Stage 2: relinearize STTs about ref1

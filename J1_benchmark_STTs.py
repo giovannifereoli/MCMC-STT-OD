@@ -24,17 +24,29 @@ Assumptions about your API:
 - You can extract chain samples with one of:
     model.get_flat_samples(), or model.samples, or model.chain
 
+Outputs (results/stt_benchmark_<timestamp>/): chain.npz, benchmark.npz and one journal PDF
+per figure (fig_stt_benchmark, fig_mcmc_traces, fig_mcmc_autocorrelation, fig_corner,
+fig_corner_prior).
+LOAD_CHAIN / LOAD_BENCHMARK in the main redo the figures from a saved run.
 """
 
+import io
 import time
+from datetime import datetime
+from itertools import product
+from pathlib import Path
+
 import numpy as np
 import sympy as sp
-from itertools import product
-import os
-import numpy as np
-import matplotlib.pyplot as plt
+
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
+
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
+# MCMCPlots.configure() in the main applies the journal style.
+import MCMCPlots
+
+MCMCPlots.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 try:
     from tabulate import tabulate
@@ -42,31 +54,6 @@ try:
     _HAS_TABULATE = True
 except Exception:
     _HAS_TABULATE = False
-
-
-# Publication-ish defaults
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "serif",
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.alpha": 0.7,
-        "font.size": 12,
-        "axes.labelsize": 12,
-        "axes.titlesize": 13,
-        "xtick.labelsize": 11,
-        "ytick.labelsize": 11,
-        "legend.fontsize": 11,
-        "axes.grid": True,
-        "grid.linestyle": ":",
-        "grid.linewidth": 0.8,
-        "figure.dpi": 150,
-        "savefig.dpi": 300,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    }
-)
 
 
 # =========================
@@ -222,13 +209,20 @@ def benchmark_orders_on_chain(
     atol=1e-12,
     method="LSODA",
 ):
+    """
+    Time and compare the STT surrogate log-likelihood of each order against the full
+    nonlinear one on n_eval chain samples. Prints the summary table and returns a dict:
+      orders, t_build, t_setup [s], stt_ms, nl_ms [ms/sample], speedup (n_orders,);
+      dlogL = lnL_STT - lnL_NL (n_orders, Ns); dy = r_STT - r_NL, the normalized-residual
+      (= predicted-measurement / sigma) difference (n_orders, Ns, n_meas); sample_idx (Ns,).
+    """
     chain_samples = np.asarray(chain_samples, float)
     Ns_all = chain_samples.shape[0]
     if n_eval < Ns_all:
         idx = np.random.default_rng(0).choice(Ns_all, size=n_eval, replace=False)
-        thetas = chain_samples[idx]
     else:
-        thetas = chain_samples
+        idx = np.arange(Ns_all)
+    thetas = chain_samples[idx]
     Ns = thetas.shape[0]
 
     # NONLINEAR propagator should be independent of STT order (order=1)
@@ -248,13 +242,20 @@ def benchmark_orders_on_chain(
         return res / w  # normalized
 
     def residuals_nl(delta0):
-        sol, _ = prop_nl.propagate(
-            x0_ref1 + delta0, t_grid, rtol=rtol, atol=atol, method=method
+        # state only (no STM, no progress bar): the cost of a plain nonlinear likelihood
+        sol = prop_nl.propagate_state_only(
+            x0_ref1 + delta0,
+            t_grid,
+            show_progress=False,
+            rtol=rtol,
+            atol=atol,
+            method=method,
         )
         x_est = sol.y[:6, :].T
         return residuals_from_x(x_est)
 
     rows = []
+    dlogL_all, dy_all = [], []
     for order in orders:
         # build stt funcs
         t0 = time.perf_counter()
@@ -299,6 +300,8 @@ def benchmark_orders_on_chain(
 
         dlogL = np.asarray(dlogL)
         dy_sig = np.asarray(dy_sig)
+        dlogL_all.append(dlogL)
+        dy_all.append(dy_sig)
 
         stt_ms = 1e3 * dt_stt / Ns
         nl_ms = 1e3 * dt_nl / Ns
@@ -319,6 +322,50 @@ def benchmark_orders_on_chain(
             ]
         )
 
+    rows = np.asarray(rows, float)
+    bench = dict(
+        orders=rows[:, 0].astype(int),
+        t_build=rows[:, 1],
+        t_setup=rows[:, 2],
+        stt_ms=rows[:, 3],
+        nl_ms=rows[:, 4],
+        speedup=rows[:, 5],
+        dlogL=np.asarray(dlogL_all),
+        dy=np.asarray(dy_all),
+        sample_idx=np.asarray(idx),
+    )
+    print_benchmark_table(bench)
+    return bench
+
+
+def print_benchmark_table(bench):
+    """Summary table of a benchmark dict (benchmark_orders_on_chain or benchmark.npz)."""
+    dlogL = np.asarray(bench["dlogL"])
+    dy = np.asarray(bench["dy"])
+    rows = [
+        [
+            int(o),
+            tb,
+            ts,
+            sm,
+            nm,
+            spd,
+            rms(dl),
+            p95_abs(dl),
+            rms(d),
+            p95_abs(d),
+        ]
+        for o, tb, ts, sm, nm, spd, dl, d in zip(
+            bench["orders"],
+            bench["t_build"],
+            bench["t_setup"],
+            bench["stt_ms"],
+            bench["nl_ms"],
+            bench["speedup"],
+            dlogL,
+            dy,
+        )
+    ]
     headers = [
         "order",
         "sym_build[s]",
@@ -334,90 +381,29 @@ def benchmark_orders_on_chain(
     print(
         "\n=== MCMC-chain view: STT surrogate vs FULL nonlinear (Two-body, RA/DEC) ==="
     )
-    print(f"Evaluated chain samples: {Ns}")
+    print(f"Evaluated chain samples: {dlogL.shape[1]}")
     print(format_table(rows, headers))
-    return rows
+
+
+def save_benchmark(bench, path, **extra):
+    """Write the benchmark dict (+ extra scalars/arrays) as .npz, OneDrive-safe."""
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **bench, **extra)
+    path = MCMCPlots.write_output(path, buf.getvalue(), tag="Benchmark")
+    print(f"[Benchmark] saved {path}")
+    return path
+
+
+def load_benchmark(path):
+    with np.load(path) as f:
+        bench = {k: f[k] for k in f.files}
+    print(f"[Benchmark] loaded {path}")
+    return bench
 
 
 # =========================
-# Publication-quality LaTeX plot (RMS only, vs FULL NL)
+# Figures: MCMCPlots.plot_stt_benchmark (journal style, see MCMCPlots.py)
 # =========================
-
-
-def plot_chain_view_benchmark_latex(
-    rows,
-    out_pdf="stt_chain_view_rms.pdf",
-):
-    """
-    Publication-style plot with two panels:
-      (a) Speedup vs FULL NL
-      (b) RMS(Δ y / σ) vs FULL NL
-
-    Figures are saved in ./results/
-    """
-
-    # -------------------------
-    # Prepare output directory
-    # -------------------------
-    out_dir = "results"
-    os.makedirs(out_dir, exist_ok=True)
-    out_pdf = os.path.join(out_dir, out_pdf)
-
-    # -------------------------
-    # Data unpacking
-    # -------------------------
-    rows = np.asarray(rows, float)
-
-    order = rows[:, 0].astype(int)
-    speedup = rows[:, 5]
-    dy_rms = rows[:, 8]  # <-- RMS(Δy/σ)
-    nl_ms = rows[:, 4]
-
-    # -------------------------
-    # Global style (journal-like)
-    # -------------------------
-    c_speed = "#1f77b4"
-    c_resid = "#2ca02c"
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.2))
-
-    unique_orders = np.unique(order)
-
-    # (a) Speedup
-    ax1.plot(order, speedup, "-o", color=c_speed, lw=2.5, ms=6)
-    ax1.set_yscale("log")
-    ax1.set_xlabel(r"STT order")
-    ax1.set_ylabel(r"Speedup $t_{\mathrm{NL}} / t_{\mathrm{STT}}$")
-    ax1.set_title(r"(a) Computational gain")
-    ax1.set_xticks(unique_orders)
-    ax1.set_xlim(unique_orders.min() - 0.2, unique_orders.max() + 0.2)
-    ax1.grid(True, which="both")
-
-    # (b) Residual distortion
-    ax2.plot(order, dy_rms, "-o", color=c_resid, lw=2.5, ms=6)
-    ax2.set_yscale("log")
-    ax2.set_xlabel(r"STT order")
-    ax2.set_ylabel(r"$\mathrm{RMS}(\Delta y / \sigma)$")
-    ax2.set_title(r"(b) Residual distortion")
-    ax2.set_xticks(unique_orders)
-    ax2.set_xlim(unique_orders.min() - 0.2, unique_orders.max() + 0.2)
-    ax2.grid(True, which="both")
-
-    # Annotation
-    nl_ref = np.median(nl_ms)
-    fig.text(
-        0.5,
-        -0.03,
-        rf"Errors referenced to FULL nonlinear likelihood "
-        rf"(median cost $t_{{\mathrm{{NL}}}}\approx {nl_ref:.2f}\,\mathrm{{ms/sample}}$).",
-        ha="center",
-        va="top",
-        fontsize=11,
-    )
-
-    fig.tight_layout()
-    fig.savefig(out_pdf, bbox_inches="tight")
-    plt.close(fig)
 
 
 # =========================
@@ -469,6 +455,50 @@ if __name__ == "__main__":
     x0_ref1 = x0_true - np.hstack(
         [rng.normal(scale=ref_sig_r), rng.normal(scale=ref_sig_v)]
     )
+
+    # --------------------------
+    # MCMC settings, saved runs, figures
+    # --------------------------
+    n_walkers = 64
+    n_samples = 7000  # >= 100 tau (tau ~ 55-65 steps)
+    burn_in = 300
+    thin = 10
+    spherical_spread = 1e-2
+    # Saved runs: every run writes chain.npz and benchmark.npz into its results folder. Set
+    # LOAD_CHAIN to such a chain to skip the sampling, and LOAD_BENCHMARK to such a benchmark
+    # to skip the STT-vs-nonlinear timing (both None: full run).
+    LOAD_CHAIN = None  # e.g. "results/stt_benchmark_<stamp>/chain.npz"
+    LOAD_BENCHMARK = None  # e.g. "results/stt_benchmark_<stamp>/benchmark.npz"
+
+    # Parameter symbols and display units (km -> m, km/s -> mm/s; rescaled by powers of ten
+    # from the posterior sigmas after the run); one PDF per figure in a timestamped folder.
+    # In the figures delta = x0 - x0_true (error w.r.t. the truth, see the figure block).
+    PARAM_SYM = [
+        r"\delta x_0",
+        r"\delta y_0",
+        r"\delta z_0",
+        r"\delta v_{x,0}",
+        r"\delta v_{y,0}",
+        r"\delta v_{z,0}",
+    ]
+    PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3)
+    PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3
+    MCMCPlots.configure(
+        PARAM_SYM,
+        PARAM_BASE_UNIT,
+        PARAM_BASE_SCALE,
+        body="Bennu",
+        target="Particle",
+        obs_word="Image",
+        resid_labels=("RA", "Dec"),
+        fallback_dir=Path.home() / "stt_benchmark_figures_fallback",
+    )
+    fig_dir = MCMCPlots.set_figure_dir(
+        Path(__file__).resolve().parent
+        / "results"
+        / f"stt_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Figures] -> {fig_dir}")
 
     print("\nTruth x0:", x0_true)
     print("Ref1  x0:", x0_ref1)
@@ -545,20 +575,22 @@ if __name__ == "__main__":
     )
     model.setup_whitening_from_priors()
 
-    # IMPORTANT: avoid process-based multiprocessing if you see pickling errors.
-    # Prefer single-core OR update MCMCModel to use ThreadPool.
-    model.run(
-        n_samples=3000,
-        n_walkers=64,
-        burn_in=300,
-        thin=10,
-        spherical_spread=1e-2,
-        method_optimize="Powell",
-        use_demoves=False,
-        # If your MCMCModel supports it, set to 1 to avoid pickling:
-        # n_cores=1,
-        # use_multiprocessing=False,
-    )
+    if LOAD_CHAIN:
+        model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
+        burn_in, thin = model.burn_in, model.thin
+    else:
+        # IMPORTANT: avoid process-based multiprocessing if you see pickling errors.
+        # Prefer single-core OR update MCMCModel to use ThreadPool.
+        model.run(
+            n_samples=n_samples,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            thin=thin,
+            spherical_spread=spherical_spread,
+            method_optimize="Powell",
+            use_demoves=False,
+        )
+        model.save_chain(fig_dir / "chain.npz")
 
     chain = get_flat_chain_samples(model)
     print("Flat chain shape:", chain.shape)
@@ -568,23 +600,79 @@ if __name__ == "__main__":
     # (FAIR: nonlinear uses order=1 propagator internally)
     # --------------------------
     orders_to_test = [1, 2, 3, 4]
-    rows = benchmark_orders_on_chain(
-        orders=orders_to_test,
-        mu=mu,
-        x0_ref1=x0_ref1,
-        t_grid=t_grid,
-        sc_pos=sc_pos,
-        y_obs=y_obs,
-        sigma_ra=sigma_ra,
-        sigma_dec=sigma_dec,
-        chain_samples=chain,
-        n_eval=200,  # NL eval is the expensive part
-        rtol=rtol,
-        atol=atol,
-        method="LSODA",
+    if LOAD_BENCHMARK:
+        bench = load_benchmark(LOAD_BENCHMARK)
+        print_benchmark_table(bench)
+    else:
+        bench = benchmark_orders_on_chain(
+            orders=orders_to_test,
+            mu=mu,
+            x0_ref1=x0_ref1,
+            t_grid=t_grid,
+            sc_pos=sc_pos,
+            y_obs=y_obs,
+            sigma_ra=sigma_ra,
+            sigma_dec=sigma_dec,
+            chain_samples=chain,
+            n_eval=200,  # NL eval is the expensive part
+            rtol=rtol,
+            atol=atol,
+            method="LSODA",
+        )
+        save_benchmark(
+            bench, fig_dir / "benchmark.npz", stt_order_for_mcmc=stt_order_for_mcmc
+        )
+
+    # --------------------------
+    # Journal figures: benchmark, then the chain it was evaluated on
+    # (samples are deviations about ref1; no batch solution in this script)
+    # --------------------------
+    MCMCPlots.plot_stt_benchmark(bench, mcmc_order=stt_order_for_mcmc)
+
+    # The chain holds offsets from ref1, which sits ~1 m (hundreds of posterior sigmas) from
+    # the truth: plotted as is, an axis reads e.g. -1043 [10^-3 m]. The figures show the
+    # error w.r.t. the truth instead, delta = x0 - x0_true (truth at 0); the transform also
+    # shifts the prior draws of the prior overlay.
+    true_delta = x0_true - x0_ref1
+
+    def to_error(theta):
+        return np.asarray(theta, float) - true_delta
+
+    zero = np.zeros_like(true_delta)
+    disp_scale, disp_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.std(model.samples, axis=0)
+    )
+    MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
+
+    # The prior is 30-2000x wider than the posterior, so the prior corner gets its own units,
+    # sized to the prior sigma (m, mm/s); with the posterior units above its ticks would read
+    # e.g. +-20000 [10^-3 m]. The posterior is then a narrow spike: the data dominate the prior.
+    prior_scale, prior_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, prior_sigma
     )
 
-    plot_chain_view_benchmark_latex(
-        rows,
-        out_pdf="stt_chain_view_rms.pdf",
-    )
+    def corner_with_prior():
+        MCMCPlots.configure(PARAM_SYM, prior_unit, prior_scale)
+        try:
+            model.plot_journal_corner(true_theta=zero, transform=to_error, prior=True)
+        finally:
+            MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
+
+    for label, draw in (
+        (
+            "traces",
+            lambda: model.plot_journal_traces(
+                burn_in, true_theta=zero, transform=to_error
+            ),
+        ),
+        ("autocorrelation", lambda: model.plot_journal_autocorrelation(burn_in, thin)),
+        (
+            "corner",
+            lambda: model.plot_journal_corner(true_theta=zero, transform=to_error),
+        ),
+        ("corner + prior", corner_with_prior),
+    ):
+        try:
+            draw()
+        except Exception as err:
+            print(f"[Figure] {label} skipped: {type(err).__name__}: {err}")
