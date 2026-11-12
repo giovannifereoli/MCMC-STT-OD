@@ -66,7 +66,6 @@ import numpy as np
 import spiceypy as spice
 import trimesh
 from scipy.interpolate import CubicSpline
-from scipy.optimize import least_squares
 from scipy.stats import norm
 
 from polyhedral_gravity import (
@@ -78,12 +77,14 @@ from polyhedral_gravity import (
 
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
+from BatchLSQ import BatchLSQ
 
-# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMC.py;
-# MCMC.configure() in the main applies the journal style.
-import MCMC
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
+# MCMCPlots.configure() in the main applies the journal style.
+import MCMCPlots
+from GMM import GMM, position_prediction_history, propagate_samples_mc
 
-MCMC.SHOW_FIGS = True  # plt.show() after each figure is saved
+MCMCPlots.SHOW_FIGS = True  # plt.show() after each figure is saved
 
 
 # ============================================================
@@ -537,7 +538,7 @@ def load_kernels(kernel_root: Path, body_spk: Path):
     2025-May-23 解。SPICE ID 1000750）:
       https://ssd.jpl.nasa.gov/api/horizons.api?format=json&COMMAND='DES=289P;CAP;'
           &EPHEM_TYPE=SPK&START_TIME='2030-01-01'&STOP_TIME='2040-01-01'
-      (base64-decode the "spk" field into kernels/blanpain_1000750_2030_2040.bsp)
+      (base64-decode the "spk" field into kernels/ryugu/blanpain_1000750_2030_2040.bsp)
     """
     kernels = [
         str(kernel_root / "naif0012.tls"),
@@ -583,331 +584,6 @@ def sun_rtn_frame(et0, body_id, frame="J2000", abcorr="NONE"):
 
 
 # ============================================================
-# Gauss-Newton batch solver with STMs
-# ============================================================
-
-
-def solve_stage1_gn_with_stm(
-    propagator,
-    x0_ref,
-    tau,  # (N,) seconds since start (NOT ET)
-    sc_state,  # (N,6) inertial, same epochs as tau
-    y_obs,  # (2N,) stacked [ra0,dec0, ra1,dec1,...]
-    sigma_ra,
-    sigma_dec,
-    obs_weights,  # visibility weights
-    priors=None,  # list of scipy.stats.norm length n_update, OR None
-    update_idx=None,  # indices of the delta you're solving for (default: all)
-    max_iter=10,
-    tol=1e-12,
-    ftol=0.0,
-    rtol=1e-12,
-    atol=1e-12,
-    method="LSODA",
-    verbose=True,
-    max_lm_tries=12,
-):
-    """
-    Gauss-Newton outer loop (same linear algebra as the Bennu SPH2 particle script: unscaled
-    least-squares solve with the prior rows appended). Each iteration:
-    1) propagate at current x0_ref (state + STM)
-    2) build residual vector r and Jacobian J using STM chain rule
-    3) solve linearized MAP: min ||r - J d||^2 + ||(d - m)/s||^2
-    4) update x0_ref += embed(d)
-
-    Levenberg-Marquardt safeguard. From the perturbed reference the plain GN step of a
-    low-altitude particle around Ryugu diverges (first step ~100 km: the STM linearization is
-    not valid that far out). [261110: this was observed in the original Ryugu setting; in the
-    261110162235 run (the only one with a saved log) the damping stayed at lam = 0.] Each step is therefore checked against the true nonlinear MAP
-    cost; if the cost does not decrease, the step is damped by appending the rows
-    sqrt(lam) * diag(1/s) d = 0, i.e. (A^T A + lam P0^-1) d = A^T b with P0 the prior
-    covariance, and lam is raised x10 until it does. lam is relaxed /10 after each accepted
-    step and dropped to 0 (pure GN) once negligible.
-
-    Convergence: unscaled step norm below `tol` (as in the Bennu script), or relative MAP-cost
-    decrease of an accepted step below `ftol` (0 = off). A loose `ftol` stops the batch once
-    the fit stalls, i.e. still damped and short of the exact MAP along the weakly observable
-    directions.
-    """
-    x0_ref = np.asarray(x0_ref, dtype=float).copy()
-    n = x0_ref.size
-    if update_idx is None:
-        update_idx = np.arange(n)
-    update_idx = np.asarray(update_idx, dtype=int)
-    n_upd = len(update_idx)
-
-    # prior mean/sigma on delta (about current ref) for the UPDATE variables
-    if priors is None:
-        prior_mean = np.zeros(n_upd)
-        prior_sig = np.full(n_upd, np.inf)
-    else:
-        prior_mean = np.array([p.mean() for p in priors], dtype=float)
-        prior_sig = np.array([p.std() for p in priors], dtype=float)
-    finite = np.isfinite(prior_sig)
-
-    delta_total = np.zeros(n)
-
-    # weights
-    w = np.empty_like(y_obs, dtype=float)
-    w[0::2] = sigma_ra
-    w[1::2] = sigma_dec
-
-    def prior_rows(delta_tot):
-        return -(delta_tot[update_idx][finite] - prior_mean[finite]) / prior_sig[finite]
-
-    def map_cost(x0_try, delta_tot_try):
-        """True nonlinear MAP cost ||r||^2 + ||prior||^2 (state-only propagation)."""
-        sol = propagator.propagate_state_only(
-            x0=x0_try,
-            t_eval=tau,
-            show_progress=False,
-            rtol=rtol,
-            atol=atol,
-            method=method,
-        )
-        if sol.status != 0 or sol.y.shape[1] != len(tau):
-            return np.inf
-        x = sol.y[:n, :].T
-        ra_m, dec_m, _, _ = radec_and_partials_from_los(x[:, :3] - sc_state[:, :3])
-        res_t = np.empty_like(y_obs)
-        res_t[0::2] = wrap_to_pi(y_obs[0::2] - ra_m)
-        res_t[1::2] = y_obs[1::2] - dec_m
-        c = np.sum((res_t / w * obs_weights) ** 2)
-        if np.any(finite):
-            c += np.sum(prior_rows(delta_tot_try) ** 2)
-        return float(c) if np.isfinite(c) else np.inf
-
-    lam = 0.0
-    cost_cur = None
-    for it in range(1, max_iter + 1):
-        # propagate ref (truth model) and obtain STM history
-        sol_ref, stts_ref = propagator.propagate(
-            x0=x0_ref, t_eval=tau, rtol=rtol, atol=atol, method=method
-        )
-        x_ref = sol_ref.y[:n, :].T  # (N,n)
-        Phi_list = np.asarray(stts_ref[1], dtype=float).reshape(len(tau), n, n)
-
-        # build residuals and Jacobian
-        los = x_ref[:, :3] - sc_state[:, :3]
-        ra_model, dec_model, d_ra_dr, d_dec_dr = radec_and_partials_from_los(los)
-
-        res = np.empty_like(y_obs)
-        res[0::2] = wrap_to_pi(y_obs[0::2] - ra_model)
-        res[1::2] = y_obs[1::2] - dec_model
-
-        r = res / w * obs_weights  # normalized residual vector (2N,)
-
-        # Jacobian wrt update variables (2N x n_upd); dy/dx_k only depends on position
-        J = np.zeros((2 * len(tau), n_upd), dtype=float)
-        for k in range(len(tau)):
-            Hy = np.zeros((2, n), dtype=float)
-            Hy[0, 0:3] = d_ra_dr[k, :]
-            Hy[1, 0:3] = d_dec_dr[k, :]
-            Hx0 = Hy @ Phi_list[k]
-            J[2 * k : 2 * k + 2, :] = Hx0[:, update_idx]
-
-        # normalize Jacobian rows by sigma
-        J[0::2, :] /= sigma_ra
-        J[1::2, :] /= sigma_dec
-        J = J * obs_weights[:, None]
-
-        # linearized MAP solve: (J; W_prior) d = (r; r_prior)
-        rows = [J]
-        rhs = [r]
-
-        if np.any(finite):
-            Wp = np.diag(1.0 / prior_sig[finite])
-            Jp = np.zeros((Wp.shape[0], n_upd))
-            Jp[:, finite] = Wp
-
-            # anchor to initial reference using the accumulated delta
-            rows.append(Jp)
-            rhs.append(prior_rows(delta_total))
-
-        A = np.vstack(rows)
-        b = np.hstack(rhs)
-        if cost_cur is None:
-            cost_cur = float(np.sum(b**2))
-
-        # damping metric: inverse prior sigma (Marquardt column norm where the prior is flat)
-        d_metric = np.where(finite, 1.0 / prior_sig, np.sqrt(np.sum(A**2, axis=0)))
-        lam_ref = float(np.max(np.sum(A**2, axis=0) / d_metric**2))
-
-        # Solve least squares (pure GN first; damp until the nonlinear MAP cost decreases)
-        accepted = converged = False
-        for _ in range(max_lm_tries):
-            if lam > 0.0:
-                A_aug = np.vstack([A, np.sqrt(lam) * np.diag(d_metric)])
-                b_aug = np.hstack([b, np.zeros(n_upd)])
-            else:
-                A_aug, b_aug = A, b
-            d_upd, *_ = np.linalg.lstsq(A_aug, b_aug, rcond=None)
-
-            # Embed into full delta
-            d_full = np.zeros(n)
-            d_full[update_idx] = d_upd
-
-            if lam == 0.0 and np.linalg.norm(d_upd) < tol:
-                # converged: noise-level GN step, accepted without a cost check
-                accepted = converged = True
-                cost_try = cost_cur
-                break
-
-            cost_try = map_cost(x0_ref + d_full, delta_total + d_full)
-            if cost_try < cost_cur:
-                accepted = True
-                break
-            lam = 1e-3 * lam_ref if lam == 0.0 else 10.0 * lam
-
-        if not accepted:
-            print("\n[GN] Levenberg-Marquardt could not decrease the MAP cost: stopping.")
-            break
-
-        # update ref
-        x0_ref = x0_ref + d_full
-        delta_total = delta_total + d_full
-
-        step_norm = np.linalg.norm(d_upd)
-        rms = np.sqrt(np.mean(r**2))
-        rel_dec = (cost_cur - cost_try) / cost_cur
-
-        if verbose:
-            print(
-                f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}  "
-                f"MAP cost: {cost_cur:.4e} -> {cost_try:.4e}  (LM lam={lam:.1e})"
-            )
-        cost_cur = cost_try
-
-        # relax the damping after a successful step
-        lam = lam / 10.0 if lam > 1e-9 * lam_ref else 0.0
-
-        if converged or step_norm < tol:
-            break
-        if rel_dec < ftol:
-            if verbose:
-                print(
-                    f"[GN] MAP cost decreased by {100 * rel_dec:.2f}% < "
-                    f"{100 * ftol:.0f}%: stopping."
-                )
-            break
-
-    # Covariance at convergence: Cov = (A^T A)^{-1} for the update variables
-    if max_iter == 0:
-        cov_upd = np.diag(prior_sig**2)
-    else:
-        try:
-            AtA = A.T @ A
-            cov_upd = np.linalg.inv(AtA)
-        except np.linalg.LinAlgError:
-            print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-            cov_upd = np.linalg.pinv(A.T @ A)
-
-    # Embed into full covariance (infinite variance for non-updated params)
-    cov_full = np.full((n, n), np.inf)
-    for i, idx_i in enumerate(update_idx):
-        for j, idx_j in enumerate(update_idx):
-            cov_full[idx_i, idx_j] = cov_upd[i, j]
-
-    # (post-fit residuals of this solution are plotted in main, next to the MCMC MAP)
-    return x0_ref, delta_total, cov_full
-
-
-def solve_stage1_full_nonlinear_lsq(
-    propagator,
-    x0_ref,
-    tau,
-    sc_state,
-    y_obs,
-    obs_weights,
-    sigma_ra,
-    sigma_dec,
-    priors=None,
-    update_idx=None,
-    rtol=1e-10,
-    atol=1e-12,
-    method="LSODA",
-    max_nfev=2000,
-    verbose=2,
-):
-    """
-    Full nonlinear batch (MAP) using SciPy least_squares (re-propagates every evaluation;
-    slow with the polyhedron). Includes observation weights to handle occultation.
-    """
-    x0_ref = np.asarray(x0_ref, dtype=float)
-    n = x0_ref.size
-    if update_idx is None:
-        update_idx = np.arange(n)
-    update_idx = np.asarray(update_idx, dtype=int)
-    n_upd = len(update_idx)
-
-    if priors is None:
-        prior_mean = np.zeros(n_upd)
-        prior_sig = np.full(n_upd, np.inf)
-    else:
-        prior_mean = np.array([p.mean() for p in priors], dtype=float)
-        prior_sig = np.array([p.std() for p in priors], dtype=float)
-
-    finite = np.isfinite(prior_sig)
-
-    w = np.empty_like(y_obs, dtype=float)
-    w[0::2] = sigma_ra
-    w[1::2] = sigma_dec
-
-    def residual_vector(delta_upd):
-        x0 = x0_ref.copy()
-        x0[update_idx] = x0_ref[update_idx] + delta_upd
-
-        sol = propagator.propagate_state_only(
-            x0=x0, t_eval=tau, show_progress=False, rtol=rtol, atol=atol, method=method
-        )
-        x = sol.y[:n, :].T
-
-        los = x[:, :3] - sc_state[:, :3]
-        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
-
-        res = np.empty_like(y_obs)
-        res[0::2] = wrap_to_pi(y_obs[0::2] - ra_model)
-        res[1::2] = y_obs[1::2] - dec_model
-
-        r_meas = (res / w) * obs_weights
-
-        if np.any(finite):
-            r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
-            return np.hstack([r_meas, r_pri])
-
-        return r_meas
-
-    result = least_squares(
-        fun=residual_vector,
-        x0=np.zeros(n_upd),
-        method="trf",
-        jac="2-point",
-        max_nfev=max_nfev,
-        ftol=1e-14,
-        xtol=1e-14,
-        gtol=1e-14,
-        verbose=verbose,
-    )
-
-    delta_hat_full = np.zeros(n)
-    delta_hat_full[update_idx] = result.x
-    x0_ref1 = x0_ref + delta_hat_full
-
-    J = result.jac
-    try:
-        cov_upd = np.linalg.inv(J.T @ J)
-    except np.linalg.LinAlgError:
-        cov_upd = np.linalg.pinv(J.T @ J)
-
-    cov_full = np.full((n, n), np.inf)
-    for i, ii in enumerate(update_idx):
-        for j, jj in enumerate(update_idx):
-            cov_full[ii, jj] = cov_upd[i, j]
-
-    return x0_ref1, delta_hat_full, cov_full, result
-
-
-# ============================================================
 # MAIN SCRIPT
 # ============================================================
 
@@ -916,16 +592,15 @@ if __name__ == "__main__":
     # --------------------------
     # USER SETTINGS (edit these)
     # --------------------------
-    # 261110: kernels/ と ObjFiles/ は大きいのでコピーせず、Giovanni の元フォルダを参照する
-    # （ref_code/ は git 管理外。このファイルからの相対で解決するので実行時の cwd に依らない）
+    # Kernels and shape model from this repo (kernels/, ObjFiles/), resolved relative to this
+    # file so the run does not depend on the cwd
     HERE = Path(__file__).resolve().parent
-    REF_DIR = HERE.parents[2] / "ref_code" / "MCMC-STT-OD"
-    KERNEL_ROOT = REF_DIR / "kernels"
+    KERNEL_ROOT = HERE / "kernels"
     SC_NAME = "CSR-30 (notional)"  # notional 2030s Japanese comet sample-return concept
     # 261110: 太陽との位置関係は Blanpain（289P）の SPK で与える（元は Ryugu の SPK、ID 20162173）。
     # 形状・自転は縮小した Ryugu のまま
     CENTER = "1000750"  # 289P/Blanpain (SPICE ID of the Horizons SPK)
-    BODY_SPK = Path(__file__).resolve().parent / "kernels" / "blanpain_1000750_2030_2040.bsp"
+    BODY_SPK = KERNEL_ROOT / "ryugu" / "blanpain_1000750_2030_2040.bsp"
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
@@ -941,7 +616,7 @@ if __name__ == "__main__":
     fov_dt = 1.0  # s, FOV から出る時刻を探す刻み
 
     # Ryugu physical (Watanabe et al. 2019, Science 364, 268)
-    shape_path = str(REF_DIR / "ObjFiles/Ryugu/SHAPE_SFM_49k_v20180804.obj")  # km, body-fixed
+    shape_path = str(HERE / "ObjFiles/Ryugu/SHAPE_SFM_49k_v20180804.obj")  # km, body-fixed
     # 261110: Ryugu 形状を 289P（直径 320 m）の大きさへ縮小する。前例 rdvpy_code/mesh/ryugu320_900.obj
     # と同じ 320/900 倍（Ryugu 直径 ~900 m → 320 m）。ただしメッシュは Giovanni の 49k をコードで縮小する
     SHAPE_SCALE = 320.0 / 900.0
@@ -956,6 +631,11 @@ if __name__ == "__main__":
 
     # Dynamics: STMs only
     stt_order = 1
+
+    # Stage-1 batch solve. False: LM-safeguarded GN with an unscaled lstsq solve (the results so
+    # far). True: same LM, solved in prior-sigma units (same damped problem, full-rank solve, so
+    # no direction is dropped by the lstsq cutoff). Runs go to a "_scaledGN" folder.
+    SCALED_BATCH = False
 
     # Bulk density. With the shape model it fixes the polyhedral gravity (GM = G rho V), so GM
     # is NOT in the state. (Original: Ryugu, Watanabe et al. 2019: 1190 +/- 20 kg/m^3)
@@ -1046,8 +726,8 @@ if __name__ == "__main__":
     gmm_prob = 0.99  # probability mass of the plotted regions
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s, eta -> %), one PDF
-    # per figure in a timestamped folder (MCMC.SHOW_FIGS at the top of the file)
-    MCMC.configure(
+    # per figure in a timestamped folder (MCMCPlots.SHOW_FIGS at the top of the file)
+    MCMCPlots.configure(
         [
             r"\delta x_0",
             r"\delta y_0",
@@ -1068,8 +748,10 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "ryugu_figures_fallback",
     )
     # 261110: 実行ごとの結果フォルダ名を YYMMDDHHMMSS にした（results/ は git 管理外）
-    fig_dir = MCMC.set_figure_dir(
-        HERE / "results" / datetime.now().strftime("%y%m%d%H%M%S")
+    fig_dir = MCMCPlots.set_figure_dir(
+        HERE
+        / "results"
+        / (datetime.now().strftime("%y%m%d%H%M%S") + ("_scaledGN" if SCALED_BATCH else ""))
     )
 
     # 261110: 標準出力・標準エラーを、画面に出しつつ結果フォルダの run.log にも書く
@@ -1097,14 +779,15 @@ if __name__ == "__main__":
 
     print(f"[Figures] -> {fig_dir}")
 
-    # 261110: この実行で実際に動いたコード（本スクリプト＋import した MCMC.py・STTPropagationND.py）を
+    # 261110: この実行で実際に動いたコード（本スクリプト＋import した MCMC.py・MCMCPlots.py・GMM.py・
+    # BatchLSQ.py・STTPropagationND.py）を
     # 結果フォルダの code/ に写す。どの図がどのコードから出たかを、結果フォルダだけで追えるようにする
     import shutil
-    import STTPropagationND
 
     code_dir = Path(fig_dir) / "code"
     code_dir.mkdir(parents=True, exist_ok=True)
-    for src in (__file__, MCMC.__file__, STTPropagationND.__file__):
+    _mods = ("MCMC", "MCMCPlots", "GMM", "BatchLSQ", "STTPropagationND")
+    for src in [__file__] + [sys.modules[m].__file__ for m in _mods]:
         shutil.copy2(src, code_dir / Path(src).name)
     print(f"[Code] snapshot -> {code_dir}")
 
@@ -1311,7 +994,7 @@ if __name__ == "__main__":
     sol_dense = propagator.propagate_state_only(
         x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
     )
-    inside = MCMC.points_inside_mesh(
+    inside = MCMCPlots.points_inside_mesh(
         ryugu_mesh, sol_dense.y[:3, :].T, tau_dense, alpha_true, delta_true, omega_true
     )
     r_dense = np.linalg.norm(sol_dense.y[:3, :], axis=0)
@@ -1366,7 +1049,7 @@ if __name__ == "__main__":
     )
     pt_dense = sol_dense.y[:3].T
 
-    MCMC.plot_scene_body_fixed(
+    MCMCPlots.plot_scene_body_fixed(
         ryugu_mesh,
         tau_obs=tau_full,
         sc_obs=sc_state_full,
@@ -1380,7 +1063,7 @@ if __name__ == "__main__":
         w0=w0_true,
         detach_bf=pos_detach_bf,
     )
-    MCMC.plot_observation_geometry(
+    MCMCPlots.plot_observation_geometry(
         tau_full,
         sc_state_full,
         x_true_full,
@@ -1444,15 +1127,19 @@ if __name__ == "__main__":
     # --------------------------
     print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
 
-    x0_ref1, delta_hat1, cov1 = solve_stage1_gn_with_stm(
+    batch = BatchLSQ(
         propagator=propagator,
-        x0_ref=x0_ref,
         tau=tau,
         sc_state=sc_state,
         y_obs=y_obs,
-        sigma_ra=sigma_ra,
-        sigma_dec=sigma_dec,
+        sigma=(sigma_ra, sigma_dec),
         obs_weights=obs_weights,
+        measurement=radec_and_partials_from_los,
+        wrap=wrap_to_pi,
+        postfit_plot=False,  # no batch post-fit residual figure (as for Ryugu)
+    )
+    x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
+        x0_ref=x0_ref,
         priors=priors,
         max_iter=30,
         tol=1e-8,
@@ -1460,17 +1147,15 @@ if __name__ == "__main__":
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
+        # Levenberg-Marquardt safeguard: the plain GN step diverges from x0_ref. [261110: this
+        # was observed in the original Ryugu setting; in the 261110162235 run (the only one with
+        # a saved log) the damping stayed at lam = 0.]
+        lm=True,
+        scaled=SCALED_BATCH,
     )
     """
-    x0_ref1, delta_hat1, cov1, res_nl = solve_stage1_full_nonlinear_lsq(
-        propagator=propagator,
+    x0_ref1, delta_hat1, cov1, res_nl = batch.full_nonlinear_lsq(
         x0_ref=x0_ref,
-        tau=tau,
-        sc_state=sc_state,
-        y_obs=y_obs,
-        obs_weights=obs_weights,
-        sigma_ra=sigma_ra,
-        sigma_dec=sigma_dec,
         priors=priors,
         rtol=1e-8,
         atol=1e-10,
@@ -1630,30 +1315,24 @@ if __name__ == "__main__":
         f"\n[GMM] Splitting {post.shape[0]} posterior samples at epoch ({utc0}) and "
         f"propagating to {utc_target} (+{tau_target / 3600.0:.2f} h)"
     )
-    w_g, mu_g, P_g = MCMC.fit_posterior_gmm(
-        post, n_components=gmm_n_components, select_bic=gmm_select_bic
-    )
-    print("[GMM] weights:", np.array2string(w_g, precision=3))
-
-    w_1 = np.ones(1)
-    mu_1 = post.mean(axis=0, keepdims=True)
-    P_1 = np.cov(post, rowvar=False)[None]
+    gmm = GMM.fit(post, n_components=gmm_n_components, select_bic=gmm_select_bic)
+    print("[GMM] weights:", np.array2string(gmm.weights, precision=3))
+    single = GMM.gaussian(post.mean(axis=0), np.cov(post, rowvar=False))
 
     t_prop = np.linspace(0.0, tau_target, n_t_prop)
     ivp_prop = dict(rtol=1e-8, atol=1e-10, method="LSODA")
 
-    m_g_t, P_g_t = MCMC.propagate_gmm_stm(
-        propagator, x0_ref1, w_g, mu_g, P_g, t_prop, **ivp_prop
-    )
-    m_1_t, P_1_t = MCMC.propagate_gmm_stm(
-        propagator, x0_ref1, w_1, mu_1, P_1, t_prop, label="Single Gaussian", **ivp_prop
+    # One GMM per output epoch (absolute states)
+    gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp_prop)
+    single_t = single.propagate_stm(
+        propagator, x0_ref1, t_prop, label="Single Gaussian", **ivp_prop
     )
 
     rng_mc = np.random.default_rng(2024)
     idx_mc = rng_mc.choice(
         post.shape[0], size=min(n_mc_prop, post.shape[0]), replace=False
     )
-    X_mc = MCMC.propagate_samples_mc(propagator, x0_ref1, post[idx_mc], t_prop, **ivp_prop)
+    X_mc = propagate_samples_mc(propagator, x0_ref1, post[idx_mc], t_prop, **ivp_prop)
     ok_mc = np.all(np.isfinite(X_mc[:, :, 0]), axis=1)
     if not np.all(ok_mc):
         print(f"[MC] {np.sum(~ok_mc)} sample propagations failed and are dropped.")
@@ -1667,7 +1346,7 @@ if __name__ == "__main__":
     # Polyhedral field is only valid outside the body: flag any impact along the prediction
     n_in_truth = int(
         np.sum(
-            MCMC.points_inside_mesh(
+            MCMCPlots.points_inside_mesh(
                 ryugu_mesh,
                 x_true_prop[:, :3],
                 t_prop,
@@ -1680,7 +1359,7 @@ if __name__ == "__main__":
     n_in_mc = sum(
         bool(
             np.any(
-                MCMC.points_inside_mesh(
+                MCMCPlots.points_inside_mesh(
                     ryugu_mesh,
                     X_mc[i, :, :3],
                     t_prop,
@@ -1702,8 +1381,10 @@ if __name__ == "__main__":
     # Metrics at the target epoch (position, meters)
     pos_mc = X_mc[:, -1, :3]
     m_mc = pos_mc.mean(axis=0)
-    mg_T, Pg_T = MCMC.gmm_moments(w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])
-    m1_T, P1_T = m_1_t[0, -1, :3], P_1_t[0, -1, :3, :3]
+    gmm_T = gmm_t[-1].marginal(slice(0, 3))
+    single_T = single_t[-1].marginal(slice(0, 3))
+    mg_T, Pg_T = gmm_T.moments()
+    m1_T, P1_T = single_T.moments()
     sig_mc_T = np.sqrt(np.diag(np.cov(pos_mc, rowvar=False)))
     print(f"\n[GMM] Position at target ({utc_target}), per-axis 1-sigma [m]:")
     print("   MC             :", np.array2string(sig_mc_T * 1e3, precision=2))
@@ -1719,8 +1400,8 @@ if __name__ == "__main__":
     print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
     print("   Single Gaussian:", np.array2string((m1_T - m_mc) * 1e3, precision=2))
 
-    ll_g = np.mean(MCMC.gmm_logpdf(pos_mc, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3]))
-    ll_1 = np.mean(MCMC.gmm_logpdf(pos_mc, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3]))
+    ll_g = np.mean(gmm_T.logpdf(pos_mc))
+    ll_1 = np.mean(single_T.logpdf(pos_mc))
     print(
         f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f} | single {ll_1:.3f} "
         f"(GMM - single = {ll_g - ll_1:+.3f} nats)"
@@ -1729,8 +1410,8 @@ if __name__ == "__main__":
     r_tr = x_true_prop[-1, :3]
     d_tr = r_tr - m1_T
     maha_1 = float(np.sqrt(d_tr @ np.linalg.solve(P1_T, d_tr)))
-    lp_tr_g = MCMC.gmm_logpdf(r_tr, w_g, m_g_t[:, -1, :3], P_g_t[:, -1, :3, :3])[0]
-    lp_tr_1 = MCMC.gmm_logpdf(r_tr, w_1, m_1_t[:, -1, :3], P_1_t[:, -1, :3, :3])[0]
+    lp_tr_g = gmm_T.logpdf(r_tr)[0]
+    lp_tr_1 = single_T.logpdf(r_tr)[0]
     print(
         f"[GMM] Truth at target: log p GMM {lp_tr_g:.3f} | single {lp_tr_1:.3f} | "
         f"Mahalanobis (single) {maha_1:.2f}"
@@ -1738,20 +1419,16 @@ if __name__ == "__main__":
 
     # Figures
     def _panel(j, title):
-        Pg_j = P_g_t[:, j, :3, :3]
         return dict(
             mc=X_mc[:, j, :3],
-            w=w_g,
-            mu=m_g_t[:, j, :3],
-            P=Pg_j,
-            mu1=m_1_t[0, j, :3],
-            P1=P_1_t[0, j, :3, :3],
+            gmm=gmm_t[j].marginal(slice(0, 3)),
+            single=single_t[j].marginal(slice(0, 3)),
             truth=x_true_prop[j, :3],
             center=X_mc[:, j, :3].mean(axis=0),
             title=title,
         )
 
-    MCMC.plot_gmm_propagation(
+    MCMCPlots.plot_gmm_propagation(
         [
             _panel(0, f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)"),
             _panel(
@@ -1763,7 +1440,7 @@ if __name__ == "__main__":
         prob=gmm_prob,
     )
 
-    hist = MCMC.position_prediction_history(X_mc, w_g, m_g_t, P_g_t, m_1_t, P_1_t)
-    MCMC.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
+    hist = position_prediction_history(X_mc, gmm_t, single_t)
+    MCMCPlots.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
 
     spice.kclear()
