@@ -2859,16 +2859,31 @@ def plot_prediction_history(
     for ax in (ax0, ax1):
         ax.axvspan(t_hr[0], t_obs_end_hr, color=C_SPAN, lw=0, zorder=0)
         ax.set_xlim(t_hr[0], t_hr[-1])
-    ax0.text(
-        0.5 * (t_hr[0] + t_obs_end_hr),
-        0.96,
-        "Observation arc",
-        color="0.3",
-        fontsize=7,
-        ha="center",
-        va="top",
-        transform=ax0.get_xaxis_transform(),
-    )
+    if (t_obs_end_hr - t_hr[0]) >= 0.3 * (t_hr[-1] - t_hr[0]):
+        ax0.text(
+            0.5 * (t_hr[0] + t_obs_end_hr),
+            0.96,
+            "Observation arc",
+            color="0.3",
+            fontsize=7,
+            ha="center",
+            va="top",
+            transform=ax0.get_xaxis_transform(),
+        )
+    else:
+        # arc too short to hold the label: put it to the right, arrow back to the arc
+        ax0.annotate(
+            "Observation arc",
+            xy=(t_obs_end_hr, 0.9),
+            xycoords=ax0.get_xaxis_transform(),
+            xytext=(12, 0),
+            textcoords="offset points",
+            color="0.3",
+            fontsize=7,
+            ha="left",
+            va="center",
+            arrowprops=dict(arrowstyle="->", color="0.3", lw=0.6, shrinkA=1, shrinkB=0),
+        )
 
     ax0.plot(
         t_hr,

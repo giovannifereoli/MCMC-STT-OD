@@ -763,10 +763,16 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "ryugu_figures_fallback",
     )
     # 261110: 実行ごとの結果フォルダ名を YYMMDDHHMMSS にした（results/ は git 管理外）
+    # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/scenario_NGSR_261112142455
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
-        / (datetime.now().strftime("%y%m%d%H%M%S") + ("_scaledGN" if SCALED_BATCH else ""))
+        / (
+            Path(__file__).stem
+            + "_"
+            + datetime.now().strftime("%y%m%d%H%M%S")
+            + ("_scaledGN" if SCALED_BATCH else "")
+        )
     )
 
     # 261110: 標準出力・標準エラーを、画面に出しつつ結果フォルダの run.log にも書く
