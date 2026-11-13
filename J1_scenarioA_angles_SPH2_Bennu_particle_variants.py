@@ -1,0 +1,1221 @@
+"""
+Variants of the Case 1 optical script (J1_scenarioA_angles_SPH2_Bennu_particle.py) used in
+the paper appendix. This file is a copy of that script with a VARIANT switch; everything not
+listed below is identical to it (geometry, seeds, priors, batch, sampler settings).
+
+Usage
+-----
+    python J1_scenarioA_angles_SPH2_Bennu_particle_variants.py nominal
+    python J1_scenarioA_angles_SPH2_Bennu_particle_variants.py stt2
+    # redo only the post-processing (corner + summary) of a finished run:
+    python J1_scenarioA_angles_SPH2_Bennu_particle_variants.py stt2 --post results/bennu_particle_stt2_<stamp>
+
+Variants
+--------
+nominal : "nominal" arc, n_obs = 23 candidate epochs (19 visible) instead of 22, first-order
+          STTs. Batch and MCMC agree and contain the truth (Mahalanobis distance ~1.3 over
+          position, velocity and GM). Paper figure: fig_corner_rtn_nominal.pdf.
+          Wall time ~20 min (MCMC ~10 min).
+stt2    : Case 1 (n_obs = 22) with a second-order STT likelihood. The truth, the data and the
+          batch use a first-order propagator (propagator1), so they are identical to the
+          first-order Case 1 run; only the Stage 2 STTs about ref1, hence the MCMC likelihood,
+          are second order. Marginals are unchanged w.r.t. first order; the joint posterior
+          bends and contains the truth (Mahalanobis ~1.9 vs ~41 at first order).
+          Paper figure: fig_corner_rtn_stt2.pdf (stranded walkers excluded, see below).
+          Wall time ~45 min: symbolic B_2 tensors ~17 min, Stage 2 order-2 STTs (1884 states)
+          ~5 min with DOP853 (LSODA switches to its stiff branch and stalls), MCMC ~12 min.
+
+Outputs (results/bennu_particle_{nominal23,stt2}_<stamp>/)
+------------------------------------------------------------
+- the usual figures of the Case 1 script (scene, geometry, traces, ACF, post-fits, corners);
+- chain.npz (MCMCModel.save_chain) and batch.npz (x0_ref1, cov1, true_delta, x0_true, ...);
+- fig_corner_rtn_<variant>.pdf: RTN corner redrawn without stranded walkers (a walker whose
+  post-burn-in median log-posterior is > STRANDED_DLOGP below the ensemble median; one in the
+  stt2 run, none in the nominal run), plus a printed summary (acceptance, tau, truth
+  Mahalanobis distances under the batch and the sampled covariance).
+
+The MCMC walker start and the emcee moves draw from the unseeded global NumPy state, so a
+rerun reproduces the paper numbers statistically, not bit for bit.
+
+Original Case 1 docstring follows.
+-------------------------------------------------------------------------------------------
+Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
+
+- Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
+- Particle detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
+- Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
+- Particle dynamics uses degree-2 gravity potential in body-fixed:
+    U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
+  Acceleration is computed as a = ∇U in body-fixed, then rotated to inertial.
+
+- You estimate:
+    theta = [δr0(3), δv0(3), δmu(1), δC20, δC21, δS21, δC22, δS22]  -> 12 params
+  about a reference x0_ref (also 12D state).
+
+- Measurements: RA/DEC from spacecraft to particle, with occultation mask (sphere proxy).
+
+Pipeline:
+  1) Propagate truth particle with truth params.
+  2) Query SPICE for spacecraft truth at the same epochs.
+  3) Generate noisy RA/DEC on visible epochs only.
+  4) Build reference (perturb truth) and propagate ref + STTs with STTPropagator.
+  5) Stage-1 full nonlinear MAP (optional, slow): re-propagate each evaluation.
+  6) Stage-2 STT-based MAP: use propagate_deviation with your STTPropagator.
+  7) MCMC around STT-based residual function.
+
+IMPORTANT REQUIREMENT:
+- Your STTPropagator must support time-dependent dynamics: f(x,t), A(x,t), Bk(x,t).
+  If your STTPropagator currently calls f_func(*x) without t, you must patch it to pass t:
+      f = f_func(*x, t)
+      A = A_func(*x, t)
+      Bk = B_funcs[k](*x, t)
+  Everything else in this script assumes that.
+
+You MUST provide:
+- A meta-kernel that furnsh() loads:
+    * OSIRIS-REx SPK (spacecraft)
+    * Bennu SPK (if needed by your setup) / leapseconds
+- Names consistent with kernels:
+    SC_NAME, CENTER, FRAME (J2000 typically).
+
+Units:
+- km, km/s, seconds (ET)
+"""
+
+# TODO: change plot from x to z!
+# TODO: Add SRP and attitude? maybe create measurement gaps
+# TODO: Read chelseay and make realistic
+# TODO: Check all the math
+# TODO: Implement ADS? To improve performance and correctness
+
+# NOTE: For second order, you generally need tighter tolerances, use `RK45`,
+# and call `propagate_state` or `propagate_state_stm_only` instead of `propagate`.
+
+
+import os
+import sys
+import time
+import argparse
+from pathlib import Path
+from datetime import datetime
+from types import SimpleNamespace
+
+
+import sympy as sp
+import numpy as np
+from itertools import product
+
+import spiceypy as spice
+import trimesh
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from scipy.stats import norm
+
+from STTPropagationND import STTPropagatorND
+from MCMC import MCMCModel
+from BatchLSQ import BatchLSQ
+
+# Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
+# MCMCPlots.configure() in the main applies the journal style.
+import MCMCPlots
+
+MCMCPlots.SHOW_FIGS = False  # long unattended runs: save the PDFs only
+
+# ============================================================
+# Geometry / utility
+# ============================================================
+
+
+def wrap_to_pi(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def occultation_mask(sc_pos, part_pos, R_body):
+    """
+    Visibility test: does the segment SC->particle intersect sphere of radius R_body at origin?
+    sc_pos:   (N,3)
+    part_pos: (N,3)
+    returns: mask True if visible
+    """
+    r1 = sc_pos
+    r2 = part_pos
+    d = r2 - r1
+    dd = np.sum(d * d, axis=1)
+
+    # closest approach to origin along segment
+    # minimize ||r1 + t d||, t in [0,1]
+    t = -np.sum(r1 * d, axis=1) / dd
+    t = np.clip(t, 0.0, 1.0)
+    closest = r1 + t[:, None] * d
+
+    return np.linalg.norm(closest, axis=1) > R_body
+
+
+def make_bennu_rotation_matrix(alpha, delta, omega, t, w0=0.0):
+    """
+    inertial->body-fixed rotation for a "IAU-like" constant spin model:
+      pole is (alpha, delta) in J2000, spin about body +Z by W = w0 + omega*t
+
+    Returns R_ib (3,3) mapping r_i -> r_b.
+    """
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    cd, sd = np.cos(delta), np.sin(delta)
+    W = w0 + omega * t
+    cW, sW = np.cos(W), np.sin(W)
+
+    # Using common IAU convention-like build:
+    # R_ib = Rz(W) * Rx(pi/2 - delta) * Rz(alpha + pi/2)
+    # (sign conventions differ between references; this is consistent internally if used everywhere.)
+    def Rz(th):
+        c, s = np.cos(th), np.sin(th)
+        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+    def Rx(th):
+        c, s = np.cos(th), np.sin(th)
+        return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+    return Rz(W) @ Rx(np.pi / 2 - delta) @ Rz(alpha + np.pi / 2)
+
+
+def occultation_mask_shape(
+    sc_pos_i,
+    part_pos_i,
+    bennu_mesh_bf,
+    alpha,
+    delta,
+    omega,
+    w0=0.0,
+    t0=0.0,
+    tau=None,
+    eps=1e-9,
+    use_embree=True,
+):
+    """
+    Shape-based visibility test using ray-mesh intersection.
+
+    Inputs
+    ------
+    sc_pos_i    : (N,3) spacecraft position in inertial (Bennu-centered, J2000)
+    part_pos_i  : (N,3) particle position in inertial (Bennu-centered, J2000)
+    bennu_mesh_bf : trimesh.Trimesh, Bennu shape in BODY-FIXED frame, centered at origin
+    alpha,delta,omega,w0 : Bennu pole/spin model used by make_bennu_rotation_matrix
+    tau         : (N,) seconds since start (same "tau" you use for dynamics); if None assumes t=0 for all
+    eps         : small margin to avoid classifying limb/touch as occulted
+    use_embree  : try to use pyembree for speed if available
+
+    Returns
+    -------
+    visible : (N,) bool
+        True if particle is visible (NOT occulted by the mesh).
+    """
+    sc_pos_i = np.asarray(sc_pos_i, dtype=float)
+    part_pos_i = np.asarray(part_pos_i, dtype=float)
+    N = sc_pos_i.shape[0]
+
+    if tau is None:
+        tau = np.zeros(N, dtype=float)
+    else:
+        tau = np.asarray(tau, dtype=float)
+        if tau.shape[0] != N:
+            raise ValueError("tau must have same length as sc_pos_i/part_pos_i")
+
+    # Build a ray intersector
+    if use_embree:
+        try:
+            from trimesh.ray.ray_pyembree import RayMeshIntersector
+
+            intersector = RayMeshIntersector(bennu_mesh_bf)
+        except Exception:
+            intersector = bennu_mesh_bf.ray
+    else:
+        intersector = bennu_mesh_bf.ray
+
+    # Rotate inertial -> body-fixed at each epoch
+    sc_b = np.zeros_like(sc_pos_i)
+    pt_b = np.zeros_like(part_pos_i)
+    for k in range(N):
+        R_ib = make_bennu_rotation_matrix(alpha, delta, omega, t=t0 + tau[k], w0=w0)
+        sc_b[k] = R_ib @ sc_pos_i[k]
+        pt_b[k] = R_ib @ part_pos_i[k]
+
+    # Ray origins and directions in BODY-FIXED
+    d = pt_b - sc_b
+    rng = np.linalg.norm(d, axis=1)
+    # Handle degenerate SC==particle
+    good = rng > 0.0
+    dirs = np.zeros_like(d)
+    dirs[good] = d[good] / rng[good, None]
+
+    # Query first hit distance along each ray
+    # trimesh expects (M,3) origins and directions
+    # intersects_first returns distance; np.nan if no hit
+    dist_hit = intersector.intersects_first(ray_origins=sc_b, ray_directions=dirs)
+
+    # Visible if:
+    # - no hit at all   OR
+    # - first hit is beyond the particle range (with margin eps)
+    # Occulted if hit occurs before particle.
+    # Note: dist_hit is in same units as mesh coords (km if you scaled mesh).
+    visible = np.ones(N, dtype=bool)
+    # If intersects_first returns -1 sometimes depending on backend, treat as "no hit"
+    no_hit = np.isnan(dist_hit) | (dist_hit < 0.0)
+    visible[~no_hit] = dist_hit[~no_hit] >= (rng[~no_hit] - eps)
+
+    # Degenerate rays: if range==0, treat as visible (or set False; your choice)
+    visible[~good] = True
+
+    return visible
+
+
+# ============================================================
+# Degree-2 potential in body-fixed + symbolic derivatives up to any STT order
+# (time dependence enters only through R_ib(t) which we embed symbolically via cos/sin(omega*t + w0))
+# ============================================================
+
+
+def generate_stt_functions_bennu_deg2(
+    order, R_ref_km, alpha_rad, delta_rad, omega_rad_s, w0_rad=0.0
+):
+    """
+    Build symbolic f, A, B_k for augmented 12D state:
+      X = [x y z vx vy vz mu C20 C21 S21 C22 S22]
+    Dynamics are inertial, Bennu-centered. Gravity is defined in body-fixed and rotated.
+    f_func, A_func, B_funcs are called as f_func(*X, t).
+    """
+
+    # ---- symbols ----
+    t = sp.Symbol("t", real=True)
+
+    x, y, z, vx, vy, vz = sp.symbols("x y z vx vy vz", real=True)
+    mu, C20, C21, S21, C22, S22 = sp.symbols("mu C20 C21 S21 C22 S22", real=True)
+
+    X = sp.Matrix([x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22])
+    r_i = sp.Matrix([x, y, z])
+
+    # ---- rotation inertial->body: R_ib(t) ----
+    alpha = sp.Float(alpha_rad)
+    delta = sp.Float(delta_rad)
+    omega = sp.Float(omega_rad_s)
+    w0 = sp.Float(w0_rad)
+    W = w0 + omega * t
+
+    def Rz(th):
+        c, s = sp.cos(th), sp.sin(th)
+        return sp.Matrix([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+    def Rx(th):
+        c, s = sp.cos(th), sp.sin(th)
+        return sp.Matrix([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+    R_ib = Rz(W) * Rx(sp.pi / 2 - delta) * Rz(alpha + sp.pi / 2)
+    R_bi = R_ib.T
+
+    # define body-fixed coordinates as independent symbols
+    xb_s, yb_s, zb_s = sp.symbols("xb yb zb", real=True)
+    r_b_s = sp.Matrix([xb_s, yb_s, zb_s])
+
+    # geometry in body-fixed (independent variables)
+    r2 = xb_s**2 + yb_s**2 + zb_s**2
+    r = sp.sqrt(r2)
+
+    lam = sp.atan2(yb_s, xb_s)
+    phi = sp.atan2(zb_s, sp.sqrt(xb_s**2 + yb_s**2))
+    sphi = sp.sin(phi)
+    cphi = sp.cos(phi)
+
+    # unnormalized P2m(sin(phi))
+    P20 = sp.Rational(1, 2) * (3 * sphi**2 - 1)
+    P21 = 3 * sphi * cphi
+    P22 = 3 * cphi**2
+
+    cos1, sin1 = sp.cos(lam), sp.sin(lam)
+    cos2, sin2 = sp.cos(2 * lam), sp.sin(2 * lam)
+
+    F2 = C20 * P20 + P21 * (C21 * cos1 + S21 * sin1) + P22 * (C22 * cos2 + S22 * sin2)
+
+    R2 = sp.Float(R_ref_km**2)
+    U_b = mu / r * (1 + (R2 / r2) * F2)
+
+    # body-fixed acceleration as gradient wrt (xb_s, yb_s, zb_s) SYMBOLS (now SymPy is happy)
+    a_b_s = sp.Matrix([sp.diff(U_b, xb_s), sp.diff(U_b, yb_s), sp.diff(U_b, zb_s)])
+
+    # now substitute actual r_b(t) = R_ib(t) * r_i into that acceleration
+    r_b_expr = R_ib * r_i
+    subs_rb = {xb_s: r_b_expr[0], yb_s: r_b_expr[1], zb_s: r_b_expr[2]}
+    a_b = sp.Matrix([a_b_s[i].subs(subs_rb) for i in range(3)])
+
+    # inertial acceleration
+    a_i = R_bi * a_b
+
+    # augmented dynamics (12D)
+    f = sp.Matrix([vx, vy, vz, a_i[0], a_i[1], a_i[2], 0, 0, 0, 0, 0, 0])
+
+    # A and higher-order tensors
+    A = f.jacobian(X)
+    B_syms = {1: A}
+
+    for k in range(2, order + 1):
+        shape = (12,) * (k + 1)
+        Bk = sp.MutableDenseNDimArray.zeros(*shape)
+        for idx in product(range(12), repeat=k + 1):
+            i, *js = idx
+            deriv = sp.diff(f[i], *[X[j] for j in js])
+            Bk[idx] = deriv
+        B_syms[k] = Bk
+
+    # lambdify
+    args = (x, y, z, vx, vy, vz, mu, C20, C21, S21, C22, S22, t)
+    f_func = sp.lambdify(args, f, "numpy")
+    A_func = sp.lambdify(args, B_syms[1], "numpy")
+
+    # NOTE: for B_k, lambdify on .tolist() returns nested Python lists; that’s fine if your
+    # STTPropagator handles it. If not, wrap with np.array(...) inside your propagator.
+    B_funcs = {
+        k: sp.lambdify(args, B_syms[k].tolist(), "numpy") for k in range(2, order + 1)
+    }
+
+    return f_func, A_func, B_funcs
+
+
+# ============================================================
+# Measurement generation (RA/DEC from SPICE SC to particle)
+# ============================================================
+
+
+def generate_opnav_measurements_from_sc(
+    x_part, sc_state, sigma_ra, sigma_dec, rng, add_outliers=False
+):
+    """
+    x_part: (N,12) or (N,6) particle in inertial
+    sc_state: (N,6) spacecraft inertial
+    """
+    los = x_part[:, :3] - sc_state[:, :3]
+    ra, dec, _, _ = radec_and_partials_from_los(los)
+
+    ra_meas = ra + rng.normal(0.0, sigma_ra, size=ra.shape)
+    dec_meas = dec + rng.normal(0.0, sigma_dec, size=dec.shape)
+
+    if add_outliers:
+        p_out = 0.02
+        mask = rng.random(size=ra.shape) < p_out
+        ra_meas[mask] += rng.normal(0, 20 * sigma_ra, size=np.sum(mask))
+        dec_meas[mask] += rng.normal(0, 20 * sigma_dec, size=np.sum(mask))
+
+    y = np.empty(2 * len(ra))
+    y[0::2] = ra_meas
+    y[1::2] = dec_meas
+    return y
+
+
+def radec_and_partials_from_los(los):
+    """
+    los: (N,3) from SC to particle
+    returns:
+      ra, dec: (N,)
+      d_ra_d_r, d_dec_d_r: (N,3) wrt particle position (same as wrt los)
+    """
+    x = los[:, 0]
+    y = los[:, 1]
+    z = los[:, 2]
+
+    rxy2 = x * x + y * y
+    rxy = np.sqrt(np.maximum(rxy2, 1e-30))
+    rho2 = rxy2 + z * z
+    rho = np.sqrt(np.maximum(rho2, 1e-30))
+
+    # RA: use raw atan2, NO modulo
+    ra = np.arctan2(y, x)  # (-pi, pi]
+    denom_ra = np.maximum(rxy2, 1e-30)
+    d_ra_dx = -y / denom_ra
+    d_ra_dy = x / denom_ra
+    d_ra_dz = 0.0 * z
+
+    # -DEC: use atan2(z, rxy)
+    dec = np.arctan2(z, rxy)
+
+    # ddec/dx, ddec/dy, ddec/dz
+    # dec = atan2(z, rxy)
+    # ddec/dz = rxy / (rxy^2 + z^2) = rxy / rho^2
+    # ddec/drxy = -z / (rxy^2 + z^2) = -z / rho^2
+    # drxy/dx = x/rxy, drxy/dy = y/rxy
+    denom_dec = np.maximum(rho2, 1e-30)
+
+    d_dec_dz = rxy / denom_dec
+    d_dec_drxy = -z / denom_dec
+
+    d_dec_dx = d_dec_drxy * (x / rxy)
+    d_dec_dy = d_dec_drxy * (y / rxy)
+
+    d_ra_d_r = np.stack([d_ra_dx, d_ra_dy, d_ra_dz], axis=1)
+    d_dec_d_r = np.stack([d_dec_dx, d_dec_dy, d_dec_dz], axis=1)
+
+    return ra, dec, d_ra_d_r, d_dec_d_r
+
+
+# ============================================================
+# SPICE kernel loading
+# ============================================================
+
+
+def list_files(d: Path):
+    if not d.exists():
+        return []
+    return sorted([str(p) for p in d.iterdir() if p.is_file()])
+
+
+def safe_furnsh(kpath: str):
+    """Load a kernel, with a helpful error if it fails."""
+    try:
+        spice.furnsh(kpath)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load kernel:\n  {kpath}\nError:\n  {e}") from e
+
+
+def load_kernels(kernel_root: Path):
+    # OREx Trajectories
+    orex_traj_kernels_path = kernel_root / "orex" / "orex_trajectories"
+    traj_kernel_files = list_files(orex_traj_kernels_path)
+
+    # OREx Instrument Kernels
+    instrument_kernels = [
+        str(kernel_root / "orex" / "instrument_kernels" / "orx_navcam_v02.ti"),
+        str(kernel_root / "orex" / "instrument_kernels" / "orx_ocams_v07.ti"),
+    ]
+
+    # OREx Frame Kernels
+    frame_kernels = [
+        str(kernel_root / "orex" / "frame_kernels" / "orx_v14.tf"),
+    ]
+
+    # OREx Attitude Kernels
+    attitude_kernels_path = kernel_root / "orex" / "attitude_kernels"
+    attitude_kernels = list_files(attitude_kernels_path)
+
+    # OREx Clock Kernels
+    clock_kernels = [
+        str(kernel_root / "orex" / "clock_kernels" / "orx_sclkscet_00093.tsc"),
+    ]
+
+    # Other SPICE Kernels
+    other_kernels = [
+        str(kernel_root / "pck00010.tpc"),
+        str(kernel_root / "naif0012.tls"),
+        str(kernel_root / "de424.bsp"),
+        str(kernel_root / "gm_de440.tpc"),
+        str(kernel_root / "bennu_v17.tpc"),
+        str(kernel_root / "particles_pub_03Mar2020.bsp"),
+        str(kernel_root / "orex" / "bennu_refdrmc_v1.bsp"),
+        str(
+            kernel_root
+            / "orex"
+            / "bennu_shape_models"
+            / "bennu_g_12600mm_alt_obj_0000n00000_v021a.bds"
+        ),
+        str(kernel_root / "orex" / "orx_struct_v04.bsp"),
+        str(kernel_root / "trajectories" / "de432s.bsp"),
+    ]
+
+    kernels = (
+        traj_kernel_files
+        + instrument_kernels
+        + frame_kernels
+        + attitude_kernels
+        + clock_kernels
+        + other_kernels
+    )
+
+    # Load all kernels (and fail fast if something is missing)
+    for k in kernels:
+        if not os.path.isfile(k):
+            raise FileNotFoundError(f"Kernel not found: {k}")
+        safe_furnsh(k)
+
+    return kernels
+
+
+# ============================================================
+# Figure symbols / units (shared by the main run and the post-processing)
+# ============================================================
+
+# Display units: km -> m, km/s -> mm/s, km^3/s^2 -> m^3/s^2 (rescaled by powers of ten from
+# the batch sigmas after Stage 1)
+PARAM_SYM = [
+    r"\delta x_0",
+    r"\delta y_0",
+    r"\delta z_0",
+    r"\delta v_{x,0}",
+    r"\delta v_{y,0}",
+    r"\delta v_{z,0}",
+    r"\delta GM",
+    r"\delta C_{20}",
+    r"\delta C_{21}",
+    r"\delta S_{21}",
+    r"\delta C_{22}",
+    r"\delta S_{22}",
+]
+PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
+PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+
+# A walker is "stranded" if its post-burn-in median log-posterior is more than this below the
+# ensemble median (walker 58 of the stt2 run: median log-posterior -1.7e5 against +123 for
+# the ensemble, ~2.7 prior sigmas off in GM, drawing outlier islands in the corner plot); its
+# samples are left out of fig_corner_rtn_<variant> and of the summary.
+STRANDED_DLOGP = 100.0
+
+
+# ============================================================
+# Post-processing: stranded walkers, clean RTN corner, summary
+# ============================================================
+
+
+def _mahalanobis(d, P):
+    return float(np.sqrt(d @ np.linalg.solve(P, d)))
+
+
+def postprocess_run(run_dir, variant):
+    """
+    From chain.npz and batch.npz in run_dir: drop stranded walkers, redraw the RTN corner as
+    fig_corner_rtn_<variant>.pdf, and print the summary quoted in the paper.
+    """
+    run_dir = Path(run_dir)
+    ch = np.load(run_dir / "chain.npz")
+    b = np.load(run_dir / "batch.npz")
+    samples = ch["samples"]
+    lpc = ch["log_prob_chain"]  # (n_steps, n_walkers), post-burn-in thinned
+    nw = lpc.shape[1]
+
+    # Stranded walkers. Flat sample index = step * n_walkers + walker (emcee get_chain(flat))
+    lp_w = np.median(lpc, axis=0)
+    bad = np.where(lp_w < np.median(lp_w) - STRANDED_DLOGP)[0]
+    keep = ~np.isin(np.arange(samples.shape[0]) % nw, bad)
+    print(f"\n[Post] {run_dir.name}")
+    print(
+        f"[Post] stranded walkers: {bad.tolist()} (median log-post "
+        f"{np.round(lp_w[bad], 1).tolist()} vs ensemble {np.median(lp_w):.1f}); "
+        f"kept {keep.sum()}/{keep.size} samples"
+    )
+    # Acceptance and autocorrelation times: as stored by the run (all walkers) and recomputed
+    # on the stored full chain without the stranded walkers (the numbers quoted in the paper)
+    import emcee
+
+    good = np.setdiff1d(np.arange(nw), bad)
+    acc = ch["acceptance_fraction"]
+    tau_all = ch["tau"]
+    tau_good = (
+        emcee.autocorr.integrated_time(ch["full_chain"][:, good, :], quiet=True)
+        * int(ch["full_stride"])
+    )
+    print(
+        f"[Post] n_steps {int(ch['n_steps'])}, burn-in {int(ch['burn_in'])}, thin "
+        f"{int(ch['thin'])}\n"
+        f"[Post] all walkers : acceptance {acc.mean():.3f}, tau {tau_all.min():.0f}-"
+        f"{tau_all.max():.0f} steps\n"
+        f"[Post] kept walkers: acceptance {acc[good].mean():.3f}, tau {tau_good.min():.0f}-"
+        f"{tau_good.max():.0f} steps (n_steps / tau_max = "
+        f"{int(ch['n_steps']) / tau_good.max():.0f})"
+    )
+
+    # Truth Mahalanobis distances over position, velocity, GM (7) and all 12 parameters
+    cov1, t = b["cov1"], b["true_delta"]
+    for k in (7, 12):
+        line = f"[Post] Mahalanobis {k:2d}D: truth|batch = {_mahalanobis(t[:k], cov1[:k, :k]):6.2f}"
+        for lab, X in (("all", samples), ("kept", samples[keep])):
+            mu, S = X.mean(0), np.cov(X.T)
+            line += f"   truth|MCMC({lab}) = {_mahalanobis(t[:k] - mu[:k], S[:k, :k]):6.2f}"
+        print(line)
+
+    # RTN corner without stranded walkers (same layout as fig_corner_rtn of the run)
+    MCMCPlots.configure(PARAM_SYM, PARAM_BASE_UNIT, PARAM_BASE_SCALE, body="Bennu", target="Particle")
+    disp_scale, disp_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
+    MCMCPlots.set_figure_dir(run_dir)
+    A = MCMCPlots.rtn_corner_map(b["x0_ref1"], 12)
+    rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(A @ cov1 @ A.T))
+    )
+    kw = MCMCPlots._mapped_corner_kw(A, t, np.zeros(12), cov1)
+    kw["param_sym"] = MCMCPlots.RTN_SYM + PARAM_SYM[6:]
+    kw.update(param_unit=rtn_unit, param_scale=rtn_scale)
+    out = MCMCPlots.plot_mcmc_corner(
+        SimpleNamespace(samples=samples[keep], param_priors=None),
+        name=f"fig_corner_rtn_{variant}",
+        **kw,
+    )
+    print(f"[Post] RTN corner -> {out}")
+
+
+# ============================================================
+# MAIN SCRIPT
+# ============================================================
+
+if __name__ == "__main__":
+
+    ap = argparse.ArgumentParser(description=__doc__.split("Variants")[0])
+    ap.add_argument("variant", choices=["nominal", "stt2"])
+    ap.add_argument(
+        "--post",
+        metavar="RUN_DIR",
+        help="only redo the post-processing of a finished run folder",
+    )
+    args = ap.parse_args()
+    VARIANT = args.variant
+    if args.post:
+        postprocess_run(args.post, VARIANT)
+        sys.exit(0)
+
+    # --------------------------
+    # USER SETTINGS (edit these)
+    # --------------------------
+    KERNEL_ROOT = Path("./kernels")
+    SC_NAME = "OSIRIS-REX"
+    CENTER = "BENNU"
+    FRAME_I = "J2000"
+    ABCORR = "NONE"
+
+    # TODO: 7 days was a nightmare for batch, see where it's a better example. maybe look at the 20 particles of gravity
+    # Observation window (must be covered by SPK)
+    utc0 = "2019-03-01T00:00:00"
+    utc1 = "2019-03-01T01:30:00"
+    # VARIANT: nominal -> 23 candidate epochs (batch consistent with the truth); stt2 -> the
+    # Case 1 arc (22 epochs, batch excludes the truth jointly)
+    n_obs = 23 if VARIANT == "nominal" else 22
+
+    # Bennu physical
+    R_bennu = 0.290  # km
+    R_ref = R_bennu
+
+    # Bennu spin + pole truth
+    alpha_true = np.deg2rad(85.65)  # rad
+    delta_true = np.deg2rad(-60.17)  # rad
+    spin_period = 4.296057 * 3600.0  # s
+    omega_true = 2 * np.pi / spin_period  # rad/s
+
+    # Dynamics / STT order. VARIANT stt2: order 2 for the Stage 2 STTs (MCMC likelihood) only;
+    # truth, data and batch stay on a first-order propagator (propagator1 below).
+    stt_order = 2 if VARIANT == "stt2" else 1
+
+    # Stage-1 batch solve. False: plain Gauss-Newton with an unscaled lstsq solve (the results
+    # so far). True: column-scaled GN (solve in prior-sigma units) with step halving on the exact
+    # MAP cost; the prior sigmas span ~17 decades, so the unscaled lstsq drops the weakest
+    # direction and the plain GN stops short of the MAP along it. Runs go to a "_scaledGN" folder.
+    SCALED_BATCH = False
+
+    # Truth gravity params
+    mu_true = 4.89044967462e-09
+    C20_true = 6.09086686e-02
+    C21_true = -2.81206646e-14
+    S21_true = 3.87423500e-15
+    C22_true = 1.97844553e-03
+    S22_true = -7.06499291e-04
+    params_true = np.array(
+        [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
+    )
+
+    # Measurement noise
+    sigma_pix = 0.1  # pixel noise (1-sigma)
+    fov_deg = 44.0  # full FOV [deg]  (e.g. NavCam ~44 deg)
+    n_pix = 2592  # pixels across FOV (e.g. NavCam)
+    fov_rad = np.deg2rad(fov_deg)
+    sigma_angle = sigma_pix * (fov_rad / n_pix)  # radians
+    sigma_ra = sigma_angle
+    sigma_dec = sigma_angle
+
+    # reference is perturbed by these fractions of |truth|
+    rng_ref = np.random.default_rng(42)
+    ref_pct_r = 0.2  # 20% of each position component
+    ref_pct_v = 0.2  # 20% of each velocity component
+    ref_pct_mu = 0.01  # 1% of mu
+    ref_pct_c = 0.01  # 1% of each C/S coefficient
+
+    # priors (on deltas about the reference) are these fractions of |truth|
+    # NOTE: ach component of the particle's position is assigned a 250 m a priori
+    # uncertainty, which in three dimensions roughly equates to Bennu's volume.
+    # Each component of the particle's velocity is assigned a 30 cm/s a priori
+    # uncertainty, which is the same order of magnitude as the escape speeds on
+    # Bennu's surface.
+    # prior_pct_r = ref_pct_r  # 1% of each position component
+    # prior_pct_v = ref_pct_v  # 1% of each velocity component
+    # prior_pct_mu = ref_pct_mu  # 1% of mu
+    # prior_pct_c = ref_pct_c  # 1% of each C/S coefficient
+    sig_prior_r = np.full(3, 0.250)  # km
+    sig_prior_v = np.full(3, 3.0e-4)  # km/s
+    sig_prior_mu = np.abs(mu_true) * 1e-2  # 1% prior on mu
+    sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
+    prior_looseness = 1  # 1.1 * 1e2
+
+    # MCMC settings
+    # NOTE: always do a run with burn_in and thin not activated
+    n_walkers = 128  # 10 *
+    n_samples = 20000  # 5 *
+    burn_in = 2000
+    thin = 100
+    spherical_spread = 1e-1
+    # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
+    # such a file to skip the sampling and redo the diagnostics and figures from it.
+    LOAD_CHAIN = None  # e.g. "results/bennu_particle_<stamp>/chain.npz"
+    # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
+    # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
+    # central body (MCMCPlots.rtn_corner_map).
+    CORNER_RTN = True
+
+    # Figures: parameter symbols and display units are PARAM_SYM / PARAM_BASE_* (module
+    # level), one PDF per figure in a timestamped folder
+    MCMCPlots.configure(
+        PARAM_SYM,
+        PARAM_BASE_UNIT,
+        PARAM_BASE_SCALE,
+        rotation=make_bennu_rotation_matrix,
+        body="Bennu",
+        target="Particle",
+        obs_word="Image",
+        site_label="Ejection Site",
+        resid_labels=("RA", "Dec"),
+        fallback_dir=Path.home() / "bennu_figures_fallback",
+    )
+    fig_dir = MCMCPlots.set_figure_dir(
+        Path(__file__).resolve().parent
+        / "results"
+        / f"bennu_particle_{'nominal23' if VARIANT == 'nominal' else 'stt2'}"
+        f"{'_scaledGN' if SCALED_BATCH else ''}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    print(f"[Variant] {VARIANT}: n_obs = {n_obs}, MCMC STT order = {stt_order}")
+    print(f"[Figures] -> {fig_dir}")
+
+    # --------------------------
+    # Load SPICE & spacecraft truth (SPICE remains in ET)
+    # --------------------------
+    _ = load_kernels(KERNEL_ROOT)
+
+    et0 = spice.utc2et(utc0)
+    et1 = spice.utc2et(utc1)
+    ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
+    tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
+
+    sc_state_full = np.zeros((n_obs, 6))
+    for i, et in enumerate(ets_full):
+        st, _ = spice.spkezr(SC_NAME, float(et), FRAME_I, ABCORR, CENTER)
+        sc_state_full[i, :] = np.array(st, dtype=float)
+
+    # --------------------------
+    # Particle detach point on Bennu surface
+    # --------------------------
+    mesh_path = "ObjFiles/BennuRadar.obj"
+    bennu_mesh = trimesh.load(mesh_path, force="mesh")
+    vertices = np.asarray(bennu_mesh.vertices)
+
+    # mesh unit sanity check
+    rverts = np.linalg.norm(vertices, axis=1)
+    print(
+        "[Mesh] vertex radius stats (raw): min/mean/max =",
+        rverts.min(),
+        rverts.mean(),
+        rverts.max(),
+    )
+    vertices = np.asarray(bennu_mesh.vertices)
+
+    lat_desired = np.deg2rad(45.0)
+    lon_desired = np.deg2rad(80.0)
+    pos_target = np.array(
+        [
+            R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
+            R_bennu * np.cos(lat_desired) * np.sin(lon_desired),
+            R_bennu * np.sin(lat_desired),
+        ]
+    )
+    dists = np.linalg.norm(vertices - pos_target, axis=1)
+    closest_idx = np.argmin(dists)
+    pos_detach_bf = vertices[closest_idx]  # body-fixed at tau=0
+
+    # surface normal (mesh)
+    normal_bf = bennu_mesh.vertex_normals[closest_idx]
+    normal_bf = normal_bf / np.linalg.norm(normal_bf)
+
+    # Convert detach position to inertial at start time using rotation at tau=0
+    R_ib0 = make_bennu_rotation_matrix(
+        alpha_true, delta_true, omega_true, t=0.0, w0=0.0
+    )
+    r0_true = R_ib0.T @ pos_detach_bf  # inertial
+
+    # Outward initial velocity (random hemisphere w.r.t. r0_true)
+    rng = np.random.default_rng(7)
+    vmag = 2e-4  # km/s
+    """"
+    u = rng.normal(size=3)
+    u /= np.linalg.norm(u)
+    if np.dot(u, r0_true) < 0:
+        u = -u
+    v0_true = vmag * u
+    """
+
+    # tangent launch direction (physically plausible: lofting off surface)
+    rhat = r0_true / np.linalg.norm(r0_true)
+
+    # pick random vector not parallel to rhat
+    u = rng.normal(size=3)
+    u -= np.dot(u, rhat) * rhat
+    u /= np.linalg.norm(u)
+
+    # add small radial component (+/-) to create two near-degenerate families
+    rad_frac = 0.10  # 10% radial, rest tangential
+    sign = 1.0  # <-- TRICK: if you set this wrong in the reference, batch may lock on wrong lobe
+    u = np.sqrt(1 - rad_frac**2) * u + sign * rad_frac * rhat
+
+    v0_true = vmag * u
+
+    # Full truth initial state (12)
+    x0_true = np.hstack([r0_true, v0_true, params_true])
+
+    # --------------------------
+    # Build STT functions + propagator (must accept t argument)
+    # --------------------------
+    f_func, A_func, B_funcs = generate_stt_functions_bennu_deg2(
+        order=stt_order,
+        R_ref_km=R_ref,
+        alpha_rad=alpha_true,
+        delta_rad=delta_true,
+        omega_rad_s=omega_true,
+        w0_rad=0.0,
+    )
+
+    propagator = STTPropagatorND(
+        order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
+    )
+    # First-order propagator for the truth and the batch: for stt2 these are then identical
+    # to the first-order Case 1 run (for nominal it is the same as `propagator`)
+    propagator1 = STTPropagatorND(
+        order=1, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
+    )
+
+    # --------------------------
+    # Propagate particle truth (DYNAMICS on tau_full)
+    # --------------------------
+    print("\nPropagating particle truth...")
+    sol_true, stts_true = propagator1.propagate(
+        x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+    x_true_full = sol_true.y[:12, :].T  # (N,12)
+
+    # --------------------------
+    # Observability mask (occultation by Bennu sphere proxy)
+    # --------------------------
+    # CRITICAL FIX: Computing visibility mask but NOT filtering the time grid.
+    # Filtering creates irregular time spacing which causes numerical issues
+    # in time-dependent dynamics. Instead, we propagate on the FULL uniform
+    # time grid and only exclude occulted observations from the cost function.
+
+    vis_mask_full = occultation_mask(
+        sc_state_full[:, 0:3], x_true_full[:, 0:3], R_bennu
+    )
+
+    # Use FULL time grid for propagation (uniform spacing required for time-dependent dynamics)
+    ets = ets_full
+    tau = tau_full
+    sc_state = sc_state_full
+    x_true = x_true_full
+    vis_mask = vis_mask_full  # Keep mask for plotting/diagnostics
+
+    print(f"\nVisibility: {np.sum(vis_mask)}/{len(vis_mask)} epochs visible.")
+    print(f"Using all {len(tau)} epochs for propagation (uniform time grid).")
+
+    # --------------------------
+    # Observation scene + geometry (truth on a dense grid over the arc)
+    # --------------------------
+    tau_dense = np.linspace(tau_full[0], tau_full[-1], 400)
+    sol_dense = propagator.propagate_state_only(
+        x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
+    )
+    pt_dense = sol_dense.y[:3, :].T
+    r_dense = np.linalg.norm(pt_dense, axis=1)
+    # Epoch 0 is the launch point, on the surface itself, where the inside test is a coin
+    # flip: check the arc after it.
+    n_in_dense = int(
+        np.sum(
+            MCMCPlots.points_inside_mesh(
+                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
+            )
+        )
+    )
+    print(
+        f"[Scene] truth |r| over the arc: {r_dense.min() * 1e3:.1f}-"
+        f"{r_dense.max() * 1e3:.1f} m; inside the shape model at "
+        f"{n_in_dense}/{tau_dense.size - 1} epochs after launch"
+    )
+    if n_in_dense:
+        print("[WARNING] The truth trajectory crosses the shape model during the arc.")
+    sc_dense = np.array(
+        [
+            spice.spkezr(SC_NAME, float(et0 + t), FRAME_I, ABCORR, CENTER)[0]
+            for t in tau_dense
+        ],
+        dtype=float,
+    )
+    MCMCPlots.plot_scene_body_fixed(
+        bennu_mesh,
+        tau_obs=tau_full,
+        sc_obs=sc_state_full,
+        vis_mask=vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+        alpha=alpha_true,
+        delta=delta_true,
+        omega=omega_true,
+        detach_bf=pos_detach_bf,
+    )
+    MCMCPlots.plot_observation_geometry(
+        tau_full,
+        sc_state_full,
+        x_true_full,
+        vis_mask,
+        tau_line=tau_dense,
+        sc_line=sc_dense,
+        pt_line=pt_dense,
+    )
+
+    # --------------------------
+    # Generate noisy RA/DEC measurements
+    # --------------------------
+    # Generate measurements for ALL epochs (including occulted ones)
+    # We'll handle visibility in the residual weighting
+    rng_meas = np.random.default_rng(123)
+    y_obs_full = generate_opnav_measurements_from_sc(
+        x_part=x_true,
+        sc_state=sc_state,
+        sigma_ra=sigma_ra,
+        sigma_dec=sigma_dec,
+        rng=rng_meas,
+    )
+
+    # Create a weight vector: zero weight for occulted observations
+    obs_weights = np.ones_like(y_obs_full)
+    obs_weights[0::2][~vis_mask] = 0.0  # Zero weight for occulted RA
+    obs_weights[1::2][~vis_mask] = 0.0  # Zero weight for occulted DEC
+
+    y_obs = y_obs_full  # Use all measurements, rely on weights
+
+    # --------------------------
+    # Reference initial condition (perturb truth)
+    # --------------------------
+    print("\nBuilding reference initial state (12D)...")
+
+    sig_ref_r = np.abs(x0_true[0:3] * ref_pct_r)
+    sig_ref_v = np.abs(x0_true[3:6] * ref_pct_v)
+    sig_ref_mu = np.abs(x0_true[6:7] * ref_pct_mu)
+    sig_ref_c = np.abs(x0_true[7:12] * ref_pct_c)
+
+    ref_dev = np.hstack(
+        [
+            rng_ref.normal(scale=sig_ref_r, size=3),
+            rng_ref.normal(scale=sig_ref_v, size=3),
+            rng_ref.normal(scale=sig_ref_mu, size=1),
+            rng_ref.normal(scale=sig_ref_c, size=5),
+        ]
+    )
+    x0_ref = x0_true - ref_dev
+    print("\n[Reference] deviation from truth:", ref_dev)
+
+    # --------------------------
+    # Priors on 12D delta0
+    # --------------------------
+    # r_scale = np.linalg.norm(x0_true[0:3])
+    # v_scale = np.linalg.norm(x0_true[3:6])
+    # sig_prior_r = prior_pct_r * r_scale * np.ones(3)
+    # sig_prior_v = prior_pct_v * v_scale * np.ones(3)
+    # sig_prior_mu = np.abs(x0_true[6:7] * prior_pct_mu)
+    # sig_prior_c = np.abs(x0_true[7:12] * prior_pct_c)
+
+    prior_sigma = prior_looseness * np.hstack(
+        [sig_prior_r, sig_prior_v, sig_prior_mu, sig_prior_c]
+    )
+
+    priors = [norm(loc=0.0, scale=s) for s in prior_sigma]
+
+    print("\n[Prior] sigmas:", prior_sigma)
+
+    # --------------------------
+    # Stage 1: full nonlinear batch with visibility weighting
+    # --------------------------
+    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
+
+    batch = BatchLSQ(
+        propagator=propagator1,
+        tau=tau,  # seconds since start
+        sc_state=sc_state,
+        y_obs=y_obs,
+        sigma=(sigma_ra, sigma_dec),
+        obs_weights=obs_weights,  # visibility weights
+        measurement=radec_and_partials_from_los,
+        wrap=wrap_to_pi,
+    )
+    x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
+        x0_ref=x0_ref,
+        priors=priors,  # match update_idx length
+        max_iter=30,
+        tol=1e-8,
+        rtol=1e-8,
+        atol=1e-10,
+        verbose=True,
+        scaled=SCALED_BATCH,
+    )
+    """
+    x0_ref1, delta_hat1, cov1, res_nl = batch.full_nonlinear_lsq(
+        x0_ref=x0_ref,
+        priors=priors,
+        update_idx=np.arange(12),
+        rtol=1e-8,
+        atol=1e-10,
+        max_nfev=4000,
+        verbose=2,
+    )"""
+
+    print("\n[Stage 1] Covariance diagonal (stdev):")
+    print(np.sqrt(np.diag(cov1)))
+    print("[Stage 1] delta_hat1:\n", delta_hat1)
+
+    # Display units: rescale each parameter by a power of ten so its batch sigma reads well
+    disp_scale, disp_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
+
+    # --------------------------
+    # Stage 2: relinearize STTs about ref1
+    # --------------------------
+    # Order-2 STTs (1884 states): LSODA switches to its stiff branch and spends hours on
+    # finite-difference Jacobians; the problem is not stiff, so stt2 uses DOP853 (~5 min).
+    print(f"\n[Stage 2] Propagating ref1 and computing order-{stt_order} STTs about ref1...")
+    t_stage2 = time.time()
+    sol_ref, stts_ref = propagator.propagate(
+        x0=x0_ref1,
+        t_eval=tau,
+        rtol=1e-8,
+        atol=1e-10,
+        method="DOP853" if stt_order >= 2 else "LSODA",
+    )
+    print(
+        f"[Stage 2] STT propagation wall time {time.time() - t_stage2:.1f} s, "
+        f"nfev = {sol_ref.nfev}"
+    )
+
+    # --------------------------
+    # Residual function (STT-based) with visibility weighting
+    # --------------------------
+    def residuals_normalized(delta0):
+        _, x_est = propagator.propagate_deviation(sol_ref, stts_ref, delta0)
+
+        los = x_est[:, :3] - sc_state[:, :3]
+        ra_model, dec_model, _, _ = radec_and_partials_from_los(los)
+
+        y_model = np.empty_like(y_obs)
+        y_model[0::2] = ra_model
+        y_model[1::2] = dec_model
+
+        res = np.empty_like(y_obs)
+        res[0::2] = wrap_to_pi(y_obs[0::2] - y_model[0::2])
+        res[1::2] = y_obs[1::2] - y_model[1::2]
+
+        w = np.empty_like(y_obs)
+        w[0::2] = sigma_ra
+        w[1::2] = sigma_dec
+
+        # Apply visibility weighting
+        return (res / w) * obs_weights
+
+    # --------------------------
+    # Chi2 at ref1
+    # --------------------------
+    chi2_at_ref = np.sum(residuals_normalized(np.zeros(12)) ** 2)
+    n_visible = np.sum(vis_mask)
+    dof = 2 * n_visible - 12  # Only count visible observations
+    print(
+        f"\n[Stage 2] At ref1 (delta=0): chi2_red = {chi2_at_ref/dof:.3f}  "
+        f"(chi2={chi2_at_ref:.2f}, dof={dof}, n_vis={n_visible})"
+    )
+
+    # Priors for MCMC
+    delta_shift = x0_ref1 - x0_ref
+    priors_ref1 = [norm(loc=-ds, scale=s) for ds, s in zip(delta_shift, prior_sigma)]
+
+    # --------------------------
+    # MCMC
+    # --------------------------
+    print("\n[MCMC] Running (starting from zeros about ref1)...")
+    model = MCMCModel(
+        residuals_func=residuals_normalized,
+        initial_params=np.zeros(12),
+        param_priors=priors_ref1,
+        observed_data=y_obs,
+    )
+    model.setup_whitening_from_priors()
+    if LOAD_CHAIN:
+        model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
+        burn_in, thin = model.burn_in, model.thin
+    else:
+        model.run(
+            n_samples=n_samples,
+            n_walkers=n_walkers,
+            burn_in=burn_in,
+            thin=thin,
+            spherical_spread=spherical_spread,
+            method_optimize="Powell",
+        )
+        model.save_chain(fig_dir / "chain.npz")
+
+    theta_hat, P_mcmc = model.get_estimate_and_covariance()
+
+    chi2_mcmc = np.sum(residuals_normalized(theta_hat) ** 2)
+    print(
+        f"\n[MCMC] At theta_hat: chi2_red = {chi2_mcmc/dof:.3f}  (chi2={chi2_mcmc:.2f}, dof={dof})"
+    )
+    print("[MCMC] theta_hat:\n", theta_hat)
+    print("\n[MCMC] Covariance diagonal (stdev):")
+    print(np.sqrt(np.diag(P_mcmc)))
+
+    true_delta = x0_true - x0_ref1
+    print("\n[Truth] true_delta about ref1:\n", true_delta)
+    # Batch solution and truth, for the post-processing (and comparisons across runs)
+    np.savez(
+        fig_dir / "batch.npz",
+        x0_ref1=x0_ref1,
+        cov1=cov1,
+        true_delta=true_delta,
+        x0_true=x0_true,
+        x0_ref=x0_ref,
+        theta_hat=theta_hat,
+        P_mcmc=P_mcmc,
+        vis_mask=vis_mask,
+        tau=tau,
+        prior_sigma=prior_sigma,
+        delta_shift=delta_shift,
+    )
+
+    # --------------------------
+    # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
+    # --------------------------
+    # Samples are deviations about the batch solution ref1, so the batch estimate is 0 with
+    # covariance cov1.
+    model.summary()
+    model.print_regression_diagnostics()
+    # RTN corner: display units sized to the batch sigmas in R, T, N (as disp_unit is to
+    # the x, y, z ones)
+    A_rtn = MCMCPlots.rtn_corner_map(x0_ref1, model.ndim)
+    rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(A_rtn @ cov1 @ A_rtn.T))
+    )
+    model.plot_journal_diagnostics(
+        burn_in,
+        thin,
+        tau,
+        vis_mask,
+        true_theta=true_delta,
+        batch_cov=cov1,
+        corner_rtn=x0_ref1 if CORNER_RTN else None,
+        corner_rtn_kw=dict(param_unit=rtn_unit, param_scale=rtn_scale),
+    )
+
+    spice.kclear()
+
+    # Paper figure fig_corner_rtn_<variant>.pdf (stranded walkers excluded) + summary
+    postprocess_run(fig_dir, VARIANT)
