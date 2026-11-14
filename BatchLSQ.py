@@ -25,8 +25,6 @@ Solvers (all return x0_ref1, delta_hat1, cov1 with cov1 = inf outside update_idx
 import numpy as np
 from scipy.optimize import least_squares
 
-import MCMCPlots
-
 
 def _prior_moments(priors, n_upd):
     """Prior mean / sigma of the solve-for deltas (flat prior when `priors` is None)."""
@@ -74,8 +72,6 @@ class BatchLSQ:
     measurement  rel (N, rel_dim) -> (a, b, da_drel, db_drel)
     rel_dim      3 = line of sight (angles), 6 = relative position and velocity (Doppler)
     wrap         applied to the even-row residuals (e.g. wrap_to_pi for RA), or None
-    postfit_plot plot the batch post-fit residuals when verbose
-    plot_components  forwarded to MCMCPlots.plot_postfit_residuals (None = both)
     """
 
     def __init__(
@@ -89,8 +85,6 @@ class BatchLSQ:
         measurement,
         rel_dim=3,
         wrap=None,
-        postfit_plot=True,
-        plot_components=None,
     ):
         self.propagator = propagator
         self.tau = tau
@@ -101,8 +95,6 @@ class BatchLSQ:
         self.measurement = measurement
         self.rel_dim = rel_dim
         self.wrap = wrap
-        self.postfit_plot = postfit_plot
-        self.plot_components = plot_components
 
         self.w = np.empty_like(y_obs, dtype=float)
         self.w[0::2] = self.sigma[0]
@@ -185,16 +177,6 @@ class BatchLSQ:
             c += np.sum(self._prior_residuals(delta_total, update_idx, prior_mean, prior_sig) ** 2)
         return float(c) if np.isfinite(c) else np.inf
 
-    def _plot_postfit(self, r):
-        MCMCPlots.plot_postfit_residuals(
-            self.tau,
-            r,
-            None,
-            self.obs_weights[0::2] > 0.0,
-            components=self.plot_components,
-            name="fig_postfit_residuals_batch",
-        )
-
     # ------------------------------------------------------------------ Gauss-Newton
 
     def gn_with_stm(
@@ -254,15 +236,8 @@ class BatchLSQ:
             x0_ref1, delta_total, cov_upd, r_post = self._gn_plain(*args, tol=tol)
 
         cov_full = _embed_cov(cov_upd, update_idx, n)
-
-        if verbose and self.postfit_plot:
-            if r_post is None:
-                # post-fit residuals at the final x0_ref1 (one more propagation)
-                sol_pf, _ = self.propagator.propagate(x0=x0_ref1, t_eval=self.tau, **prop_kw)
-                y0, y1, _, _ = self._model(sol_pf.y[:n, :].T)
-                r_post = self._residuals(y0, y1)
-            self._plot_postfit(r_post)
-
+        # Post-fit residuals are plotted by the scenario scripts (MCMCPlots.plot_mcmc_residuals),
+        # batch and MCMC MAP together, so no batch-only figure is produced here.
         return x0_ref1, delta_total, cov_full
 
     def _gn_plain(self, x0_ref, update_idx, prior_mean, prior_sig, prop_kw, max_iter, verbose, tol):

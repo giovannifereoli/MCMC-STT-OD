@@ -894,7 +894,6 @@ if __name__ == "__main__":
         obs_weights=obs_weights,  # visibility weights
         measurement=range_rate_and_partials_from_rel_state,
         rel_dim=6,  # relative position and velocity
-        plot_components=[1],  # post-fit plot: range rate only (range carries no weight)
     )
     x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
         x0_ref=x0_ref,

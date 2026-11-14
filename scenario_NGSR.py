@@ -1145,7 +1145,6 @@ if __name__ == "__main__":
         obs_weights=obs_weights,
         measurement=radec_and_partials_from_los,
         wrap=wrap_to_pi,
-        postfit_plot=False,  # no batch post-fit residual figure (as for Ryugu)
     )
     x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
         x0_ref=x0_ref,
