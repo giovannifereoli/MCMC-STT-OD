@@ -26,6 +26,30 @@ from dynesty import utils as dyfunc  # noqa: F401
 
 import MCMCPlots
 
+# Model whose log-probability the fork-Pool workers of MCMCModel.run evaluate: set just
+# before the pool forks, cleared after the run.
+_FORK_MODEL = None
+
+
+class _ForkedLogProb:
+    """
+    Picklable log-probability for the fork Pool of MCMCModel.run.
+
+    Pool.map pickles the function it maps for every task. A bound method of the model
+    pickled the whole model, self.sampler included, and emcee's EnsembleSampler.__getstate__
+    sets pool = None on the live sampler: from the second step on, every walker was
+    evaluated in the parent process. This wrapper pickles to a method name only; the
+    workers, forked after _FORK_MODEL is set, call that method on their copy of the model.
+    """
+
+    def __init__(self, name):
+        """name: MCMCModel method to call (log_prob or log_prob_whitened)."""
+        self.name = name
+
+    def __call__(self, theta):
+        """Log-probability of theta on the forked model."""
+        return getattr(_FORK_MODEL, self.name)(theta)
+
 
 class ChainReplay:
     """
@@ -193,8 +217,9 @@ class MCMCModel:
     Parameters
     ----------
     residuals_func : callable
-        theta (ndim,) -> normalized residuals (N,). The sampler pool pickles the model, so
-        use a top-level function or a class with __call__, not a closure.
+        theta (ndim,) -> normalized residuals (N,). The fork-pool workers inherit the model
+        (only a method name is pickled per task), but keep it a top-level function or a
+        class with __call__, not a closure, so that the model stays picklable.
     initial_params : array_like, shape (ndim,)
         Start of the MAP search and of the walkers (model coordinates).
     param_priors : sequence of scipy.stats frozen distributions
@@ -584,10 +609,8 @@ class MCMCModel:
             )
 
         # Determine if we need to use whitened log_prob
-        log_prob_func = (
-            self.log_prob_whitened
-            if getattr(self, "is_whitened", False)
-            else self.log_prob
+        log_prob_name = (
+            "log_prob_whitened" if getattr(self, "is_whitened", False) else "log_prob"
         )
 
         # Define MCMC moves
@@ -604,19 +627,24 @@ class MCMCModel:
         print(
             f"[Run] Starting MCMC sampling with {n_walkers} walkers for {n_samples} steps..."
         )
-        with multiprocessing.get_context("fork").Pool() as pool:
-            print(
-                "[Run] Using multiprocessing with fork context. Number of processes:",
-                pool._processes,
-            )
-            self.sampler = emcee.EnsembleSampler(
-                nwalkers=n_walkers,
-                ndim=self.ndim,
-                log_prob_fn=log_prob_func,
-                pool=pool,
-                moves=moves,
-            )
-            self.sampler.run_mcmc(pos, n_samples, progress=True)
+        global _FORK_MODEL
+        _FORK_MODEL = self  # inherited by the workers forked below (see _ForkedLogProb)
+        try:
+            with multiprocessing.get_context("fork").Pool() as pool:
+                print(
+                    "[Run] Using multiprocessing with fork context. Number of processes:",
+                    pool._processes,
+                )
+                self.sampler = emcee.EnsembleSampler(
+                    nwalkers=n_walkers,
+                    ndim=self.ndim,
+                    log_prob_fn=_ForkedLogProb(log_prob_name),
+                    pool=pool,
+                    moves=moves,
+                )
+                self.sampler.run_mcmc(pos, n_samples, progress=True)
+        finally:
+            _FORK_MODEL = None
 
         # Try to estimate autocorrelation time
         print("[Run] Estimating autocorrelation time...")
@@ -631,6 +659,9 @@ class MCMCModel:
                 print(
                     "[Run] Warning: Autocorrelation time could not be reliably estimated."
                 )
+        if tau is not None and not np.all(np.isfinite(tau)):  # e.g. walkers that never moved
+            tau = None
+            print("[Run] Warning: Autocorrelation time is not finite; using the fallbacks.")
 
         if tau is not None:
             max_tau = np.max(tau)
