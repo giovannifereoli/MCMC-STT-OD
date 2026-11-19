@@ -939,6 +939,216 @@ def plot_scene_body_fixed(
     return save_figure(fig, name)
 
 
+def plot_scene_orbit(
+    mesh,
+    tau_obs,
+    pt_obs,
+    vis_mask,
+    pt_line,
+    sc_line,
+    alpha,
+    delta,
+    omega,
+    w0=0.0,
+    observer="Spacecraft",
+    elev=16.0,
+    azim=None,
+    zoom=0.86,
+    name="fig_scene_orbit",
+):
+    """
+    Orbit of the tracked object about the body, with a far observer (single column).
+
+    Use this instead of plot_scene_body_fixed when the observer is far from the body (km
+    against a sub-km orbit): an equal-aspect cube around the observer track would shrink the
+    body and the orbit to a dot. The frame is inertial, aligned with the body-fixed axes at
+    t = 0 (Z = spin axis), so a closed orbit stays a closed curve instead of winding with the
+    rotation. Drawn: the shaded shape model at its t = 0 attitude, the truth track of the
+    tracked object (black), the measurement epochs on it, used (dots) and occulted (crosses),
+    the start of the arc (star), and an arrow from just outside the orbit toward the mean
+    direction of the observer (not to scale; the observer distance is given in the legend).
+    Orthographic view; points hidden behind the body are not drawn. The axes are an
+    equal-aspect cube around the mesh, the orbit and the arrow.
+
+    Parameters
+    ----------
+    mesh : trimesh.Trimesh
+        Shape model in the body-fixed frame [km].
+    tau_obs : array_like, shape (N,)
+        Measurement epochs [s] (kept for symmetry with plot_scene_body_fixed; the frame does
+        not depend on time).
+    pt_obs : array_like, shape (N, >=3)
+        Inertial tracked-object (truth) states at tau_obs [km] (first 3 columns used).
+    vis_mask : array_like of bool, shape (N,)
+        True for used measurements, False for occulted ones.
+    pt_line, sc_line : array_like, shape (M, >=3)
+        Dense inertial tracked-object (truth) and observer states over the arc [km].
+    alpha, delta, omega, w0 : float
+        Rotation arguments (see points_inside_mesh); only the t = 0 attitude is used.
+    observer : str
+        Observer name in the legend.
+    elev, azim : float
+        View angles [deg]. azim=None looks 40 deg off the mean orbit normal.
+    zoom : float
+        Box-aspect zoom; keep <= 1 or the axis labels get clipped.
+    name : str
+        File name of the PDF.
+
+    Returns
+    -------
+    Path
+        The saved PDF.
+
+    Raises
+    ------
+    RuntimeError
+        If configure(rotation=...) was not called.
+    """
+    if _ROTATION is None:
+        raise RuntimeError("configure(rotation=...) was not called")
+    R0 = np.asarray(_ROTATION(alpha, delta, omega, 0.0, w0))  # inertial -> body at t = 0
+    pt_b = np.asarray(pt_line, dtype=float)[:, :3] @ R0.T
+    obs_b = np.asarray(pt_obs, dtype=float)[:, :3] @ R0.T
+    sc_b = np.asarray(sc_line, dtype=float)[:, :3] @ R0.T
+    vis = np.asarray(vis_mask, dtype=bool)
+
+    if azim is None:
+        h = np.sum(np.cross(pt_b[:-1], pt_b[1:]), axis=0)  # mean orbit normal
+        azim = np.rad2deg(np.arctan2(h[1], h[0])) + 40.0
+    view = _view_dir(elev, azim)
+    light = _view_dir(elev + 30.0, azim + 35.0)  # key light above-left of the camera
+
+    pt_v = pt_b.copy()
+    pt_v[_hidden_by_mesh(mesh, pt_b, view)] = np.nan
+    obs_hidden = _hidden_by_mesh(mesh, obs_b, view)
+
+    # Arrow toward the observer: mean direction, from just outside the orbit
+    d_sc = np.linalg.norm(sc_b, axis=1)
+    u = np.mean(sc_b / d_sc[:, None], axis=0)
+    u /= np.linalg.norm(u)
+    r_orb = np.max(np.linalg.norm(pt_b, axis=1))
+    a0, a1 = 1.06 * r_orb * u, 1.45 * r_orb * u
+
+    fig = plt.figure(figsize=(COL_W, 3.1))
+    ax = fig.add_axes((-0.04, -0.1, 0.98, 1.02), projection="3d", computed_zorder=False)
+    ax.set_proj_type("ortho")
+    ax.view_init(elev=elev, azim=azim)
+
+    ax.add_collection3d(_shaded_mesh(mesh, view, light))
+    ax.plot(*pt_v.T, color=C_TRUTH, lw=0.9, zorder=3)
+
+    used = vis & ~obs_hidden
+    occl = ~vis & ~obs_hidden
+    ax.plot(
+        *obs_b[used].T,
+        ls="none",
+        marker="o",
+        ms=2.6,
+        mfc=C_SC,
+        mec="white",
+        mew=0.3,
+        zorder=4,
+    )
+    ax.plot(
+        *obs_b[occl].T, ls="none", marker="x", ms=3.0, color=C_OCC, mew=0.85, zorder=4
+    )
+    if not _hidden_by_mesh(mesh, pt_b[:1], view)[0]:
+        ax.plot(
+            *pt_b[0][:, None],
+            ls="none",
+            marker="*",
+            ms=7.5,
+            mfc=C_TRUTH,
+            mec="white",
+            mew=0.5,
+            zorder=5,
+        )
+
+    ax.quiver(*a0, *(a1 - a0), color=C_SC, lw=1.1, arrow_length_ratio=0.25, zorder=5)
+
+    # Equal-aspect cube around the mesh, the orbit and the arrow
+    xyz = np.vstack([np.asarray(mesh.vertices), pt_b, a1[None]])
+    mid = 0.5 * (xyz.min(0) + xyz.max(0))
+    half = 0.5 * np.max(xyz.max(0) - xyz.min(0)) * 1.08
+    ax.set_xlim(mid[0] - half, mid[0] + half)
+    ax.set_ylim(mid[1] - half, mid[1] + half)
+    ax.set_zlim(mid[2] - half, mid[2] + half)
+    ax.set_box_aspect((1, 1, 1), zoom=zoom)
+
+    for a, lab, inner in zip(
+        (ax.xaxis, ax.yaxis, ax.zaxis),
+        (
+            r"$X_{\mathscr{B}_0}$ [km]",
+            r"$Y_{\mathscr{B}_0}$ [km]",
+            r"$Z_{\mathscr{B}_0}$ [km]",
+        ),
+        (True, True, False),  # X, Y: no ticks near the ends, whose labels clash at the corner
+    ):
+        a.set_pane_color((1.0, 1.0, 1.0, 0.0))
+        a.line.set_color("0.4")
+        a.line.set_linewidth(0.5)
+        a._axinfo["grid"].update(color="0.88", linewidth=0.4)
+        a._axinfo["tick"].update(inward_factor=0.0, outward_factor=0.25)
+        lo, hi = a.get_view_interval()
+        ticks = mticker.MaxNLocator(5).tick_values(lo, hi)
+        margin = 0.1 * (hi - lo) if inner else 0.0
+        a.set_major_locator(
+            mticker.FixedLocator(ticks[(ticks >= lo + margin) & (ticks <= hi - margin)])
+        )
+        a.set_tick_params(pad=-1.5, labelsize=6.5)
+        a.set_label_text(lab)
+        a.labelpad = -3.0
+
+    dash = "--" if plt.rcParams["text.usetex"] else "\u2013"
+    d_lo, d_hi = d_sc.min(), d_sc.max()
+    d_txt = f"{d_lo:.1f} km" if d_hi - d_lo < 0.05 else f"{d_lo:.1f}{dash}{d_hi:.1f} km"
+    handles = [
+        Line2D([], [], color=C_SC, lw=1.1, label=f"To {observer} ({d_txt})"),
+        Line2D([], [], color=C_TRUTH, lw=0.9, label=f"{TARGET} (Truth)"),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="o",
+            ms=3.5,
+            mfc=C_SC,
+            mec="white",
+            mew=0.35,
+            label=f"{OBS_WORD} Used",
+        ),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="x",
+            ms=3.8,
+            color=C_OCC,
+            mew=0.9,
+            label=f"{OBS_WORD} Occulted",
+        ),
+        Line2D(
+            [],
+            [],
+            ls="none",
+            marker="*",
+            ms=7,
+            mfc=C_TRUTH,
+            mec="white",
+            mew=0.5,
+            label="Arc Start",
+        ),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=2,
+        bbox_to_anchor=(0.5, 0.995),
+        columnspacing=1.0,
+        handletextpad=0.4,
+    )
+    return save_figure(fig, name)
+
+
 # ------------------------------------------------------------
 # Observation geometry and post-fit residuals (time axis)
 # ------------------------------------------------------------
@@ -2183,6 +2393,17 @@ def plot_corner(
                         linewidths=0.7 * lw_s,
                         zorder=2.5,
                     )
+                elif dists is not None:  # flat product (two uniform priors): its support box
+                    (a_j, b_j), (a_i, b_i) = dists[j].support(), dists[i].support()
+                    if np.all(np.isfinite([a_j, b_j, a_i, b_i])):
+                        ax.plot(
+                            np.array([a_j, b_j, b_j, a_j, a_j]) * s[j],
+                            np.array([a_i, a_i, b_i, b_i, a_i]) * s[i],
+                            color=C_PRIOR,
+                            ls="--",
+                            lw=0.7 * lw_s,
+                            zorder=2.5,
+                        )
                 n_pri = (i in pri) + (j in pri)  # 0: batch, 2: hyperprior, 1: neither
                 if bm is not None and bc is not None and n_pri != 1 and (hyper_ref or not n_pri):
                     C2 = bc[np.ix_([j, i], [j, i])]
