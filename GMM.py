@@ -417,7 +417,7 @@ def position_prediction_history(X_mc, gmm_t, batch_t=None):
     gmm_t : list of GMM
         The per-epoch mixtures returned by GMM.propagate_stm.
     batch_t : list of GMM, optional
-        A propagated Gaussian (e.g. the batch least-squares solution and its covariance),
+        A propagated Gaussian (e.g. the batch SRIF solution and its covariance),
         checked the same way.
 
     Returns

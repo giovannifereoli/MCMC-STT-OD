@@ -38,9 +38,8 @@ Sampling the ridge
   component. In theta the ridge is straight; the prior is evaluated at dx = x - x0_ref1, with
   the Jacobian log(1 + ds.e_rho / rho_ref). USE_SYMMETRY_CHART = False samples dx directly with
   the plain STT, for comparison.
-- STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only, and Stage 1 ends with an
-  exact trust-region least-squares MAP in chart coordinates (exact_map_chart); 2 adds the
-  second-order STT, and Stage 1 ends with the STT re-centering (results folder suffix _stt2).
+- STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only; 2 adds the second-order
+  STT (results folder suffix _stt2). Stage 1 does not depend on it.
 - SH_PRIOR = "uniform" replaces the Gaussian priors of C20, C21, S21, C22, S22 by boxes
   x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder suffix
   _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd of
@@ -51,9 +50,9 @@ Sampling the ridge
 Pipeline
   1) Truth: CubeSat orbit, MC position, noisy range / range-rate on the visible epochs.
   2) A priori x0_ref = truth - prior draw.
-  3) Stage 1: BatchLSQ Gauss-Newton (STMs, Levenberg-Marquardt, scaled) on growing arcs, then
-     to the exact MAP x0_ref1 (exact_map_chart with STMs, STT re-centering with STTs);
-     cov1 = batch covariance there.
+  3) Stage 1: batch SRIF (BatchLSQ, STMs; BATCH_SOLVER = "ud": Bierman U-D) on growing arcs,
+     Gauss-Newton iterations with step halving on the exact MAP cost, the step solved for in
+     symmetry-chart coordinates: x0_ref1 = exact MAP of the full arc, cov1 = SRIF covariance.
   4) Stage 2: STMs (STT_ORDER = 1) or STTs about x0_ref1, symmetry demo (exact / plain STT /
      chart).
   5) MCMC in chart coordinates; chain saved to chain.npz (LOAD_CHAIN replots a saved run).
@@ -75,7 +74,6 @@ import numpy as np
 import sympy as sp
 import trimesh
 from scipy.integrate import solve_ivp
-from scipy.optimize import least_squares, minimize_scalar
 from scipy.stats import kurtosis, norm, skew, uniform
 
 # The script lives in extra/: the project modules are in the parent folder
@@ -619,102 +617,6 @@ def derived_quantities(x, M0, ref=None):
     return out
 
 
-def symmetry_step(x, x_prior, prior_sigma, chart):
-    """
-    Angle delta minimizing the prior cost |(g_delta(x) - x_prior) / prior_sigma|^2 along the
-    symmetry orbit of x (grid over (-pi, pi], then a bounded 1-D refinement).
-
-    With the mothercraft on the spin axis the data cost is the same at every g_delta(x), so
-    this is an exact MAP step along the valley that Gauss-Newton can only crawl along.
-
-    Returns
-    -------
-    x_new : ndarray, shape (12,)
-    delta : float
-    """
-    grid = np.linspace(-np.pi, np.pi, 3601)
-    cost_grid = np.sum(((chart.rotate(np.tile(x, (grid.size, 1)), grid) - x_prior) / prior_sigma) ** 2, axis=1)
-    a0, h = grid[np.argmin(cost_grid)], grid[1] - grid[0]
-    res = minimize_scalar(
-        lambda a: np.sum(((chart.rotate(x, a) - x_prior) / prior_sigma) ** 2),
-        bounds=(a0 - h, a0 + h),
-        method="bounded",
-        options=dict(xatol=1e-12),
-    )
-    return chart.rotate(x, res.x), float(res.x)
-
-
-def exact_map_chart(x_start, res_many, make_chart, cov, h=1e-3, max_nfev=300, max_outer=5, verbose=True):
-    """
-    Exact MAP by trust-region least squares (scipy trf) in chart coordinates.
-
-    Used with STMs only (STT_ORDER = 1), where the STT re-centering is Gauss-Newton with step
-    halving and crawls along the curved MAP valley (a fraction of a MAP-cost unit per
-    iteration); trf adapts its trust region instead and follows the valley. Each chart is
-    centered on the current state and scaled by cov: theta = L z, L L^T = J^-1 cov J^-T (J the
-    chart Jacobian at its reference), so z is of order one. The Jacobian (first-order, STM-like
-    information of the exact flow) is a central difference in z: the 24 perturbed states go
-    through one res_many call. The chart is re-centered at each solution until the step
-    |z| < 1e-6.
-
-    Parameters
-    ----------
-    x_start : ndarray, shape (12,)
-    res_many : callable
-        res_many(X) -> ndarray (n, m): measurement and prior residuals of the absolute states
-        X (n, 12), exact propagation (one stacked solve).
-    make_chart : callable
-        make_chart(x) -> SymmetryChart or IdentityChart about x.
-    cov : ndarray, shape (12, 12)
-        Covariance of the deviation (e.g. the batch covariance), for the scaling.
-    h : float
-        Difference step in z.
-    max_nfev : int
-        Function evaluations per least_squares call.
-    max_outer : int
-        Maximum number of charts.
-    verbose : bool
-
-    Returns
-    -------
-    x : ndarray, shape (12,)
-    cost : float
-        Sum of squared residuals at x (the MAP cost of the other Stage-1 prints).
-    """
-    x = np.asarray(x_start, dtype=float).copy()
-    cost = float(np.sum(res_many(x) ** 2))
-    eye = np.eye(x.size)
-    for outer in range(1, max_outer + 1):
-        chart = make_chart(x)
-        J = np.linalg.inv(chart.jacobian_at_ref())
-        P = J @ cov @ J.T
-        L = np.linalg.cholesky(0.5 * (P + P.T))
-
-        def states(Z, x=x, chart=chart, L=L):
-            return x + np.array([chart.to_deviation(L @ z) for z in np.atleast_2d(Z)])
-
-        def fun(z, states=states):
-            return res_many(states(z))[0]
-
-        def jac(z, states=states):
-            R = res_many(states(np.vstack([z + h * eye, z - h * eye])))
-            return (R[: x.size] - R[x.size :]).T / (2.0 * h)
-
-        sol = least_squares(
-            fun, np.zeros(x.size), jac=jac, method="trf", xtol=1e-12, ftol=1e-12, gtol=1e-10, max_nfev=max_nfev
-        )
-        x, cost = states(sol.x)[0], 2.0 * float(sol.cost)
-        step = float(np.linalg.norm(sol.x))
-        if verbose:
-            print(
-                f"[Stage 1] exact MAP, chart {outer}: cost {cost:.6f} ({sol.nfev} evaluations, "
-                f"|z| = {step:.2e}, delta {np.rad2deg(chart.angle(L @ sol.x)):+.3f} deg)"
-            )
-        if step < 1e-6:
-            break
-    return x, cost
-
-
 def numeric_jacobian(fun, x0, h):
     """Central-difference Jacobian of fun at x0 with steps h (one per input)."""
     cols = []
@@ -881,11 +783,11 @@ def gmm_prediction(
 
     # One GMM per output epoch (absolute states)
     gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp)
-    # Batch LSQ Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
+    # SRIF Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
     # STM about ref1. Its mean also defines the RTN frame of fig_gmm_stm_propagation_rtn.
     batch_t = (
         GMM.gaussian(np.zeros(x0_ref1.size), cov1).propagate_stm(
-            propagator, x0_ref1, t_prop, label="Batch LSQ", **ivp
+            propagator, x0_ref1, t_prop, label="SRIF", **ivp
         )
         if batch or rtn
         else None
@@ -926,7 +828,7 @@ def gmm_prediction(
         batch_T = batch_t[-1].marginal(pos)
         mb_T, Pb_T = batch_T.moments()
         d_trb = r_tr_T - mb_T
-        print("[GMM] Batch LSQ + STM at target (same metrics):")
+        print("[GMM] SRIF + STM at target (same metrics):")
         print("   1-sigma [m]          :", np.array2string(np.sqrt(np.diag(Pb_T)) * 1e3, precision=2))
         print("   mean - MC mean [m]   :", np.array2string((mb_T - m_mc) * 1e3, precision=2))
         ll_b = np.mean(batch_T.logpdf(pos_mc))
@@ -961,8 +863,8 @@ def gmm_prediction(
     title_0, title_T = titles
     rows = [(0, title_0), (-1, title_T)] if show_epoch else [(-1, title_T)]
     rtn_title = {
-        0: ", RTN Frame of the Batch Solution",
-        -1: ", RTN Frame of the Propagated Batch Solution",
+        0: ", RTN Frame of the SRIF Solution",
+        -1: ", RTN Frame of the Propagated SRIF Solution",
     }
     figure(
         "GMM propagation",
@@ -1062,11 +964,14 @@ if __name__ == "__main__":
 
     # Integration (truth, batch, STTs)
     ivp = dict(method="DOP853", rtol=1e-11, atol=1e-14)
-    STAGE1_ARCS_H = [2.0, 4.0, 8.0, 16.0, ARC_HOURS]  # batch continuation (see Stage 1)
-    STAGE1_ROUNDS = 3  # max symmetry step + Gauss-Newton rounds per arc
-    STAGE1_ITERS = 10  # max Gauss-Newton iterations per round
-    STAGE1_STT_ITERS = 10  # max STT re-centering iterations (end of Stage 1)
-    STAGE1_STT_FTOL = 1e-7  # stop when the exact MAP cost decreases by less (relative)
+    # batch continuation (see Stage 1): 0.5 h steps after 18 h
+    STAGE1_ARCS_H = [2.0, 4.0, 8.0, 12.0, 16.0] + [18.0 + 0.5 * i for i in range(12)] + [ARC_HOURS]
+    STAGE1_ITERS = 40  # max SRIF iterations per arc
+    STAGE1_TOL = 1e-6  # stop when the step is shorter (norm in km, km/s, ...; 1 mm)
+    # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
+    # (Bierman U-D, one scalar measurement at a time); same MAP and covariance. "ud" adds
+    # "_ud" to the results folder.
+    BATCH_SOLVER = "srif"
 
     # MCMC
     n_walkers = 96
@@ -1128,7 +1033,7 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
     # Folder name: <script name>_YYMMDDHHMMSS (+ _stt<order> with STT_ORDER > 1, + _plain without
-    # the symmetry chart, + _uniform with the box priors)
+    # the symmetry chart, + _uniform with the box priors, + _ud with the U-D batch)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -1139,6 +1044,7 @@ if __name__ == "__main__":
             + (f"_stt{STT_ORDER}" if STT_ORDER > 1 else "")
             + ("" if USE_SYMMETRY_CHART else "_plain")
             + ("_uniform" if SH_PRIOR == "uniform" else "")
+            + ("_ud" if BATCH_SOLVER == "ud" else "")
         )
     )
     # Screen output also goes to run.log in the results folder
@@ -1288,23 +1194,32 @@ if __name__ == "__main__":
         raise ValueError(f"SH_PRIOR = {SH_PRIOR!r}: 'gaussian' or 'uniform'")
 
     # --------------------------
-    # Stage 1: Gauss-Newton batch (STMs) on growing arcs
+    # Stage 1: batch SRIF (STMs) on growing arcs
     # --------------------------
     # From the a priori state (~100 m and ~2 cm/s off on a 0.4 km, 11 cm/s orbit) Gauss-Newton
-    # on the full arc stalls in a local minimum: each arc of STAGE1_ARCS_H starts from the
-    # solution of the previous one, with the priors kept centered on x0_ref. With the MC on the
-    # spin axis the MAP sits in a curved valley (the symmetry orbit) along which the data cost
-    # is flat and Gauss-Newton only crawls; each round first moves to the prior-optimal point of
-    # the valley (symmetry_step, exact), then iterates Gauss-Newton. A second, stiff and curved
-    # valley (mean motion: vy, vz, GM, C22 trade off along the 24 h arc) is not straightened by
-    # the symmetry step: LM crawls along it (~1 MAP-cost unit per iteration, hundreds of
-    # iterations), so Stage 1 ends with the STT re-centering below instead.
-    print("\n[Stage 1] Gauss-Newton batch (first-order STMs, LM, scaled) on growing arcs...")
-    sym_prior = SymmetryChart(x0_ref, pole_i)  # rotations about the spin axis
-    use_symmetry_step = MC_TILT_DEG == 0.0
-    x_start = x0_ref.copy()
+    # on the full arc does not converge: each arc of STAGE1_ARCS_H starts from the solution of
+    # the previous one, with the priors kept centered on x0_ref. With the MC on the spin axis
+    # the MAP sits in a curved valley (the symmetry orbit) along which the data cost is flat.
+    # Each iteration solves the SRIF for the step in symmetry-chart coordinates theta (delta
+    # along g_delta + the slice), x += to_deviation(theta), so that the step follows the valley
+    # (in Cartesian coordinates Gauss-Newton crawls along it). The step is halved until it
+    # lowers the exact MAP cost (BatchLSQ.gn_with_stm). The chart is used here whatever
+    # USE_SYMMETRY_CHART (only a parametrization of the step: same MAP and covariance).
+    # From 18 h on the arcs grow by 0.5 h: from the 18 h MAP, the steps on the 20 h arc stall
+    # (6-7 halvings per iteration, MAP cost ~400 after 40 iterations, far from the 24 h MAP
+    # 194.89). With 0.5 h steps the 18.5-20.5 h arcs still reach the iteration cap, but the
+    # iterates follow the MAP: from 21 h each arc converges in a few iterations.
+    def exact_map_cost(X):
+        """Exact MAP cost (chi2 + prior chi2, as BatchLSQ) of absolute states X (12,)."""
+        traj = gravity1.propagate_many(np.atleast_2d(X), tau, **ivp)
+        chi2 = np.sum(isl_residuals(traj, mc_state, y_obs, sigma, obs_weights) ** 2)
+        return float(chi2 + np.sum(((X - x0_ref) / prior_sigma) ** 2))
+
+    print(f"\n[Stage 1] Batch {BATCH_SOLVER.upper()} (first-order STMs, Gauss-Newton iterations) on growing arcs...")
+    x0_ref1 = x0_ref.copy()
     for T_arc in STAGE1_ARCS_H:
         k = int(np.searchsorted(tau, T_arc * 3600.0 + 1e-6))
+        print(f"\n[Stage 1] arc 0-{tau[k - 1] / 3600:.1f} h ({int(vis_mask[:k].sum())} visible)")
         batch = BatchLSQ(
             propagator=prop1,
             tau=tau[:k],
@@ -1315,112 +1230,19 @@ if __name__ == "__main__":
             measurement=range_rangerate_and_partials,
             rel_dim=6,
         )
-        for rnd in range(STAGE1_ROUNDS):
-            x_prev = x_start.copy()
-            msg = f"\n[Stage 1] arc 0-{tau[k - 1] / 3600:.1f} h ({int(vis_mask[:k].sum())} visible), round {rnd + 1}"
-            if use_symmetry_step:
-                x_start, a_sym = symmetry_step(x_start, x0_ref, prior_sigma, sym_prior)
-                msg += f": symmetry step {np.rad2deg(a_sym):+.4f} deg"
-            print(msg)
-            x_start, delta_hat1, cov1 = batch.gn_with_stm(
-                x0_ref=x_start,
-                priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x_start, prior_sigma)],
-                max_iter=STAGE1_ITERS,
-                tol=1e-10,
-                rtol=ivp["rtol"],
-                atol=ivp["atol"],
-                method=ivp["method"],
-                verbose=True,
-                scaled=True,
-                lm=True,
-                ftol=1e-7,
-            )
-            if np.max(np.abs(x_start - x_prev) / prior_sigma) < 1e-6:
-                print("[Stage 1] converged (round change < 1e-6 prior sigma)")
-                break
-
-    # STT re-centering: the MAP of the order-STT_ORDER surrogate about the current state (in
-    # chart coordinates, so exact along the symmetry orbit), accepted when it lowers the exact
-    # MAP cost (step halving in theta otherwise); the STTs are then recomputed about the new
-    # state. With STT_ORDER = 2 the second-order terms carry the curvature of the mean-motion
-    # valley, so this reaches the MAP in a few iterations where LM crawls. A fixed point is an
-    # exact stationary point (the expansion is exact to first order at its center). With STMs
-    # only (STT_ORDER = 1) it would be Gauss-Newton in chart coordinates, which crawls as well:
-    # exact_map_chart (trust-region least squares on the exact residuals) is used instead.
-    def exact_map_cost(X):
-        """Exact MAP cost (chi2 + prior chi2, as BatchLSQ) of absolute states X (12,)."""
-        traj = gravity1.propagate_many(np.atleast_2d(X), tau, **ivp)
-        chi2 = np.sum(isl_residuals(traj, mc_state, y_obs, sigma, obs_weights) ** 2)
-        return float(chi2 + np.sum(((X - x0_ref) / prior_sigma) ** 2))
-
-    def exact_residuals_many(X):
-        """Exact measurement and prior residuals (n, 2N + 12) of absolute states X (n, 12)."""
-        X = np.atleast_2d(X)
-        traj = gravity1.propagate_many(X, tau, **ivp)
-        r = isl_residuals(traj, mc_state, y_obs, sigma, obs_weights)
-        return np.concatenate([r, (X - x0_ref) / prior_sigma], axis=-1)
-
-    if STT_ORDER == 1:
-        # STMs only: the re-centering below would be Gauss-Newton in chart coordinates, which
-        # crawls along the curved MAP valley; exact trust-region least squares instead.
-        print("\n[Stage 1] Exact MAP (trust-region least squares in chart coordinates, full arc)...")
-        x_c, cost_c = exact_map_chart(
-            x_start,
-            exact_residuals_many,
-            lambda x: SymmetryChart(x, pole_i) if USE_SYMMETRY_CHART else IdentityChart(x),
-            cov1,
+        x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
+            x0_ref=x0_ref1,
+            priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x0_ref1, prior_sigma)],
+            max_iter=STAGE1_ITERS,
+            tol=STAGE1_TOL,
+            rtol=ivp["rtol"],
+            atol=ivp["atol"],
+            method=ivp["method"],
+            verbose=True,
+            solver=BATCH_SOLVER,
+            make_chart=lambda x: SymmetryChart(x, pole_i),
         )
-    else:
-        print(f"\n[Stage 1] STT re-centering (order {STT_ORDER}, full arc)...")
-        x_c, cost_c = x_start.copy(), exact_map_cost(x_start)
-        for it in range(1, STAGE1_STT_ITERS + 1):
-            sol_c, stts_c = prop2.propagate(x0=x_c, t_eval=tau, **ivp)
-            stts_c6 = {k: np.asarray(v)[:, :6] for k, v in stts_c.items()}
-            chart_c = SymmetryChart(x_c, pole_i) if USE_SYMMETRY_CHART else IdentityChart(x_c)
-            J_c = np.linalg.inv(chart_c.jacobian_at_ref())
-            P_c = J_c @ cov1 @ J_c.T
-            L_c = np.linalg.cholesky(0.5 * (P_c + P_c.T))  # theta = L_c z: z of order one
 
-            def surrogate_map_residuals(z):
-                th = L_c @ z
-                dx6 = prop2.propagate_deviation(sol_c, stts_c6, chart_c.slice_deviation(th))[1]
-                r = isl_residuals(chart_c.rotate(dx6, chart_c.angle(th)), mc_state, y_obs, sigma, obs_weights)
-                return np.concatenate([r, (chart_c.to_deviation(th) + x_c - x0_ref) / prior_sigma])
-
-            res_c = least_squares(surrogate_map_residuals, np.zeros(12), method="lm", xtol=1e-12, ftol=1e-12, gtol=1e-12)
-            a = 1.0
-            while a > 1e-3:
-                x_try = x_c + chart_c.to_deviation(L_c @ (a * res_c.x))
-                cost_try = exact_map_cost(x_try)
-                if cost_try < cost_c:
-                    break
-                a *= 0.5
-            if a <= 1e-3:
-                print(f"[Stage 1] re-centering {it}: no exact decrease from {cost_c:.6f}: converged")
-                break
-            print(
-                f"[Stage 1] re-centering {it}: surrogate MAP cost {2.0 * res_c.cost:.6f}, exact "
-                f"{cost_c:.6f} -> {cost_try:.6f} (step x {a:g}, |z| = {a * np.linalg.norm(res_c.x):.2e}, "
-                f"delta {np.rad2deg(chart_c.angle(L_c @ (a * res_c.x))):+.3f} deg)"
-            )
-            x_c, cost_dec, cost_c = x_try, cost_c - cost_try, cost_try
-            if cost_dec < STAGE1_STT_FTOL * cost_c:
-                break
-
-    # Batch covariance at the MAP (one LM iteration on the full arc: a noise-level step)
-    print("\n[Stage 1] Covariance at the MAP (BatchLSQ, full arc)")
-    x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
-        x0_ref=x_c,
-        priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x_c, prior_sigma)],
-        max_iter=1,
-        tol=1e-10,
-        rtol=ivp["rtol"],
-        atol=ivp["atol"],
-        method=ivp["method"],
-        verbose=True,
-        scaled=True,
-        lm=True,
-    )
     print(f"[Stage 1] exact MAP cost at ref1: {exact_map_cost(x0_ref1):.6f}")
     sd1 = np.sqrt(np.diag(cov1))
     print("\n[Stage 1] batch sigma:", sd1)

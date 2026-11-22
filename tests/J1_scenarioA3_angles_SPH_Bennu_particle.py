@@ -64,6 +64,7 @@ from scipy.optimize import least_squares
 from scipy.stats import norm
 
 from STTPropagationND import STTPropagatorND
+from BatchLSQ import srif_solve
 from MCMC import MCMCModel
 
 # Publication-ish defaults
@@ -918,7 +919,7 @@ def solve_stage1_gn_with_stm(
         b = np.hstack(rhs)
 
         # Solve least squares
-        d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+        d_upd, cov_upd = srif_solve(np.zeros((A.shape[1], A.shape[1])), np.zeros(A.shape[1]), A, b, rcond=np.finfo(float).eps * max(A.shape))  # batch SRIF, lstsq rank cutoff
 
         # Embed into 12D delta, update ref
         d_full = np.zeros(12)
@@ -940,12 +941,7 @@ def solve_stage1_gn_with_stm(
     # Compute covariance at convergence
     # Cov = (A^T A)^{-1} for the update variables
     # This is the covariance of the delta we solved for
-    try:
-        AtA = A.T @ A
-        cov_upd = np.linalg.inv(AtA)
-    except np.linalg.LinAlgError:
-        print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-        cov_upd = np.linalg.pinv(A.T @ A)
+    # cov_upd: SRIF covariance of the last iteration
 
     # Embed into full 12x12 covariance (infinite variance for non-updated params)
     cov_full = np.full((12, 12), np.inf)

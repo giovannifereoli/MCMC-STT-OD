@@ -33,6 +33,7 @@ from scipy.stats import norm
 from scipy.stats import uniform as scipy_uniform
 
 from STTPropagationND import STTPropagatorND
+from BatchLSQ import srif_solve
 from MCMC import MCMCModel
 
 # Publication-ish defaults
@@ -744,7 +745,7 @@ def solve_stage1_gn_with_stm(
 
         A = np.vstack(rows)
         b = np.hstack(rhs)
-        d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+        d_upd, cov_upd = srif_solve(np.zeros((A.shape[1], A.shape[1])), np.zeros(A.shape[1]), A, b, rcond=np.finfo(float).eps * max(A.shape))  # batch SRIF, lstsq rank cutoff
 
         d_full = np.zeros(19)
         d_full[update_idx] = d_upd
@@ -760,10 +761,7 @@ def solve_stage1_gn_with_stm(
         if step_norm < tol:
             break
 
-    try:
-        cov_upd = np.linalg.inv(A.T @ A)
-    except np.linalg.LinAlgError:
-        cov_upd = np.linalg.pinv(A.T @ A)
+    # cov_upd: SRIF covariance of the last iteration
 
     cov_full = np.full((19, 19), np.inf)
     for i, idx_i in enumerate(update_idx):
@@ -991,7 +989,7 @@ def solve_stage1_gn_angles(
 
         A = np.vstack(rows)
         b = np.hstack(rhs)
-        d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+        d_upd, cov_upd = srif_solve(np.zeros((A.shape[1], A.shape[1])), np.zeros(A.shape[1]), A, b, rcond=np.finfo(float).eps * max(A.shape))  # batch SRIF, lstsq rank cutoff
 
         d_full = np.zeros(19)
         d_full[update_idx] = d_upd
@@ -1005,10 +1003,7 @@ def solve_stage1_gn_angles(
         if step_norm < tol:
             break
 
-    try:
-        cov_upd = np.linalg.inv(np.vstack(rows).T @ np.vstack(rows))
-    except np.linalg.LinAlgError:
-        cov_upd = np.linalg.pinv(np.vstack(rows).T @ np.vstack(rows))
+    # cov_upd: SRIF covariance of the last iteration
 
     cov_full = np.full((19, 19), np.inf)
     for i, idx_i in enumerate(update_idx):

@@ -200,7 +200,7 @@ def apply_style():
 # Okabe-Ito colors (colorblind-safe; adjacent pairs checked for CVD separation).
 # Each color has ONE meaning in every figure.
 C_POST = "#0072B2"  # MCMC posterior / Gaussian mixture (blue)
-C_BATCH = "#D55E00"  # Gauss-Newton batch (vermillion)
+C_BATCH = "#D55E00"  # batch SRIF estimate (vermillion)
 C_SC = "#009E73"  # spacecraft, images used (bluish green)
 C_OCC = "#E69F00"  # occulted epochs (orange)
 C_MC = "0.62"  # nonlinear Monte Carlo (neutral grey)
@@ -208,7 +208,10 @@ C_TRUTH = "k"  # truth
 C_SPAN = "0.93"  # background spans (observation arc, burn-in, +/-3 sigma)
 C_XYZ = ("#56B4E9", "#CC79A7", "#E69F00")  # x / y / z components (ACF figure only)
 C_PRIOR = "#CC79A7"  # hyperprior reference (corner + traces; dashed, reddish purple)
-C_LSQ = "#009E73"  # batch LSQ Gaussian in the GMM propagation figures (dash-dot, bluish green)
+C_LSQ = "#009E73"  # SRIF Gaussian in the GMM propagation figures (dash-dot, bluish green)
+
+# Legend name of the Stage-1 batch estimate (square-root information filter) in every figure.
+BATCH_LABEL = "SRIF"
 
 # ------------------------------------------------------------
 # Per-script configuration (set by configure())
@@ -1260,7 +1263,7 @@ def plot_postfit_residuals(
     """
     Normalized post-fit residuals at the used epochs, one panel per measurement component.
 
-    Batch (Gauss-Newton) residuals are open vermillion circles, MCMC MAP residuals blue
+    Batch SRIF residuals are open vermillion circles, MCMC MAP residuals blue
     dots, with grey +/-1 sigma and +/-3 sigma bands and the RMS of each set in the panel.
 
     Parameters
@@ -1333,7 +1336,7 @@ def plot_postfit_residuals(
         rms_txt = rf"RMS: {rms_b:.2f}"
         if has_mcmc:
             rms_txt = (
-                rf"RMS: batch {rms_b:.2f}, MCMC {np.sqrt(np.mean(rm[vis, k] ** 2)):.2f}"
+                rf"RMS: {BATCH_LABEL} {rms_b:.2f}, MCMC {np.sqrt(np.mean(rm[vis, k] ** 2)):.2f}"
             )
         ax.text(
             0.99,
@@ -1359,7 +1362,7 @@ def plot_postfit_residuals(
             mfc="none",
             mec=C_BATCH,
             mew=0.8,
-            label="Batch Least Squares",
+            label=BATCH_LABEL,
         ),
         Line2D([], [], ls="none", marker="o", ms=2.4, color=C_POST, label="MCMC MAP"),
         Patch(facecolor="0.89", label=r"$\pm1\sigma$"),
@@ -1645,12 +1648,12 @@ def plot_mcmc_traces(
             Patch(facecolor=mcolors.to_rgba(C_POST, band_alpha), lw=0),
             Line2D([], [], color=C_POST, lw=0.9),
         ),
-        Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label="Batch Least Squares"),
+        Line2D([], [], color=C_BATCH, lw=0.9, ls="--", label=BATCH_LABEL),
         Line2D([], [], color=C_TRUTH, lw=0.8, label="Truth"),
         Patch(facecolor=C_SPAN, lw=0, label="Burn-in"),
     ]
     # no batch solution (e.g. the STT benchmark) or no truth: no legend entry for it
-    drop = {"Batch Least Squares"} if batch_theta is None else set()
+    drop = {BATCH_LABEL} if batch_theta is None else set()
     drop |= {"Truth"} if true_theta is None else set()
     handles = [h for h in handles if isinstance(h, tuple) or h.get_label() not in drop]
     if realized and true_theta is not None:
@@ -2474,7 +2477,7 @@ def plot_corner(
         Line2D([], [], color=C_BATCH, lw=0.9),
         Line2D([], [], ls="none", ms=8, **star_full),
     ]
-    leg_labels = [f"MCMC Posterior {sig123}", f"Batch Least Squares {sig123}", "Truth"]
+    leg_labels = [f"MCMC Posterior {sig123}", f"{BATCH_LABEL} {sig123}", "Truth"]
     if tr is None:  # no truth: no truth entry
         del handles[2], leg_labels[2]
     if bm is None or bc is None:  # no batch solution (e.g. the STT benchmark): no batch entry
@@ -2492,7 +2495,7 @@ def plot_corner(
     if show_bm:  # after the batch entry (or the posterior one, without a batch)
         k = 2 if bc is not None else 1
         handles.insert(k, Line2D([], [], ls="none", ms=4.5, **square))
-        leg_labels.insert(k, "Batch Estimate")
+        leg_labels.insert(k, f"{BATCH_LABEL} Estimate")
     if mp is not None:
         handles.insert(1, Line2D([], [], color=C_POST, lw=0.9, ls="--", ms=5, **diamond))
         leg_labels.insert(1, "Posterior Mode (MAP)")
@@ -2912,7 +2915,7 @@ def plot_gmm_propagation(
     One row per panel dict (e.g. only the target epoch, or row 0 at the epoch and row 1 at the
     target epoch), drawn in m relative to its center: the MC cloud (grey), every GMM
     component's ellipse, the GMM highest-density region holding `prob` of the mass (level from mixture draws), optionally
-    the batch LSQ Gaussian's ellipse with the same mass (dash-dot bluish green) and the truth
+    the SRIF Gaussian's ellipse with the same mass (dash-dot bluish green) and the truth
     (star). Full text width.
 
     Parameters
@@ -3071,7 +3074,7 @@ def plot_gmm_propagation(
                 color=C_LSQ,
                 lw=1.1,
                 ls="-.",
-                label=f"Batch LSQ + STM ({pct} HDR)",
+                label=f"{BATCH_LABEL} + STM ({pct} HDR)",
             ),
         )
     if not show_components:
@@ -3091,11 +3094,11 @@ def plot_prediction_history(
     t_hr, hist, t_obs_end_hr, name="fig_gmm_prediction_history"
 ):
     """
-    Position uncertainty and Monte Carlo log-density vs time: GMM vs batch LSQ Gaussian.
+    Position uncertainty and Monte Carlo log-density vs time: GMM vs SRIF Gaussian.
 
     (a) sqrt(trace P_rr) [m] on a log scale: Monte Carlo (thick grey), GMM + STMs (blue) and,
-    if hist holds the batch LSQ Gaussian (sig_batch, ll_batch), batch LSQ + STM (dash-dot
-    bluish green). (b) Mean log-density of the MC positions [nats], GMM minus batch LSQ
+    if hist holds the SRIF Gaussian (sig_batch, ll_batch), SRIF + STM (dash-dot
+    bluish green). (b) Mean log-density of the MC positions [nats], GMM minus SRIF
     Gaussian (> 0: the GMM fits the MC cloud better); without the batch, the GMM's own mean
     log-density. The observation arc is shaded. Single column.
 
@@ -3172,7 +3175,7 @@ def plot_prediction_history(
             color=C_LSQ,
             lw=1.2,
             ls="-.",
-            label="Batch LSQ + STM",
+            label=f"{BATCH_LABEL} + STM",
             zorder=4,
         )
     ax0.set_ylabel(r"$\sqrt{\mathrm{tr}(P_{rr})}$ [m]")
@@ -3187,7 +3190,7 @@ def plot_prediction_history(
         ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_batch"], color=C_POST, lw=1.2)
         ax1.set_ylabel(r"$\Delta \overline{\log p}$ [nats]")
         ax1.set_title(
-            r"(b) Mean Log-Density of MC Positions, GMM $-$ Batch LSQ", loc="left"
+            r"(b) Mean Log-Density of MC Positions, GMM $-$ " + BATCH_LABEL, loc="left"
         )
     else:
         ax1.plot(t_hr, hist["ll_gmm"], color=C_POST, lw=1.2)
@@ -4180,7 +4183,7 @@ def legacy_corner_with_batch(
             color="none",
             markerfacecolor="red",
             markersize=6,
-            label="Batch Mean",
+            label=f"{BATCH_LABEL} Mean",
         ),
         Line2D(
             [0],
@@ -4188,7 +4191,7 @@ def legacy_corner_with_batch(
             color="red",
             lw=1.4,
             linestyle="-",
-            label=rf"Batch {float(batch_sigma_levels[0]):g}$\sigma$",
+            label=rf"{BATCH_LABEL} {float(batch_sigma_levels[0]):g}$\sigma$",
         ),
         Line2D(
             [0],
@@ -4221,14 +4224,14 @@ def legacy_corner_with_batch(
                     color="red",
                     lw=1.0,
                     linestyle="--",
-                    label=rf"Batch {float(ksig):g}$\sigma$",
+                    label=rf"{BATCH_LABEL} {float(ksig):g}$\sigma$",
                 ),
             )
 
     filtered = []
     for p in proxies:
         lab = p.get_label()
-        if "Batch" in lab:
+        if lab.startswith(BATCH_LABEL):
             if bm is not None:
                 filtered.append(p)
         elif lab == "True Value":

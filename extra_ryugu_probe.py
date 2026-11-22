@@ -45,7 +45,7 @@ Pipeline (same as the Bennu script):
   2) Spacecraft truth at the same epochs.
   3) Generate noisy RA/DEC on visible epochs only (occulted epochs get zero weight).
   4) Build reference (perturb truth).
-  5) Stage-1 Gauss-Newton batch with STMs.
+  5) Stage-1 batch SRIF with STMs (Gauss-Newton iterations).
   6) Stage-2: relinearize STMs about the Stage-1 solution.
   7) MCMC around the STM-based residual function.
      [261110: if MCMC_UNIFORM_SPEED_PRIOR is True, the MCMC (only) uses a velocity prior uniform
@@ -635,10 +635,10 @@ if __name__ == "__main__":
     # Dynamics: STMs only
     stt_order = 1
 
-    # Stage-1 batch solve. False: LM-safeguarded GN with an unscaled lstsq solve (the results so
-    # far). True: same LM, solved in prior-sigma units (same damped problem, full-rank solve, so
-    # no direction is dropped by the lstsq cutoff). Runs go to a "_scaledGN" folder.
-    SCALED_BATCH = False
+    # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
+    # (Bierman U-D, one scalar measurement at a time); same MAP and covariance. "ud" adds
+    # "_ud" to the results folder.
+    BATCH_SOLVER = "srif"
 
     # Bulk density. With the shape model it fixes the polyhedral gravity (GM = G rho V), so GM
     # is NOT in the state. (Original: Ryugu, Watanabe et al. 2019: 1190 +/- 20 kg/m^3)
@@ -740,7 +740,7 @@ if __name__ == "__main__":
     n_mc_prop = 300  # posterior samples propagated nonlinearly (Monte Carlo check)
     n_t_prop = 46  # output epochs on [epoch, target]
     gmm_prob = 0.99  # probability mass of the plotted regions
-    # Also propagate the Stage-1 batch LSQ Gaussian N(x0_ref1, cov1) with the STM about ref1
+    # Also propagate the Stage-1 SRIF Gaussian N(x0_ref1, cov1) with the STM about ref1
     # (P(t) = Phi cov1 Phi^T) and draw it in fig_gmm_stm_propagation(_rtn) and
     # fig_gmm_prediction_history.
     GMM_BATCH = True
@@ -778,8 +778,8 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "ryugu_figures_fallback",
     )
     # 261110: 実行ごとの結果フォルダ名を YYMMDDHHMMSS にした（results/ は git 管理外）
-    # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/extra_ryugu_probe_261119221246
-    #   (+ _priorx<PRIOR_SCALE> with PRIOR_SCALE != 1, + _scaledGN with SCALED_BATCH)
+    # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/extra_ryugu_probe_261122091827
+    #   (+ _priorx<PRIOR_SCALE> with PRIOR_SCALE != 1, + _ud with BATCH_SOLVER = "ud")
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -788,7 +788,7 @@ if __name__ == "__main__":
             + "_"
             + datetime.now().strftime("%y%m%d%H%M%S")
             + (f"_priorx{PRIOR_SCALE:g}" if PRIOR_SCALE != 1 else "")
-            + ("_scaledGN" if SCALED_BATCH else "")
+            + ("_ud" if BATCH_SOLVER == "ud" else "")
         )
     )
 
@@ -1149,9 +1149,9 @@ if __name__ == "__main__":
     print("\n[Prior] sigmas:", prior_sigma)
 
     # --------------------------
-    # Stage 1: Gauss-Newton batch with STMs and visibility weighting
+    # Stage 1: batch SRIF with STMs and visibility weighting
     # --------------------------
-    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
+    print("\n[Stage 1] Batch SRIF (first-order STMs, Gauss-Newton iterations) to convergence...")
 
     batch = BatchLSQ(
         propagator=propagator,
@@ -1166,27 +1166,15 @@ if __name__ == "__main__":
     x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
         x0_ref=x0_ref,
         priors=priors,
-        max_iter=30,
-        tol=1e-8,
-        ftol=1e-2,  # stop once an LM step gains < 1% in MAP cost: converged, not exact
+        # Full Gauss-Newton steps overshoot here (they cycle between MAP costs 1.76 and 1.98):
+        # most steps are halved once or twice, and the iterations converge linearly to the MAP.
+        max_iter=40,
+        tol=1e-5,
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
-        # Levenberg-Marquardt safeguard: the plain GN step diverges from x0_ref. [261110: this
-        # was observed in the original Ryugu setting; in the 261110162235 run (the only one with
-        # a saved log) the damping stayed at lam = 0.]
-        lm=True,
-        scaled=SCALED_BATCH,
+        solver=BATCH_SOLVER,
     )
-    """
-    x0_ref1, delta_hat1, cov1, res_nl = batch.full_nonlinear_lsq(
-        x0_ref=x0_ref,
-        priors=priors,
-        rtol=1e-8,
-        atol=1e-10,
-        max_nfev=4000,
-        verbose=2,
-    )"""
 
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
@@ -1374,11 +1362,11 @@ if __name__ == "__main__":
 
     # One GMM per output epoch (absolute states)
     gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp_prop)
-    # Batch LSQ Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
+    # SRIF Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
     # STM about ref1. Its mean also defines the RTN frame of fig_gmm_stm_propagation_rtn.
     batch_t = (
         GMM.gaussian(np.zeros(N_STATE), cov1).propagate_stm(
-            propagator, x0_ref1, t_prop, label="Batch LSQ", **ivp_prop
+            propagator, x0_ref1, t_prop, label="SRIF", **ivp_prop
         )
         if GMM_BATCH or GMM_RTN
         else None
@@ -1459,7 +1447,7 @@ if __name__ == "__main__":
         batch_T = batch_t[-1].marginal(slice(0, 3))
         mb_T, Pb_T = batch_T.moments()
         d_trb = r_tr - mb_T
-        print("[GMM] Batch LSQ + STM at target (same metrics):")
+        print("[GMM] SRIF + STM at target (same metrics):")
         print(
             "   1-sigma [m]          :",
             np.array2string(np.sqrt(np.diag(Pb_T)) * 1e3, precision=2),
@@ -1508,10 +1496,10 @@ if __name__ == "__main__":
         show_components=GMM_SHOW_COMPONENTS,
     )
     if GMM_RTN:
-        # RTN frame of the batch solution propagated to each row's epoch
+        # RTN frame of the SRIF solution propagated to each row's epoch
         rtn_title = {
-            0: ", RTN Frame of the Batch Solution",
-            -1: ", RTN Frame of the Propagated Batch Solution",
+            0: ", RTN Frame of the SRIF Solution",
+            -1: ", RTN Frame of the Propagated SRIF Solution",
         }
         MCMCPlots.plot_gmm_propagation(
             [

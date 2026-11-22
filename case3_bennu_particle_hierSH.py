@@ -667,11 +667,11 @@ if __name__ == "__main__":
     # Dynamics / STT order
     stt_order = 1
 
-    # Stage-1 batch solve. False: plain Gauss-Newton with an unscaled lstsq solve (the results
-    # so far). True: column-scaled GN (solve in prior-sigma units) with step halving on the exact
-    # MAP cost; the prior sigmas span ~17 decades, so the unscaled lstsq drops the weakest
-    # direction and the plain GN stops short of the MAP along it. Runs go to a "_scaledGN" folder.
-    SCALED_BATCH = False
+    # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
+    # (Bierman U-D, one scalar measurement at a time). "srif" keeps the lstsq singular-value
+    # cutoff of the earlier batch (rank_cutoff below), so its results are the same as before;
+    # "ud" keeps every direction (full-rank MAP). "ud" adds "_ud" to the results folder.
+    BATCH_SOLVER = "srif"
 
     # Truth gravity params
     mu_true = 4.89044967462e-09
@@ -771,11 +771,11 @@ if __name__ == "__main__":
         resid_labels=("RA", "Dec"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
-    # Folder name: case3_bennu_particle_hierSH_YYMMDDHHMMSS (+ _scaledGN with SCALED_BATCH)
+    # Folder name: case3_bennu_particle_hierSH_YYMMDDHHMMSS
     fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
-        / f"case3_bennu_particle_hierSH_{datetime.now().strftime('%y%m%d%H%M%S')}{'_scaledGN' if SCALED_BATCH else ''}"
+        / f"case3_bennu_particle_hierSH_{datetime.now().strftime('%y%m%d%H%M%S')}{'_ud' if BATCH_SOLVER == 'ud' else ''}"
     )
     print(f"[Figures] -> {fig_dir}")
 
@@ -1012,9 +1012,9 @@ if __name__ == "__main__":
     print("\n[Prior] sigmas:", prior_sigma)
 
     # --------------------------
-    # Stage 1: full nonlinear batch with visibility weighting
+    # Stage 1: batch SRIF with visibility weighting
     # --------------------------
-    print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
+    print("\n[Stage 1] Batch SRIF (first-order STMs, Gauss-Newton iterations) to convergence...")
 
     batch = BatchLSQ(
         propagator=propagator,
@@ -1034,7 +1034,9 @@ if __name__ == "__main__":
         rtol=1e-8,
         atol=1e-10,
         verbose=True,
-        scaled=SCALED_BATCH,
+        solver=BATCH_SOLVER,
+        rank_cutoff=BATCH_SOLVER == "srif",  # lstsq singular-value cutoff of the batch before the SRIF: same results
+        halving=False,  # full Gauss-Newton steps, as before
     )
 
     print("\n[Stage 1] Covariance diagonal (stdev):")

@@ -99,6 +99,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import norm
 
 from STTPropagationND import STTPropagatorND
+from BatchLSQ import srif_solve
 from MCMC import MCMCModel
 
 # Publication-ish defaults
@@ -893,7 +894,7 @@ def solve_stage1_gn_fused(
 
         A = np.vstack(rows)
         b = np.hstack(rhs)
-        d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
+        d_upd, cov_upd = srif_solve(np.zeros((A.shape[1], A.shape[1])), np.zeros(A.shape[1]), A, b, rcond=np.finfo(float).eps * max(A.shape))  # batch SRIF, lstsq rank cutoff
 
         d_full = np.zeros(19)
         d_full[update_idx] = d_upd
@@ -907,11 +908,7 @@ def solve_stage1_gn_fused(
         if step_norm < tol:
             break
 
-    A_full = np.vstack(rows)
-    try:
-        cov_upd = np.linalg.inv(A_full.T @ A_full)
-    except np.linalg.LinAlgError:
-        cov_upd = np.linalg.pinv(A_full.T @ A_full)
+    # cov_upd: SRIF covariance of the last iteration
 
     cov_full = np.full((19, 19), np.inf)
     for i, idx_i in enumerate(update_idx):

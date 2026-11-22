@@ -50,9 +50,8 @@ Sampling (as scenario_ISL_SH2.py)
   the measurement of the rotated trajectory). USE_SYMMETRY_CHART = False samples dx directly.
 - MCMC in chart coordinates theta (MCMCModelChart); the exact check (nonlinear propagation of
   N_EXACT_CHECK posterior samples) reports the importance-sampling ESS of the surrogate.
-- STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only, and Stage 1 ends with an
-  exact trust-region least-squares MAP in chart coordinates (exact_map_chart); 2 adds the
-  second-order STT, and Stage 1 ends with the STT re-centering (results folder suffix _stt2).
+- STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only; 2 adds the second-order
+  STT (results folder suffix _stt2). Stage 1 does not depend on it.
 - SH_PRIOR = "uniform" (CASE = "2b") replaces the Gaussian priors of C20, C21, S21, C22, S22 by
   boxes x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder
   suffix _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd
@@ -61,9 +60,9 @@ Sampling (as scenario_ISL_SH2.py)
 Pipeline
   1) SPICE: OREx states at the epochs; truth popper orbit, noisy Doppler on the visible epochs.
   2) A priori x0_ref = truth - prior draw.
-  3) Stage 1: valley step (exact 1-D minimization of the MAP cost along g_delta) + BatchLSQ
-     Gauss-Newton (STMs, LM, scaled) on growing arcs, then to the exact MAP x0_ref1
-     (exact_map_chart with STMs, STT re-centering with STTs); cov1 = batch covariance there.
+  3) Stage 1: batch SRIF (BatchLSQ, STMs; BATCH_SOLVER = "ud": Bierman U-D) on growing arcs,
+     Gauss-Newton iterations with step halving on the exact MAP cost, the step solved for in
+     symmetry-chart coordinates: x0_ref1 = exact MAP of the full arc, cov1 = SRIF covariance.
   4) Stage 2: STMs (STT_ORDER = 1) or STTs about x0_ref1; data chi2 along g_delta (exact /
      plain STT / chart STT).
   5) MCMC in chart coordinates; chain saved to chain.npz (LOAD_CHAIN replots a saved run).
@@ -90,7 +89,6 @@ import numpy as np
 import spiceypy as spice
 import trimesh
 from scipy.integrate import solve_ivp
-from scipy.optimize import least_squares, minimize_scalar
 from scipy.stats import norm, uniform
 
 import MCMCPlots
@@ -105,7 +103,6 @@ from extra.scenario_ISL_SH2 import (
     _Rz_act,
     _Tee,
     derived_quantities,
-    exact_map_chart,
     gmm_prediction,
     isl_residuals,
     make_bennu_rotation_matrix,
@@ -152,36 +149,6 @@ def spice_states(target, et0, tau, frame, abcorr, center):
 # ============================================================
 
 
-def valley_step(x, cost_many, chart, max_deg=60.0, n_grid=61):
-    """
-    Angle delta minimizing the exact MAP cost of g_delta(x) (grid over [-max_deg, max_deg],
-    then a bounded 1-D refinement). On short arcs the data cost is nearly flat along g_delta
-    (OREx close to the spin axis) while Gauss-Newton only crawls along it: this is the step it
-    cannot make.
-
-    Parameters
-    ----------
-    cost_many : callable
-        Exact MAP cost of absolute states, (n, 12) -> (n,).
-
-    Returns
-    -------
-    x_new : ndarray, shape (12,)
-    delta : float
-    """
-    grid = np.deg2rad(np.linspace(-max_deg, max_deg, n_grid))
-    c_grid = cost_many(chart.rotate(np.tile(x, (grid.size, 1)), grid))
-    a0, h = grid[np.argmin(c_grid)], grid[1] - grid[0]
-    res = minimize_scalar(
-        lambda a: float(cost_many(chart.rotate(x[None], a))[0]),
-        bounds=(a0 - h, a0 + h),
-        method="bounded",
-        options=dict(xatol=1e-8),
-    )
-    a = float(res.x) if res.fun < c_grid.min() else float(a0)
-    return chart.rotate(x, a), a
-
-
 def curvature_metric(a, b):
     """
     Bend of b along a: least squares b = c0 + c1 a + c2 a^2 on standardized samples, returned
@@ -210,6 +177,10 @@ if __name__ == "__main__":
     CASE = "2a"
     STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice; folder + _stt2)
     USE_SYMMETRY_CHART = True  # False: sample dx with the plain STT (fails along the crescent)
+    # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
+    # (Bierman U-D, one scalar measurement at a time); same MAP and covariance. "ud" adds
+    # "_ud" to the results folder.
+    BATCH_SOLVER = "srif"
     # "uniform": boxes on C20, C21, S21, C22, S22 (folder + _uniform); set by CASE
     SH_PRIOR = "uniform" if CASE == "2b" else "gaussian"
     UNIFORM_HALF_WIDTH = 3.0  # box half-width in prior sigmas, centered on the a priori x0_ref
@@ -273,10 +244,8 @@ if __name__ == "__main__":
     # Integration (truth, batch, STTs)
     ivp = dict(method="DOP853", rtol=1e-11, atol=1e-14)
     STAGE1_ARCS_H = [2.0, 4.0, 8.0, 16.0, ARC_HOURS]  # batch continuation (see Stage 1)
-    STAGE1_ROUNDS = 3  # max valley step + Gauss-Newton rounds per arc
-    STAGE1_ITERS = 10  # max Gauss-Newton iterations per round
-    STAGE1_STT_ITERS = 10  # max STT re-centering iterations (end of Stage 1)
-    STAGE1_STT_FTOL = 1e-7  # stop when the exact MAP cost decreases by less (relative)
+    STAGE1_ITERS = 40  # max SRIF iterations per arc
+    STAGE1_TOL = 1e-6  # stop when the step is shorter (norm in km, km/s, ...; 1 mm)
 
     # MCMC
     n_walkers = 96
@@ -335,8 +304,9 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
     # Folder name: case<CASE>_bennu_popper(_uniform)_YYMMDDHHMMSS, e.g.
-    # results/case2a_bennu_popper_261121202652 (+ _circular without the release error,
-    # + _stt<order> with STT_ORDER > 1, + _plain without the symmetry chart)
+    # results/case2a_bennu_popper_261122091846 (+ _circular without the release error,
+    # + _stt<order> with STT_ORDER > 1, + _plain without the symmetry chart, + _ud with the
+    # U-D batch)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -348,6 +318,7 @@ if __name__ == "__main__":
             + ("" if DELIVERY else "_circular")
             + (f"_stt{STT_ORDER}" if STT_ORDER > 1 else "")
             + ("" if USE_SYMMETRY_CHART else "_plain")
+            + ("_ud" if BATCH_SOLVER == "ud" else "")
         )
     )
     # Screen output also goes to run.log in the results folder
@@ -587,19 +558,22 @@ if __name__ == "__main__":
         return float(exact_map_cost_many(X)[0])
 
     # --------------------------
-    # Stage 1: Gauss-Newton batch (STMs) on growing arcs
+    # Stage 1: batch SRIF (STMs) on growing arcs
     # --------------------------
     # From the a priori state (~100 m and ~2 cm/s off on a 0.4 km, 9 cm/s orbit) Gauss-Newton
-    # on the full arc stalls: each arc of STAGE1_ARCS_H starts from the solution of the previous
-    # one, with the priors kept centered on x0_ref. The MAP sits in a curved valley close to
-    # g_delta (OREx near the spin axis) on which Gauss-Newton crawls; each round first moves to
-    # the minimum of the exact MAP cost along g_delta (valley_step: the large rotations of the
-    # short arcs), then iterates Gauss-Newton. The valley is not exactly g_delta, so Stage 1
-    # ends with the exact MAP / STT re-centering below, which follows it (tens of degrees).
-    print("\n[Stage 1] Gauss-Newton batch (first-order STMs, LM, scaled) on growing arcs...")
-    x_start = x0_ref.copy()
+    # on the full arc does not converge: each arc of STAGE1_ARCS_H starts from the solution of
+    # the previous one, with the priors kept centered on x0_ref. The MAP sits in a curved valley
+    # close to g_delta (OREx near the spin axis), ~10 deg of rotation away from the 8 h solution.
+    # Each iteration solves the SRIF for the step in symmetry-chart coordinates theta (delta
+    # along g_delta + the slice), x += to_deviation(theta), so that the step follows the valley
+    # (in Cartesian coordinates Gauss-Newton crawls along it). The step is halved until it
+    # lowers the exact MAP cost (BatchLSQ.gn_with_stm). The chart is used here whatever
+    # USE_SYMMETRY_CHART (only a parametrization of the step: same MAP and covariance).
+    print(f"\n[Stage 1] Batch {BATCH_SOLVER.upper()} (first-order STMs, Gauss-Newton iterations) on growing arcs...")
+    x0_ref1 = x0_ref.copy()
     for T_arc in STAGE1_ARCS_H:
         k = int(np.searchsorted(tau, T_arc * 3600.0 + 1e-6))
+        print(f"\n[Stage 1] arc 0-{tau[k - 1] / 3600:.1f} h ({int(vis_mask[:k].sum())} visible)")
         batch = BatchLSQ(
             propagator=prop1,
             tau=tau[:k],
@@ -610,105 +584,20 @@ if __name__ == "__main__":
             measurement=range_rangerate_and_partials,
             rel_dim=6,
         )
-        for rnd in range(STAGE1_ROUNDS):
-            x_prev = x_start.copy()
-            x_start, a_val = valley_step(
-                x_start, lambda X, k=k: exact_map_cost_many(X, k), SymmetryChart(x_start, pole_i)
-            )
-            print(
-                f"\n[Stage 1] arc 0-{tau[k - 1] / 3600:.1f} h ({int(vis_mask[:k].sum())} visible), round "
-                f"{rnd + 1}: valley step {np.rad2deg(a_val):+.4f} deg"
-            )
-            x_start, delta_hat1, cov1 = batch.gn_with_stm(
-                x0_ref=x_start,
-                priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x_start, prior_sigma)],
-                max_iter=STAGE1_ITERS,
-                tol=1e-10,
-                rtol=ivp["rtol"],
-                atol=ivp["atol"],
-                method=ivp["method"],
-                verbose=True,
-                scaled=True,
-                lm=True,
-                ftol=1e-7,
-            )
-            if np.max(np.abs(x_start - x_prev) / prior_sigma) < 1e-6:
-                print("[Stage 1] converged (round change < 1e-6 prior sigma)")
-                break
-
-    # STT re-centering (as scenario_ISL_SH2.py): MAP of the order-STT_ORDER surrogate about the
-    # current state in chart coordinates, accepted when it lowers the exact MAP cost (step
-    # halving otherwise); the STTs are then recomputed about the new state. With STMs only
-    # (STT_ORDER = 1) it would be Gauss-Newton in chart coordinates, which crawls:
-    # exact_map_chart (trust-region least squares on the exact residuals) is used instead.
-    def exact_residuals_many(X):
-        """Exact measurement and prior residuals (n, 2N + 12) of absolute states X (n, 12)."""
-        X = np.atleast_2d(X)
-        traj = gravity1.propagate_many(X, tau, **ivp)
-        r = isl_residuals(traj, orex_state, y_obs, sigma, obs_weights)
-        return np.concatenate([r, (X - x0_ref) / prior_sigma], axis=-1)
-
-    if STT_ORDER == 1:
-        # STMs only: the re-centering below would be Gauss-Newton in chart coordinates, which
-        # crawls along the curved MAP valley; exact trust-region least squares instead.
-        print("\n[Stage 1] Exact MAP (trust-region least squares in chart coordinates, full arc)...")
-        x_c, cost_c = exact_map_chart(
-            x_start,
-            exact_residuals_many,
-            lambda x: SymmetryChart(x, pole_i) if USE_SYMMETRY_CHART else IdentityChart(x),
-            cov1,
+        x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
+            x0_ref=x0_ref1,
+            priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x0_ref1, prior_sigma)],
+            max_iter=STAGE1_ITERS,
+            tol=STAGE1_TOL,
+            rtol=ivp["rtol"],
+            atol=ivp["atol"],
+            method=ivp["method"],
+            verbose=True,
+            solver=BATCH_SOLVER,
+            make_chart=lambda x: SymmetryChart(x, pole_i),
         )
-    else:
-        print(f"\n[Stage 1] STT re-centering (order {STT_ORDER}, full arc)...")
-        x_c, cost_c = x_start.copy(), exact_map_cost(x_start)
-        for it in range(1, STAGE1_STT_ITERS + 1):
-            sol_c, stts_c = prop2.propagate(x0=x_c, t_eval=tau, **ivp)
-            stts_c6 = {k: np.asarray(v)[:, :6] for k, v in stts_c.items()}
-            chart_c = SymmetryChart(x_c, pole_i) if USE_SYMMETRY_CHART else IdentityChart(x_c)
-            J_c = np.linalg.inv(chart_c.jacobian_at_ref())
-            P_c = J_c @ cov1 @ J_c.T
-            L_c = np.linalg.cholesky(0.5 * (P_c + P_c.T))  # theta = L_c z: z of order one
+        print(f"[Stage 1] exact MAP cost on the arc: {exact_map_cost_many(x0_ref1, k)[0]:.6f}")
 
-            def surrogate_map_residuals(z):
-                th = L_c @ z
-                dx6 = prop2.propagate_deviation(sol_c, stts_c6, chart_c.slice_deviation(th))[1]
-                r = isl_residuals(chart_c.rotate(dx6, chart_c.angle(th)), orex_state, y_obs, sigma, obs_weights)
-                return np.concatenate([r, (chart_c.to_deviation(th) + x_c - x0_ref) / prior_sigma])
-
-            res_c = least_squares(surrogate_map_residuals, np.zeros(12), method="lm", xtol=1e-12, ftol=1e-12, gtol=1e-12)
-            a = 1.0
-            while a > 1e-3:
-                x_try = x_c + chart_c.to_deviation(L_c @ (a * res_c.x))
-                cost_try = exact_map_cost(x_try)
-                if cost_try < cost_c:
-                    break
-                a *= 0.5
-            if a <= 1e-3:
-                print(f"[Stage 1] re-centering {it}: no exact decrease from {cost_c:.6f}: converged")
-                break
-            print(
-                f"[Stage 1] re-centering {it}: surrogate MAP cost {2.0 * res_c.cost:.6f}, exact "
-                f"{cost_c:.6f} -> {cost_try:.6f} (step x {a:g}, |z| = {a * np.linalg.norm(res_c.x):.2e}, "
-                f"delta {np.rad2deg(chart_c.angle(L_c @ (a * res_c.x))):+.3f} deg)"
-            )
-            x_c, cost_dec, cost_c = x_try, cost_c - cost_try, cost_try
-            if cost_dec < STAGE1_STT_FTOL * cost_c:
-                break
-
-    # Batch covariance at the MAP (one LM iteration on the full arc: a noise-level step)
-    print("\n[Stage 1] Covariance at the MAP (BatchLSQ, full arc)")
-    x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
-        x0_ref=x_c,
-        priors=[norm(loc=m, scale=s) for m, s in zip(x0_ref - x_c, prior_sigma)],
-        max_iter=1,
-        tol=1e-10,
-        rtol=ivp["rtol"],
-        atol=ivp["atol"],
-        method=ivp["method"],
-        verbose=True,
-        scaled=True,
-        lm=True,
-    )
     print(f"[Stage 1] exact MAP cost at ref1: {exact_map_cost(x0_ref1):.6f}")
     sd1 = np.sqrt(np.diag(cov1))
     print("\n[Stage 1] batch sigma:", sd1)

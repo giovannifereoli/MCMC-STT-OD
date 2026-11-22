@@ -1,29 +1,48 @@
 """
-Stage-1 batch least squares (MAP) shared by the scenario scripts.
+Stage-1 batch MAP estimate shared by the scenario scripts: iterated batch square-root
+information filter (SRIF), or the same batch processed with the U-D covariance factorization.
 
 Measurements are stacked pairs y = [a0, b0, a1, b1, ...] (RA/Dec, or range/range rate), one pair
 per epoch of `tau`, with sigmas (sigma_a, sigma_b) and per-row visibility weights. The model is
 a function of the relative state x[:, :rel_dim] - sc_state[:, :rel_dim] that returns
 (a, b, da/drel, db/drel).
 
-Solvers (all return x0_ref1, delta_hat1, cov1 with cov1 = inf outside update_idx):
+gn_with_stm(...) iterates on the reference x0 (Gauss-Newton with step halving: no damping term,
+no scaling). Each iteration propagates x0 with its STMs, maps the whitened measurement rows to
+the epoch (H_k Phi(t_k, t0)) and solves the linearized MAP problem for the step d,
 
-- gn_with_stm(...)                         Gauss-Newton with first-order STMs, unscaled lstsq
-                                           solve (the original Bennu batch).
-- gn_with_stm(..., lm=True)                same, with the Levenberg-Marquardt safeguard on the
-                                           exact MAP cost (the original Ryugu batch).
-- gn_with_stm(..., scaled=True)            column-scaled GN (solve in prior-sigma units) with step
-                                           halving on the exact MAP cost. The unscaled lstsq drops
-                                           directions whose singular values fall below its cutoff
-                                           (prior sigmas span ~17 decades in the SPH2 cases), so
-                                           the plain GN can stop short along a weakly observable
-                                           valley; the scaled solve keeps them.
-- gn_with_stm(..., lm=True, scaled=True)   LM safeguard with the scaled solve.
-- full_nonlinear_lsq(...)                  SciPy least_squares on the exact model.
+    min ||r - J d||^2 + ||R0 (d - d0)||^2,   R0 = diag(1 / prior sigma),  d0 = prior mean - delta,
+
+(delta = sum of the previous steps: the prior stays anchored to the initial reference) with one
+of two square-root solvers (Bierman 1977; Tapley, Schutz & Born 2004, ch. 5):
+
+- solver="srif" (default): batch SRIF. The a priori information array [R0 | R0 d0] is updated
+  epoch by epoch with Householder triangularizations of [R z; J_k r_k]; then R d = z by back
+  substitution and P = R^-1 R^-T.
+- solver="ud": the same batch, one scalar measurement at a time, with Bierman's U-D measurement
+  update of P = U D U^T from P0 = diag(prior sigma^2). The measurements are mapped to the epoch,
+  so there is no time update.
+
+Both work on the raw parameters. Neither forms the normal matrix, and by default neither
+truncates small singular values, so directions whose prior sigmas are many decades apart (0.1 km for r0, 1e-17 for C21)
+are all kept without column scaling. The covariance is the one of the last linearization.
+
+rank_cutoff=True (SRIF only) gives the same solution as the batch before the SRIF
+(numpy.linalg.lstsq of the stacked system, LAPACK gelsd): R d = z is solved with the SVD of R
+(the same singular values as the stacked system), dropping those below eps * max(m, n) times the
+largest (m = measurement + prior rows), as the default rcond of lstsq does. In raw units this
+drops the least-informed direction (case 1a: singular values from 3e2 to 3e16), so the solution
+is the minimum-norm one, not the full MAP. The covariance is R^-1 R^-T in both cases.
+
+The step is x0 += d when that lowers the exact MAP cost, else d/2, d/4, ... (Hartley 1961): the
+direction is always the SRIF one. halving=False takes the full step every time (the iterated
+batch before the SRIF). Optionally (make_chart) the step is solved for in curvilinear chart
+coordinates theta, x0 += to_deviation(theta), so that it follows a curved valley (the spin-pole
+rotation of case 2, extra/scenario_ISL_SH2.SymmetryChart).
 """
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.linalg import solve_triangular
 
 
 def _prior_moments(priors, n_upd):
@@ -42,20 +61,101 @@ def _embed_cov(cov_upd, update_idx, n):
     return cov_full
 
 
-def _column_scale(A, prior_sig):
-    """Solve-for units: prior sigma where the prior is finite, else 1 / column norm of A."""
-    col = np.sqrt(np.sum(A**2, axis=0))
-    col = np.where(col > 0.0, col, 1.0)
-    return np.where(np.isfinite(prior_sig), prior_sig, 1.0 / col)
+def srif_solve(R0, z0, J, r, row_blocks=None, rcond=None):
+    """
+    Batch SRIF: least-squares solution of [R0; J] d ~ [z0; r].
+
+    The information array [R z] starts at [R0 z0] and takes the rows of each block with a
+    Householder triangularization (LAPACK geqrf through numpy.linalg.qr), keeping the n x (n+1)
+    upper block. R d = z is solved by back substitution, or, with rcond, with the SVD of R
+    keeping the singular values above rcond times the largest (minimum-norm solution).
+
+    Parameters
+    ----------
+    R0 : ndarray, shape (n, n)
+        A priori square-root information matrix (zeros: no a priori information).
+    z0 : ndarray, shape (n,)
+        A priori information vector, R0 d0.
+    J, r : ndarray, shapes (m, n), (m,)
+        Whitened measurement rows (mapped to the epoch) and residuals.
+    row_blocks : list of index arrays, or None
+        Rows processed together (one block per epoch); None: all rows in one block.
+    rcond : float or None
+        Relative singular-value cutoff of the solve (None: full rank).
+
+    Returns
+    -------
+    d : ndarray, shape (n,)
+    P : ndarray, shape (n, n)
+        R^-1 R^-T.
+    """
+    n = R0.shape[0]
+    Rz = np.column_stack([R0, z0])
+    for rows in [np.arange(len(r))] if row_blocks is None else row_blocks:
+        Rz = np.linalg.qr(np.vstack([Rz, np.column_stack([J[rows], r[rows]])]), mode="r")[:n]
+    R, z = Rz[:, :n], Rz[:, n]
+    if np.any(np.diag(R) == 0.0):
+        raise np.linalg.LinAlgError("SRIF: singular information matrix (unobservable parameter with a flat prior)")
+    R_inv = solve_triangular(R, np.eye(n))
+    if rcond is None:
+        return R_inv @ z, R_inv @ R_inv.T
+    U, sv, Vt = np.linalg.svd(R)
+    keep = sv > rcond * sv[0]
+    return Vt[keep].T @ ((U[:, keep].T @ z) / sv[keep]), R_inv @ R_inv.T
 
 
-def _inv_normal(M):
-    """(A^T A)^-1, pseudoinverse if singular."""
-    try:
-        return np.linalg.inv(M)
-    except np.linalg.LinAlgError:
-        print("[WARNING] Covariance matrix is singular, using pseudoinverse")
-        return np.linalg.pinv(M)
+def udu_factor(P):
+    """U D U^T factorization of a symmetric positive definite P (U unit upper triangular)."""
+    P = np.array(P, dtype=float)
+    n = P.shape[0]
+    U, D = np.eye(n), np.zeros(n)
+    for j in range(n - 1, -1, -1):
+        D[j] = P[j, j]
+        U[:j, j] = P[:j, j] / D[j]
+        P[:j, :j] -= D[j] * np.outer(U[:j, j], U[:j, j])
+    return U, D
+
+
+def ud_solve(P0, d0, J, r):
+    """
+    Bierman U-D measurement updates: least-squares solution of the same problem as srif_solve,
+    processing the rows of J one at a time (unit-variance scalar measurements).
+
+    Parameters
+    ----------
+    P0 : ndarray, shape (n,) or (n, n)
+        A priori covariance (its diagonal when 1-D: then U = I, D = P0); must be finite.
+    d0 : ndarray, shape (n,)
+        A priori estimate.
+    J, r : ndarray, shapes (m, n), (m,)
+        Whitened measurement rows (mapped to the epoch) and residuals.
+
+    Returns
+    -------
+    d : ndarray, shape (n,)
+    P : ndarray, shape (n, n)
+        U D U^T.
+    """
+    n = d0.size
+    P0 = np.asarray(P0, dtype=float)
+    U, D = (np.eye(n), P0.copy()) if P0.ndim == 1 else udu_factor(P0)
+    d = np.array(d0, dtype=float)
+    for h, y in zip(J, r):
+        if not np.any(h):
+            continue
+        f = U.T @ h
+        v = D * f
+        b = np.zeros(n)  # unnormalized gain
+        alpha = 1.0  # innovation variance, built up column by column
+        for j in range(n):
+            alpha_prev, alpha = alpha, alpha + v[j] * f[j]
+            D[j] *= alpha_prev / alpha
+            u_j = U[:j, j].copy()
+            U[:j, j] = u_j - (f[j] / alpha_prev) * b[:j]
+            b[:j] += v[j] * u_j
+            b[j] = v[j]
+        d = d + b * ((y - h @ d) / alpha)
+    return d, (U * D) @ U.T
 
 
 class BatchLSQ:
@@ -63,7 +163,7 @@ class BatchLSQ:
     Batch MAP estimate of the initial state (and parameters) from one pass of measurements.
 
     propagator   STTPropagatorND-like: propagate(x0, t_eval, ...) -> (sol, stts) with stts[1]
-                 the STMs; propagate_state_only(x0, t_eval, ...) -> sol
+                 the STMs
     tau          (N,) epochs [s since start]
     sc_state     (N, >=rel_dim) observer state at tau, same frame as the propagated state
     y_obs        (2N,) stacked measurement pairs
@@ -100,6 +200,10 @@ class BatchLSQ:
         self.w[0::2] = self.sigma[0]
         self.w[1::2] = self.sigma[1]
 
+        # SRIF row blocks: the two rows of each epoch with a nonzero weight
+        w2 = np.asarray(obs_weights, dtype=float).reshape(-1, 2)
+        self.epoch_rows = [np.array([2 * k, 2 * k + 1]) for k in np.flatnonzero(np.any(w2 != 0.0, axis=1))]
+
     # ------------------------------------------------------------------ model pieces
 
     def _model(self, x):
@@ -129,53 +233,17 @@ class BatchLSQ:
         J[1::2, :] /= self.sigma[1]
         return J * self.obs_weights[:, None]
 
-    @staticmethod
-    def _prior_residuals(delta_total, update_idx, prior_mean, prior_sig):
-        """Prior rows of the residual, anchored to the initial reference (finite priors only)."""
-        finite = np.isfinite(prior_sig)
-        return -(delta_total[update_idx][finite] - prior_mean[finite]) / prior_sig[finite]
-
-    def _linearize(self, x0, delta_total, update_idx, prior_mean, prior_sig, prop_kw, check=False):
-        """
-        Propagate x0 with its STMs and build the stacked MAP system A d ~ b (measurement rows,
-        then prior rows). Returns (r, A, b), r = measurement rows of b. With check=True a failed
-        propagation returns None.
-        """
+    def _linearize(self, x0, update_idx, prop_kw):
+        """Propagate x0 with its STMs: whitened residuals r (2N,) and Jacobian J (2N, n_upd)."""
         n = x0.size
         N = len(self.tau)
         sol, stts = self.propagator.propagate(x0=x0, t_eval=self.tau, **prop_kw)
-        if check and (sol.status != 0 or sol.y.shape[1] != N):
-            return None
+        if sol.status != 0 or sol.y.shape[1] != N:
+            raise RuntimeError(f"propagation of the reference failed (status {sol.status}): the iterate diverged")
         x = sol.y[:n, :].T
         Phi = np.asarray(stts[1], dtype=float).reshape(N, n, n)  # Phi(t_k, t0)
-
         y0, y1, dy0, dy1 = self._model(x)
-        r = self._residuals(y0, y1)
-        J = self._jacobian(dy0, dy1, Phi, update_idx)
-
-        rows, rhs = [J], [r]
-        finite = np.isfinite(prior_sig)
-        if np.any(finite):
-            Wp = np.diag(1.0 / prior_sig[finite])
-            Jp = np.zeros((Wp.shape[0], len(update_idx)))
-            Jp[:, finite] = Wp
-            rows.append(Jp)
-            rhs.append(self._prior_residuals(delta_total, update_idx, prior_mean, prior_sig))
-        return r, np.vstack(rows), np.hstack(rhs)
-
-    def _exact_map_cost(self, x0, delta_total, update_idx, prior_mean, prior_sig, prop_kw):
-        """Nonlinear MAP cost ||r||^2 + ||prior||^2 (state-only propagation; inf if it fails)."""
-        sol = self.propagator.propagate_state_only(
-            x0=x0, t_eval=self.tau, show_progress=False, **prop_kw
-        )
-        if sol.status != 0 or sol.y.shape[1] != len(self.tau):
-            return np.inf
-        x = sol.y[: x0.size, :].T
-        y0, y1, _, _ = self._model(x)
-        c = np.sum(self._residuals(y0, y1) ** 2)
-        if np.any(np.isfinite(prior_sig)):
-            c += np.sum(self._prior_residuals(delta_total, update_idx, prior_mean, prior_sig) ** 2)
-        return float(c) if np.isfinite(c) else np.inf
+        return self._residuals(y0, y1), self._jacobian(dy0, dy1, Phi, update_idx)
 
     # ------------------------------------------------------------------ Gauss-Newton
 
@@ -190,375 +258,124 @@ class BatchLSQ:
         atol=1e-12,
         method="LSODA",
         verbose=True,
-        scaled=False,
-        lm=False,
-        ftol=0.0,
-        max_lm_tries=12,
-        max_halvings=12,
-        pred_tol=1e-6,
-        cost_tol=1e-5,
+        solver="srif",
+        make_chart=None,
+        max_halvings=20,
+        rank_cutoff=False,
+        halving=True,
     ):
         """
-        Gauss-Newton outer loop. Each iteration:
-        1) propagate at current x0_ref (state + STM)
-        2) build residual vector r and Jacobian J using STM chain rule
-        3) solve linearized MAP: min ||r - J d||^2 + ||(d - m)/s||^2
-        4) update x0_ref += embed(d)
+        Iterated batch (Gauss-Newton). Each iteration:
+        1) whitened residuals r and Jacobian J at t0 of the current x0_ref (STM chain rule)
+        2) linearized MAP step d: srif_solve (solver="srif") or ud_solve (solver="ud")
+        3) stop when the step norm < tol (the step is applied)
+        4) x0_ref += embed(d), the step halved until the MAP cost (exact: the trial reference is
+           propagated, and its r and J are those of the next iteration) decreases; at most
+           max_halvings halvings, then stop
 
-        priors      list of scipy.stats.norm on the deltas about x0_ref (length n_upd), or None
+        priors      list of scipy.stats.norm on the deltas about the initial x0_ref (length n_upd),
+                    or None (flat; SRIF only)
         update_idx  indices of the solve-for deltas (default: all)
-        tol         stop when the unscaled step norm is below tol (plain GN and LM)
-        scaled      column-scaled solve (prior-sigma units) and covariance; without lm, the step
-                    is halved (up to max_halvings times) until the exact MAP cost decreases, and
-                    the iteration stops when the predicted decrease is < pred_tol or a full step
-                    gains < cost_tol
-        lm          Levenberg-Marquardt safeguard (see _gn_lm); ftol = relative MAP-cost decrease
-                    of an accepted step below which it stops (0 = off)
+        make_chart  None, or make_chart(x) -> chart about x (e.g. SymmetryChart of
+                    extra/scenario_ISL_SH2.py: jacobian_at_ref(), to_deviation(theta)). The step
+                    is then solved for in the chart coordinates theta (J -> J dx/dtheta, prior
+                    linearized the same way) and applied as x0_ref += to_deviation(theta);
+                    the covariance is mapped back to x. Needs all parameters solved for.
+        rank_cutoff True: solve R d = z with the default singular-value cutoff of numpy.linalg.lstsq
+                    (eps * max(m, n), m = 2N measurement rows + finite prior rows), as the batch
+                    before the SRIF did (SRIF only)
+        halving     False: always take the full step (no MAP-cost check), as the batch before the
+                    SRIF did
+
+        Returns x0_ref1, delta_hat1 (sum of the steps), cov1 (n x n, inf outside update_idx).
         """
+        if solver not in ("srif", "ud"):
+            raise ValueError(f"solver = {solver!r}: 'srif' or 'ud'")
         x0_ref = np.asarray(x0_ref, dtype=float).copy()
         n = x0_ref.size
         if update_idx is None:
             update_idx = np.arange(n)
         update_idx = np.asarray(update_idx, dtype=int)
+        if make_chart is not None and not np.array_equal(update_idx, np.arange(n)):
+            raise ValueError("make_chart needs update_idx = all parameters")
         prior_mean, prior_sig = _prior_moments(priors, len(update_idx))
+        finite = np.isfinite(prior_sig)
+        if solver == "ud" and not np.all(finite):
+            raise ValueError("solver = 'ud' needs a finite prior sigma on every solve-for parameter")
+        if rank_cutoff and solver != "srif":
+            raise ValueError("rank_cutoff needs solver = 'srif'")
+        # default rcond of numpy.linalg.lstsq on the stacked [J; prior rows] system
+        rcond = np.finfo(float).eps * max(2 * len(self.tau) + int(finite.sum()), len(update_idx)) if rank_cutoff else None
+        R0 = np.diag(np.where(finite, 1.0 / prior_sig, 0.0))
         prop_kw = dict(rtol=rtol, atol=atol, method=method)
-        args = (x0_ref, update_idx, prior_mean, prior_sig, prop_kw, max_iter, verbose)
+        tag = solver.upper()
 
-        if lm:
-            x0_ref1, delta_total, cov_upd, r_post = self._gn_lm(
-                *args, tol=tol, ftol=ftol, max_lm_tries=max_lm_tries, scaled=scaled
-            )
-        elif scaled:
-            x0_ref1, delta_total, cov_upd, r_post = self._gn_halving(
-                *args, max_halvings=max_halvings, pred_tol=pred_tol, cost_tol=cost_tol
-            )
-        else:
-            x0_ref1, delta_total, cov_upd, r_post = self._gn_plain(*args, tol=tol)
-
-        cov_full = _embed_cov(cov_upd, update_idx, n)
-        # Post-fit residuals are plotted by the scenario scripts (MCMCPlots.plot_mcmc_residuals),
-        # batch and MCMC MAP together, so no batch-only figure is produced here.
-        return x0_ref1, delta_total, cov_full
-
-    def _gn_plain(self, x0_ref, update_idx, prior_mean, prior_sig, prop_kw, max_iter, verbose, tol):
-        """Plain GN: unscaled lstsq solve, full steps, stop when the step norm < tol."""
-        n = x0_ref.size
-        delta_total = np.zeros(n)
-        for it in range(1, max_iter + 1):
-            r, A, b = self._linearize(x0_ref, delta_total, update_idx, prior_mean, prior_sig, prop_kw)
-            d_upd, *_ = np.linalg.lstsq(A, b, rcond=None)
-
+        def embed(d_upd):
             d_full = np.zeros(n)
             d_full[update_idx] = d_upd
-            x0_ref = x0_ref + d_full
-            delta_total = delta_total + d_full
+            return d_full
 
-            step_norm = np.linalg.norm(d_upd)
-            rms = np.sqrt(np.mean(r**2))
-            if verbose:
-                print(f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}")
-            if step_norm < tol:
-                break
+        def map_cost(r, delta):
+            d0 = prior_mean - delta[update_idx]
+            return r @ r + np.sum((d0[finite] / prior_sig[finite]) ** 2)
 
-        # covariance (A^T A)^-1 of the last linearization
-        cov_upd = np.diag(prior_sig**2) if max_iter == 0 else _inv_normal(A.T @ A)
-        return x0_ref, delta_total, cov_upd, None
-
-    def _gn_lm(
-        self,
-        x0_ref,
-        update_idx,
-        prior_mean,
-        prior_sig,
-        prop_kw,
-        max_iter,
-        verbose,
-        tol,
-        ftol,
-        max_lm_tries,
-        scaled,
-    ):
-        """
-        GN with a Levenberg-Marquardt safeguard. Each step is checked against the exact MAP cost;
-        if the cost does not decrease, the step is damped by appending the rows
-        sqrt(lam) * diag(1/s) d = 0, i.e. (A^T A + lam P0^-1) d = A^T b with P0 the prior
-        covariance (Marquardt column norm where the prior is flat), and lam is raised x10 until
-        it does. lam is relaxed /10 after each accepted step and dropped to 0 (pure GN) once
-        negligible. Stops on step norm < tol, or relative MAP-cost decrease < ftol.
-
-        scaled: solve in the units S = 1/d_metric, where the damping rows become sqrt(lam) I:
-        (As^T As + lam I) u = As^T b, d = S u. Same damped problem, full-rank solve.
-        """
-        n = x0_ref.size
-        n_upd = len(update_idx)
         delta_total = np.zeros(n)
-        finite = np.isfinite(prior_sig)
-
-        lam = 0.0
-        cost_cur = None
+        cov_upd = np.diag(prior_sig**2)
+        r, J = self._linearize(x0_ref, update_idx, prop_kw)
+        cost = map_cost(r, delta_total)
         for it in range(1, max_iter + 1):
-            r, A, b = self._linearize(x0_ref, delta_total, update_idx, prior_mean, prior_sig, prop_kw)
-            if cost_cur is None:
-                cost_cur = float(np.sum(b**2))
-
-            # damping metric: inverse prior sigma (Marquardt column norm where the prior is flat)
-            d_metric = np.where(finite, 1.0 / prior_sig, np.sqrt(np.sum(A**2, axis=0)))
-            lam_ref = float(np.max(np.sum(A**2, axis=0) / d_metric**2))
-            if scaled:
-                S = _column_scale(A, prior_sig)
-                As = A * S
-                AtA_s, Atb_s = As.T @ As, As.T @ b
-
-            # pure GN first; damp until the nonlinear MAP cost decreases
-            accepted = converged = False
-            for _ in range(max_lm_tries):
-                if scaled:
-                    M = AtA_s + lam * np.eye(n_upd) if lam > 0.0 else AtA_s
-                    d_upd = S * np.linalg.solve(M, Atb_s)
+            d0 = np.where(finite, prior_mean - delta_total[update_idx], 0.0)
+            if make_chart is None:
+                if solver == "srif":
+                    d_upd, cov_upd = srif_solve(R0, R0 @ d0, J, r, self.epoch_rows, rcond=rcond)
                 else:
-                    if lam > 0.0:
-                        A_aug = np.vstack([A, np.sqrt(lam) * np.diag(d_metric)])
-                        b_aug = np.hstack([b, np.zeros(n_upd)])
-                    else:
-                        A_aug, b_aug = A, b
-                    d_upd, *_ = np.linalg.lstsq(A_aug, b_aug, rcond=None)
-
-                d_full = np.zeros(n)
-                d_full[update_idx] = d_upd
-
-                if lam == 0.0 and np.linalg.norm(d_upd) < tol:
-                    # converged: noise-level GN step, accepted without a cost check
-                    accepted = converged = True
-                    cost_try = cost_cur
-                    break
-
-                cost_try = self._exact_map_cost(
-                    x0_ref + d_full, delta_total + d_full, update_idx, prior_mean, prior_sig, prop_kw
-                )
-                if cost_try < cost_cur:
-                    accepted = True
-                    break
-                lam = 1e-3 * lam_ref if lam == 0.0 else 10.0 * lam
-
-            if not accepted:
-                print("\n[GN] Levenberg-Marquardt could not decrease the MAP cost: stopping.")
-                break
-
-            x0_ref = x0_ref + d_full
-            delta_total = delta_total + d_full
-
-            step_norm = np.linalg.norm(d_upd)
-            rms = np.sqrt(np.mean(r**2))
-            rel_dec = (cost_cur - cost_try) / cost_cur
-            if verbose:
-                print(
-                    f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  step_norm={step_norm:.3e}  "
-                    f"MAP cost: {cost_cur:.4e} -> {cost_try:.4e}  (LM lam={lam:.1e})"
-                )
-            cost_cur = cost_try
-
-            # relax the damping after a successful step
-            lam = lam / 10.0 if lam > 1e-9 * lam_ref else 0.0
-
-            if converged or step_norm < tol:
-                break
-            if rel_dec < ftol:
-                if verbose:
-                    print(
-                        f"[GN] MAP cost decreased by {100 * rel_dec:.2f}% < "
-                        f"{100 * ftol:.0f}%: stopping."
-                    )
-                break
-
-        # covariance (A^T A)^-1 of the last linearization
-        if max_iter == 0:
-            cov_upd = np.diag(prior_sig**2)
-        elif scaled:
-            cov_upd = S[:, None] * _inv_normal(AtA_s) * S[None, :]
-        else:
-            cov_upd = _inv_normal(A.T @ A)
-        return x0_ref, delta_total, cov_upd, None
-
-    def _gn_halving(
-        self,
-        x0_ref,
-        update_idx,
-        prior_mean,
-        prior_sig,
-        prop_kw,
-        max_iter,
-        verbose,
-        max_halvings,
-        pred_tol,
-        cost_tol,
-    ):
-        """
-        Column-scaled GN with step halving. Solve (As^T As) u = As^T b with As = A diag(S), S the
-        prior sigmas (1/column norm where the prior is flat), d = S u. Try the full step and halve
-        it until the exact MAP cost ||b||^2 decreases; each trial is a propagation with STMs, so
-        the accepted one is the next linearization. Stop when the predicted decrease of the full
-        step is < pred_tol, or a full step gains < cost_tol.
-        """
-        n = x0_ref.size
-        delta_total = np.zeros(n)
-        prop_kw_quiet = dict(prop_kw, show_progress=False)
-
-        r, A, b = self._linearize(x0_ref, delta_total, update_idx, prior_mean, prior_sig, prop_kw)
-        cost = float(b @ b)
-        if verbose:
-            print(f"\n[GN scaled] start: MAP cost {cost:.4e}")
-
-        for it in range(1, max_iter + 1):
-            S = _column_scale(A, prior_sig)
-            As = A * S
-            u = np.linalg.solve(As.T @ As, As.T @ b)
-            pred = float(b @ b - np.sum((b - As @ u) ** 2))
-            if pred < pred_tol:
-                if verbose:
-                    print(f"[GN scaled] predicted MAP-cost decrease {pred:.2e} < {pred_tol:.0e}: converged.")
-                break
-            d_upd = S * u
-
-            alpha = 1.0
-            for _ in range(max_halvings):
-                d_full = np.zeros(n)
-                d_full[update_idx] = alpha * d_upd
-                lin_try = self._linearize(
-                    x0_ref + d_full,
-                    delta_total + d_full,
-                    update_idx,
-                    prior_mean,
-                    prior_sig,
-                    prop_kw_quiet,
-                    check=True,
-                )
-                cost_try = np.inf if lin_try is None else float(lin_try[2] @ lin_try[2])
-                if cost_try < cost:
-                    break
-                alpha *= 0.5
+                    d_upd, cov_upd = ud_solve(prior_sig**2, d0, J, r)
+                step = lambda a, d_upd=d_upd: a * d_upd
             else:
-                print("\n[GN scaled] no MAP-cost decrease along the step: stopping.")
-                break
+                # chart about x0_ref: x = x0_ref + to_deviation(theta), dx/dtheta = Jc at theta = 0
+                chart = make_chart(x0_ref)
+                Jc = chart.jacobian_at_ref()
+                Jc_inv = np.linalg.inv(Jc)
+                if solver == "srif":
+                    th, cov_th = srif_solve(R0 @ Jc, R0 @ d0, J @ Jc, r, self.epoch_rows, rcond=rcond)
+                else:
+                    th, cov_th = ud_solve(Jc_inv @ np.diag(prior_sig**2) @ Jc_inv.T, Jc_inv @ d0, J @ Jc, r)
+                d_upd = chart.to_deviation(th)
+                cov_upd = Jc @ cov_th @ Jc.T
+                step = lambda a, chart=chart, th=th: chart.to_deviation(a * th)
 
-            x0_ref = x0_ref + d_full
-            delta_total = delta_total + d_full
-            r, A, b = lin_try
-            gain, cost = cost - cost_try, cost_try
             if verbose:
-                rms = np.sqrt(np.mean(r**2))
                 print(
-                    f"\n[GN it {it:02d}] rms(norm res)={rms:.3e}  "
-                    f"step_norm={np.linalg.norm(alpha * d_upd):.3e}  "
-                    f"MAP cost -> {cost:.4e}  (alpha={alpha:g})"
+                    f"\n[{tag} it {it:02d}] rms(norm res)={np.sqrt(np.mean(r**2)):.3e}  "
+                    f"MAP cost={cost:.6e}  step_norm={np.linalg.norm(d_upd):.3e}"
                 )
-            if alpha == 1.0 and gain < cost_tol:
-                if verbose:
-                    print(f"[GN scaled] full step gained {gain:.1e} < {cost_tol:.0e}: converged.")
+            if np.linalg.norm(d_upd) < tol:
+                x0_ref = x0_ref + embed(d_upd)
+                delta_total = delta_total + embed(d_upd)
                 break
 
-        # covariance S (As^T As)^-1 S at the final linearization (= the returned x0_ref)
-        if max_iter == 0:
-            cov_upd = np.diag(prior_sig**2)
-        else:
-            S = _column_scale(A, prior_sig)
-            As = A * S
-            cov_upd = S[:, None] * _inv_normal(As.T @ As) * S[None, :]
-        return x0_ref, delta_total, cov_upd, r
+            # step halving: the full step, or the first of its halves that lowers the MAP cost
+            # (halving=False: the full step)
+            for h in range(max_halvings + 1 if halving else 1):
+                d_try = embed(step(0.5**h))
+                try:
+                    r_try, J_try = self._linearize(x0_ref + d_try, update_idx, prop_kw)
+                    cost_try = map_cost(r_try, delta_total + d_try)
+                except RuntimeError:
+                    if not halving:
+                        raise
+                    cost_try = np.inf
+                if cost_try < cost or not halving:
+                    break
+            else:
+                if verbose:
+                    print(f"[{tag}] no MAP-cost decrease along the step (halved {max_halvings} times): stop")
+                break
+            if verbose and h > 0:
+                print(f"[{tag} it {it:02d}] step halved {h} time(s): MAP cost={cost_try:.6e}")
+            x0_ref, delta_total = x0_ref + d_try, delta_total + d_try
+            r, J, cost = r_try, J_try, cost_try
 
-    # ------------------------------------------------------------------ exact nonlinear
-
-    def full_nonlinear_lsq(
-        self,
-        x0_ref,
-        priors=None,
-        update_idx=None,
-        rtol=1e-10,
-        atol=1e-12,
-        method="LSODA",
-        max_nfev=2000,
-        verbose=2,
-    ):
-        """
-        Full nonlinear batch (MAP) using SciPy least_squares (re-propagates every evaluation).
-        Returns x0_ref1, delta_hat1, cov1, result.
-        """
-        x0_ref = np.asarray(x0_ref, dtype=float)
-        n = x0_ref.size
-        if update_idx is None:
-            update_idx = np.arange(n)
-        update_idx = np.asarray(update_idx, dtype=int)
-        n_upd = len(update_idx)
-        prior_mean, prior_sig = _prior_moments(priors, n_upd)
-        finite = np.isfinite(prior_sig)
-
-        def residual_vector(delta_upd):
-            x0 = x0_ref.copy()
-            x0[update_idx] = x0_ref[update_idx] + delta_upd
-            sol = self.propagator.propagate_state_only(
-                x0=x0, t_eval=self.tau, show_progress=False, rtol=rtol, atol=atol, method=method
-            )
-            y0, y1, _, _ = self._model(sol.y[:n, :].T)
-            r_meas = self._residuals(y0, y1)
-            if np.any(finite):
-                r_pri = (delta_upd[finite] - prior_mean[finite]) / prior_sig[finite]
-                return np.hstack([r_meas, r_pri])
-            return r_meas
-
-        result = least_squares(
-            fun=residual_vector,
-            x0=np.zeros(n_upd),
-            method="trf",
-            jac="2-point",
-            max_nfev=max_nfev,
-            ftol=1e-14,
-            xtol=1e-14,
-            gtol=1e-14,
-            verbose=verbose,
-        )
-
-        delta_hat_full = np.zeros(n)
-        delta_hat_full[update_idx] = result.x
-        J = result.jac
-        try:
-            cov_upd = np.linalg.inv(J.T @ J)
-        except np.linalg.LinAlgError:
-            cov_upd = np.linalg.pinv(J.T @ J)
-        return x0_ref + delta_hat_full, delta_hat_full, _embed_cov(cov_upd, update_idx, n), result
-
-    # ------------------------------------------------------------------ generic helper
-
-    @staticmethod
-    def stt_least_squares(residuals_func, x0, priors=None, max_nfev=40000):
-        """
-        least_squares on a surrogate (e.g. STT) residual function that already returns
-        normalized measurement residuals; priors: list of scipy.stats.norm on the deltas.
-        Returns result, cov = (J^T J)^-1.
-        """
-        if priors is None:
-            prior_mean = np.zeros_like(x0)
-            prior_sigma = np.full_like(x0, np.inf)
-        else:
-            prior_mean = np.array([p.mean() for p in priors], dtype=float)
-            prior_sigma = np.array([p.std() for p in priors], dtype=float)
-            if np.any(prior_sigma <= 0):
-                raise ValueError("Prior std must be > 0.")
-
-        def raw_residuals(delta):
-            r_meas = residuals_func(delta)
-            r_pri = (delta - prior_mean) / prior_sigma
-            return np.hstack([r_meas, r_pri])
-
-        result = least_squares(
-            fun=raw_residuals,
-            x0=x0,
-            method="trf",
-            jac="2-point",
-            max_nfev=max_nfev,
-            ftol=1e-12,
-            xtol=1e-12,
-            gtol=1e-12,
-            verbose=2,
-        )
-        J = result.jac
-        cov = np.linalg.inv(J.T @ J)
-        return result, cov
+        # Post-fit residuals are plotted by the scenario scripts (MCMCPlots.plot_mcmc_residuals),
+        # batch and MCMC MAP together, so no batch-only figure is produced here.
+        return x0_ref, delta_total, _embed_cov(cov_upd, update_idx, n)
