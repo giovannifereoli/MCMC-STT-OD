@@ -1060,6 +1060,127 @@ class MCMCModel:
         map_params = self.samples[idx_max]
         return map_params
 
+    def find_map(self, starts=None, log_target=None, polish=True, max_nfev=4000, verbose=True):
+        """
+        Posterior mode: an optimum, not a sample (unlike get_map_estimate).
+
+        1. Least squares (trf, 3-point Jacobian, Jacobian scaling) on residuals_func stacked
+           with prior_residuals, in whitened coordinates when whitening is on, from every
+           start: the exact mode for Gaussian priors and this class's log_likelihood.
+        2. Polish (polish=True): L-BFGS-B (3-point gradient) on log_target from the best
+           point so far, then Powell from the better of the two, in coordinates whitened by
+           the sample covariance (after a run; else as in 1). This finds the mode for other
+           priors too (boxes, a subclass's or an assigned log_prior) and for a log_target
+           other than log_posterior. Outside the support the objective is floored (start
+           value - 1e6), so a box edge stops it; Powell, derivative-free, also reaches a mode
+           on a box face, where the finite-difference gradient of L-BFGS-B straddles the
+           edge.
+
+        Starts and optima compete on log_target: the result is never worse than the best
+        start.
+
+        Where most of the posterior mass lies far from the mode (e.g. a volume factor along
+        a weakly observed direction), the samples seldom come near the mode, so the best
+        sample is a poor stand-in for it.
+
+        Parameters
+        ----------
+        starts : sequence of array_like, optional
+            Start points in model coordinates. Default: initial_params and, after a run, the
+            best sample (get_map_estimate).
+        log_target : callable, optional
+            Log-density (of model coordinates) maximized by the polish and used to rank;
+            default log_posterior. A plot in coordinates x(theta) shows the density
+            p(theta) / |dx/dtheta|, whose mode differs from the mode in theta when x(theta)
+            is nonlinear: pass log_posterior(theta) - log|dx/dtheta| and map the result
+            with x(theta) to mark the mode of the plotted density.
+        polish : bool
+            Run stage 2.
+        max_nfev : int
+            Function evaluations per least-squares run.
+        verbose : bool
+            Print the log_target of every start and optimum.
+
+        Returns
+        -------
+        ndarray, shape (ndim,)
+            In model coordinates.
+        """
+        target = self.log_posterior if log_target is None else log_target
+        if starts is None:
+            starts = [self.initial_params]
+            if self.samples is not None and self.log_probs is not None:
+                starts.append(self.get_map_estimate())
+        use_whitened = getattr(self, "is_whitened", False)
+
+        def to_theta(z):
+            return self.whiten_L @ z + self.whiten_mean if use_whitened else z
+
+        def residuals_map(z):
+            theta = to_theta(z)
+            return np.concatenate([self.residuals_func(theta), self.prior_residuals(theta)])
+
+        cands = []
+        for k, x0 in enumerate(starts):
+            x0 = np.asarray(x0, dtype=float)
+            z0 = self.whiten_Linv @ (x0 - self.whiten_mean) if use_whitened else x0
+            sol = least_squares(
+                residuals_map,
+                z0,
+                method="trf",
+                jac="3-point",
+                x_scale="jac",
+                xtol=1e-12,
+                ftol=1e-12,
+                gtol=1e-12,
+                max_nfev=max_nfev,
+            )
+            cands.append((target(x0), f"start {k}", x0))
+            cands.append((target(to_theta(sol.x)), f"optimum from start {k} ({sol.status})", to_theta(sol.x)))
+
+        if polish:
+            lp0, _, x0 = max(cands, key=lambda c: c[0])
+            if np.isfinite(lp0):
+                L, m = None, np.asarray(x0, dtype=float)
+                if self.samples is not None and len(self.samples) > self.ndim:
+                    C = np.cov(np.asarray(self.samples, dtype=float).T)
+                    try:
+                        L = np.linalg.cholesky(C + 1e-12 * np.trace(C) / self.ndim * np.eye(self.ndim))
+                    except np.linalg.LinAlgError:
+                        L = None
+                if L is None and use_whitened:
+                    L = self.whiten_L
+                if L is None:
+                    L = np.eye(self.ndim)
+                floor = lp0 - 1e6
+
+                def neg_target(u):
+                    v = target(m + L @ u)
+                    return -(v if np.isfinite(v) else floor)
+
+                sol = minimize(neg_target, np.zeros(self.ndim), method="L-BFGS-B", jac="3-point",
+                               options=dict(maxiter=2000, maxfun=50_000))
+                x1 = m + L @ sol.x
+                lp1 = target(x1)
+                cands.append((lp1, f"polish (L-BFGS-B, {'ok' if sol.success else 'stopped'})", x1))
+                # Then Powell (derivative-free) from the better point: a finite-difference
+                # gradient straddling a support edge (a mode on a box face) stalls L-BFGS-B
+                u0 = sol.x if lp1 > lp0 else np.zeros(self.ndim)
+                sol = minimize(neg_target, u0, method="Powell",
+                               options=dict(xtol=1e-8, ftol=1e-12, maxfev=20_000))
+                x2 = m + L @ sol.x
+                cands.append((target(x2), f"polish (Powell, {'ok' if sol.success else 'stopped'})", x2))
+
+        best = max(range(len(cands)), key=lambda i: cands[i][0])
+        theta_map = np.array(cands[best][2], dtype=float)
+        if verbose:
+            what = "log posterior" if log_target is None else "log target"
+            print(f"\n[MAP] {what} (least squares on measurement + prior residuals, then polish):")
+            for i, (lp, label, _) in enumerate(cands):
+                print(f"  {label:32s} {lp:14.6f}{'  <- MAP' if i == best else ''}")
+            print("[MAP] theta_map:\n", theta_map)
+        return theta_map
+
     def gelman_rubin_diagnostic(self, split=True, threshold=1.1):
         """
         Gelman-Rubin potential scale reduction R_hat per parameter, printed with a verdict.

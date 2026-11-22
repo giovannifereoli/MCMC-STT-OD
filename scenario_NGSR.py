@@ -704,6 +704,12 @@ if __name__ == "__main__":
     #   eta も 100 倍なので、負の eta（物理的にありえない）も事前分布の範囲に入る
     #   （それ以前の 261110 の実行は 1）
     prior_looseness = 1
+    # 261121: factor on the position and velocity prior sigmas only (eta unchanged; prior_looseness
+    #   above scales all 7). 100 = the former scenario_NGSR_2 nobs4_priorx100 case (position 32 km,
+    #   velocity 29 m/s). Results folder gets _priorx<PRIOR_SCALE> when != 1.
+    PRIOR_SCALE = 1
+    sig_prior_r = sig_prior_r * PRIOR_SCALE
+    sig_prior_v = sig_prior_v * PRIOR_SCALE
 
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
@@ -719,6 +725,9 @@ if __name__ == "__main__":
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map) and the batch estimate on every corner plot.
+    SHOW_MAP = True
+    SHOW_BATCH_MEAN = True
 
     # Posterior split (GMM) + STM propagation to a given epoch
     # 261110: 予測時刻を開始（utc0）から 3 日後にした（元は 03:45）
@@ -736,9 +745,12 @@ if __name__ == "__main__":
     # (propagated) batch solution ref1 at each row's epoch (MCMCPlots.rtn_matrix).
     GMM_RTN = True
     # fig_gmm_stm_propagation(_rtn) contents: the Monte Carlo cloud and every GMM component's
-    # ellipse (off: only the mixture, single Gaussian, batch and truth, less crowded)
+    # ellipse (off: only the mixture, batch and truth, less crowded)
     GMM_SHOW_MC = False
     GMM_SHOW_COMPONENTS = False
+    # fig_gmm_stm_propagation(_rtn) rows: only the prediction at utc_target (False), or also the
+    # posterior at the epoch above it (True)
+    GMM_SHOW_EPOCH = False
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s, eta -> %), one PDF
     # per figure in a timestamped folder (MCMCPlots.SHOW_FIGS at the top of the file)
@@ -764,6 +776,7 @@ if __name__ == "__main__":
     )
     # 261110: 実行ごとの結果フォルダ名を YYMMDDHHMMSS にした（results/ は git 管理外）
     # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/scenario_NGSR_261112142455
+    #   (+ _priorx<PRIOR_SCALE> with PRIOR_SCALE != 1, + _scaledGN with SCALED_BATCH)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -771,6 +784,7 @@ if __name__ == "__main__":
             Path(__file__).stem
             + "_"
             + datetime.now().strftime("%y%m%d%H%M%S")
+            + (f"_priorx{PRIOR_SCALE:g}" if PRIOR_SCALE != 1 else "")
             + ("_scaledGN" if SCALED_BATCH else "")
         )
     )
@@ -1314,6 +1328,11 @@ if __name__ == "__main__":
     e_dec = np.cross(e_los, e_ra)
     A_los = np.eye(N_STATE)
     A_los[:3, :3] = np.vstack([e_los, e_ra, e_dec])
+    # SHOW_MAP: the corners also mark the posterior mode, an optimum of the sampled posterior
+    # (MCMCModel.find_map, from delta = 0 and from the best sample), not the best sample
+    # theta_hat. When the range is weakly observed the mass lies away from the mode (the
+    # cross-LOS widths grow with the range), so the samples seldom come near it.
+    # SHOW_BATCH_MEAN: and the batch estimate ref1 (delta = 0).
     model.plot_journal_diagnostics(
         burn_in,
         thin,
@@ -1329,15 +1348,16 @@ if __name__ == "__main__":
             *MCMCPlots.PARAM_SYM[3:],
         ],
         corner_rtn=x0_ref1 if CORNER_RTN else None,
+        show_map=SHOW_MAP,
+        show_batch_mean=SHOW_BATCH_MEAN,
     )
 
     # --------------------------
     # Posterior at epoch -> GMM split -> STM propagation to utc_target
     # --------------------------
     # Samples are deviations about ref1 at tau = 0. Every mixture component k is propagated
-    # about its own mean with its own STM (P_k(t) = Phi_k P_k Phi_k^T); the single-Gaussian
-    # baseline is the same with K = 1 (sample mean + covariance). A nonlinear Monte Carlo of
-    # posterior samples is the reference both are checked against.
+    # about its own mean with its own STM (P_k(t) = Phi_k P_k Phi_k^T). A nonlinear Monte Carlo
+    # of posterior samples is the reference it (and the batch Gaussian) is checked against.
     post = np.asarray(model.samples, dtype=float)
     print(
         f"\n[GMM] Splitting {post.shape[0]} posterior samples at epoch ({utc0}) and "
@@ -1345,16 +1365,12 @@ if __name__ == "__main__":
     )
     gmm = GMM.fit(post, n_components=gmm_n_components, select_bic=gmm_select_bic)
     print("[GMM] weights:", np.array2string(gmm.weights, precision=3))
-    single = GMM.gaussian(post.mean(axis=0), np.cov(post, rowvar=False))
 
     t_prop = np.linspace(0.0, tau_target, n_t_prop)
     ivp_prop = dict(rtol=1e-8, atol=1e-10, method="LSODA")
 
     # One GMM per output epoch (absolute states)
     gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp_prop)
-    single_t = single.propagate_stm(
-        propagator, x0_ref1, t_prop, label="Single Gaussian", **ivp_prop
-    )
     # Batch LSQ Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
     # STM about ref1. Its mean also defines the RTN frame of fig_gmm_stm_propagation_rtn.
     batch_t = (
@@ -1419,9 +1435,7 @@ if __name__ == "__main__":
     pos_mc = X_mc[:, -1, :3]
     m_mc = pos_mc.mean(axis=0)
     gmm_T = gmm_t[-1].marginal(slice(0, 3))
-    single_T = single_t[-1].marginal(slice(0, 3))
     mg_T, Pg_T = gmm_T.moments()
-    m1_T, P1_T = single_T.moments()
     sig_mc_T = np.sqrt(np.diag(np.cov(pos_mc, rowvar=False)))
     print(f"\n[GMM] Position at target ({utc_target}), per-axis 1-sigma [m]:")
     print("   MC             :", np.array2string(sig_mc_T * 1e3, precision=2))
@@ -1429,30 +1443,14 @@ if __name__ == "__main__":
         "   GMM + STMs     :",
         np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2),
     )
-    print(
-        "   Single Gaussian:",
-        np.array2string(np.sqrt(np.diag(P1_T)) * 1e3, precision=2),
-    )
     print("[GMM] Mean offset from the MC mean [m]:")
     print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
-    print("   Single Gaussian:", np.array2string((m1_T - m_mc) * 1e3, precision=2))
 
     ll_g = np.mean(gmm_T.logpdf(pos_mc))
-    ll_1 = np.mean(single_T.logpdf(pos_mc))
-    print(
-        f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f} | single {ll_1:.3f} "
-        f"(GMM - single = {ll_g - ll_1:+.3f} nats)"
-    )
+    print(f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f}")
 
     r_tr = x_true_prop[-1, :3]
-    d_tr = r_tr - m1_T
-    maha_1 = float(np.sqrt(d_tr @ np.linalg.solve(P1_T, d_tr)))
-    lp_tr_g = gmm_T.logpdf(r_tr)[0]
-    lp_tr_1 = single_T.logpdf(r_tr)[0]
-    print(
-        f"[GMM] Truth at target: log p GMM {lp_tr_g:.3f} | single {lp_tr_1:.3f} | "
-        f"Mahalanobis (single) {maha_1:.2f}"
-    )
+    print(f"[GMM] Truth at target: log p GMM {gmm_T.logpdf(r_tr)[0]:.3f}")
 
     if GMM_BATCH:
         batch_T = batch_t[-1].marginal(slice(0, 3))
@@ -1467,10 +1465,11 @@ if __name__ == "__main__":
             "   mean - MC mean [m]   :",
             np.array2string((mb_T - m_mc) * 1e3, precision=2),
         )
+        ll_b = np.mean(batch_T.logpdf(pos_mc))
         print(
-            f"   mean log-density of the MC positions {np.mean(batch_T.logpdf(pos_mc)):.3f} | "
-            f"truth log p {batch_T.logpdf(r_tr)[0]:.3f} | truth Mahalanobis "
-            f"{float(np.sqrt(d_trb @ np.linalg.solve(Pb_T, d_trb))):.2f}"
+            f"   mean log-density of the MC positions {ll_b:.3f} (GMM - batch = "
+            f"{ll_g - ll_b:+.3f} nats) | truth log p {batch_T.logpdf(r_tr)[0]:.3f} | truth "
+            f"Mahalanobis {float(np.sqrt(d_trb @ np.linalg.solve(Pb_T, d_trb))):.2f}"
         )
 
     # Figures
@@ -1479,7 +1478,6 @@ if __name__ == "__main__":
         p = dict(
             mc=X_mc[:, j, :3],
             gmm=gmm_t[j].marginal(slice(0, 3)),
-            single=single_t[j].marginal(slice(0, 3)),
             truth=x_true_prop[j, :3],
             center=X_mc[:, j, :3].mean(axis=0),
             title=title,
@@ -1491,7 +1489,7 @@ if __name__ == "__main__":
                 mc=p["mc"] @ C.T,
                 truth=C @ p["truth"],
                 center=C @ p["center"],
-                **{k: p[k].linear_map(C) for k in ("gmm", "single", "batch") if k in p},
+                **{k: p[k].linear_map(C) for k in ("gmm", "batch") if k in p},
             )
         return p
 
@@ -1499,26 +1497,25 @@ if __name__ == "__main__":
     title_T = (
         f"Predicted at {utc_target.replace('T', ' ')} UTC (+{tau_target / 3600.0:.2f} h)"
     )
+    rows = [(0, title_0), (-1, title_T)] if GMM_SHOW_EPOCH else [(-1, title_T)]
     MCMCPlots.plot_gmm_propagation(
-        [_panel(0, title_0), _panel(-1, title_T)],
+        [_panel(j, title) for j, title in rows],
         prob=gmm_prob,
         show_mc=GMM_SHOW_MC,
         show_components=GMM_SHOW_COMPONENTS,
     )
     if GMM_RTN:
         # RTN frame of the batch solution propagated to each row's epoch
+        rtn_title = {
+            0: ", RTN Frame of the Batch Solution",
+            -1: ", RTN Frame of the Propagated Batch Solution",
+        }
         MCMCPlots.plot_gmm_propagation(
             [
                 _panel(
-                    0,
-                    title_0 + ", RTN Frame of the Batch Solution",
-                    C=MCMCPlots.rtn_matrix(batch_t[0].means[0]),
-                ),
-                _panel(
-                    -1,
-                    title_T + ", RTN Frame of the Propagated Batch Solution",
-                    C=MCMCPlots.rtn_matrix(batch_t[-1].means[0]),
-                ),
+                    j, title + rtn_title[j], C=MCMCPlots.rtn_matrix(batch_t[j].means[0])
+                )
+                for j, title in rows
             ],
             prob=gmm_prob,
             name="fig_gmm_stm_propagation_rtn",
@@ -1532,7 +1529,7 @@ if __name__ == "__main__":
         )
 
     hist = position_prediction_history(
-        X_mc, gmm_t, single_t, batch_t=batch_t if GMM_BATCH else None
+        X_mc, gmm_t, batch_t=batch_t if GMM_BATCH else None
     )
     MCMCPlots.plot_prediction_history(t_prop / 3600.0, hist, tau_full[-1] / 3600.0)
 

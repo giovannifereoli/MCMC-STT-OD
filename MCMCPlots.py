@@ -200,7 +200,7 @@ def apply_style():
 # Okabe-Ito colors (colorblind-safe; adjacent pairs checked for CVD separation).
 # Each color has ONE meaning in every figure.
 C_POST = "#0072B2"  # MCMC posterior / Gaussian mixture (blue)
-C_BATCH = "#D55E00"  # Gauss-Newton batch / single Gaussian (vermillion)
+C_BATCH = "#D55E00"  # Gauss-Newton batch (vermillion)
 C_SC = "#009E73"  # spacecraft, images used (bluish green)
 C_OCC = "#E69F00"  # occulted epochs (orange)
 C_MC = "0.62"  # nonlinear Monte Carlo (neutral grey)
@@ -2080,6 +2080,8 @@ def plot_corner(
     param_sym=None,
     param_unit=None,
     param_scale=None,
+    map_theta=None,
+    show_batch_mean=False,
 ):
     """
     Corner plot of the posterior against the batch covariance and the truth (square, TXT_W).
@@ -2087,7 +2089,9 @@ def plot_corner(
     Posterior: blue 1/2/3-sigma highest-density regions (39.3 / 86.5 / 98.9 % of the 2D
     mass) and histograms. Batch least squares: vermillion ellipses with the same masses
     and Gaussian pdfs on the diagonal. Truth: black star (2D) and line (diagonal).
-    Diagonal titles: posterior median and half-widths of the 16-84 % interval
+    Optional posterior mode (map_theta): white diamond edged in blue (2D) and dashed blue
+    line (diagonal). Optional batch estimate (show_batch_mean): vermillion square (2D; on the
+    diagonal the batch pdf peaks there). Diagonal titles: posterior median and half-widths of the 16-84 % interval
     (_summary_title). Axis ranges cover the 0.05-99.95 % percentiles, the batch +/-3.5
     sigma and the truth.
 
@@ -2150,6 +2154,12 @@ def plot_corner(
     param_unit, param_scale : optional
         Display units and scales replacing PARAM_UNIT and PARAM_SCALE (the defaults), e.g.
         auto_param_scales of the sigmas in rotated coordinates.
+    map_theta : array_like, shape (n_par,), optional
+        Posterior mode (e.g. MCMC.MCMCModel.find_map), in the coordinates of `samples`
+        (internal units). Not drawn, and not in the legend or the axis ranges, when None.
+    show_batch_mean : bool
+        Mark batch_mean on the 2D panels of batch-estimated parameters (not on panels with
+        a prior_idx parameter), with its own legend entry. Off by default.
 
     Returns
     -------
@@ -2172,10 +2182,14 @@ def plot_corner(
     tr = None if true_theta is None else np.asarray(true_theta) * s
     bm = None if batch_mean is None else np.asarray(batch_mean) * s
     bc = None if batch_cov is None else np.asarray(batch_cov) * np.outer(s, s)
+    mp = None if map_theta is None else np.asarray(map_theta, dtype=float) * s
     pri = set() if prior_idx is None else {int(k) for k in prior_idx}
     realized = pri if prior_truth_label else set()  # truth drawn as a realized value
     star_full = dict(marker="*", mfc=C_TRUTH, mec="white", mew=0.4)
     star_hollow = dict(marker="*", mfc="white", mec=C_TRUTH, mew=0.6)
+    diamond = dict(marker="D", mfc="white", mec=C_POST, mew=0.9)  # posterior mode
+    square = dict(marker="s", mfc=C_BATCH, mec="white", mew=0.4)  # batch estimate
+    show_bm = bool(show_batch_mean) and bm is not None
 
     masses = np.array([0.393, 0.865, 0.989])
     fills = [_tint(C_POST, a) for a in (0.16, 0.38, 0.68)]
@@ -2210,6 +2224,10 @@ def plot_corner(
         lo, hi = np.minimum(lo, bm - 3.5 * sb), np.maximum(hi, bm + 3.5 * sb)
     if tr is not None:
         lo, hi = np.minimum(lo, tr), np.maximum(hi, tr)
+    if mp is not None:
+        lo, hi = np.minimum(lo, mp), np.maximum(hi, mp)
+    if show_bm and bc is None:
+        lo, hi = np.minimum(lo, bm), np.maximum(hi, bm)
     pad = 0.06 * (hi - lo)
     h_lo, h_hi = lo - pad, hi + pad  # posterior histogram range (as without the prior)
     if has_prior:
@@ -2344,6 +2362,8 @@ def plot_corner(
                         lw=0.8 * lw_s,
                         ls=":" if i in realized else "-",
                     )
+                if mp is not None:
+                    ax.axvline(mp[i], color=C_POST, lw=0.9 * lw_s, ls="--")
                 ax.set_ylim(bottom=0.0)
                 ax.set_yticks([])
                 ax.spines["left"].set_visible(False)
@@ -2427,6 +2447,10 @@ def plot_corner(
                         zorder=4,
                         **(star_hollow if hollow else star_full),
                     )
+                if show_bm and n_pri == 0:  # over the (white) mode marker, under the star
+                    ax.plot(bm[j], bm[i], ls="none", ms=0.62 * ms_star, zorder=3.6, **square)
+                if mp is not None:  # under the star: a coincident truth shows inside it
+                    ax.plot(mp[j], mp[i], ls="none", ms=0.95 * ms_star, zorder=3.5, **diamond)
 
             # outer labels only
             if i == n_par - 1:
@@ -2465,6 +2489,13 @@ def plot_corner(
         k = 2 if bm is not None and bc is not None else 1
         handles.insert(k, Line2D([], [], color=C_PRIOR, lw=0.9, ls="--"))
         leg_labels.insert(k, f"Prior {sig123}")
+    if show_bm:  # after the batch entry (or the posterior one, without a batch)
+        k = 2 if bc is not None else 1
+        handles.insert(k, Line2D([], [], ls="none", ms=4.5, **square))
+        leg_labels.insert(k, "Batch Estimate")
+    if mp is not None:
+        handles.insert(1, Line2D([], [], color=C_POST, lw=0.9, ls="--", ms=5, **diamond))
+        leg_labels.insert(1, "Posterior Mode (MAP)")
     # The upper-right triangle is empty: anchor the legend to the top-right (hidden) panel.
     corner_box = axes[0, -1].get_position()
     leg = fig.legend(
@@ -2563,6 +2594,7 @@ def plot_mcmc_corner(
     prior=False,
     prior_transform=None,
     n_prior=200_000,
+    show_map=False,
     **kwargs,
 ):
     """
@@ -2589,9 +2621,14 @@ def plot_mcmc_corner(
         n_prior mapped draws.
     n_prior : int
         Prior draws (fixed seed).
+    show_map : bool
+        Mark the posterior mode, model.find_map() mapped by `transform`, unless kwargs
+        already holds map_theta (displayed coordinates; drawn whatever show_map). Off by
+        default.
     **kwargs
         Passed to plot_corner (bins, smooth, name, prior_idx, prior_label,
-        prior_truth_label, param_sym, param_unit, param_scale).
+        prior_truth_label, param_sym, param_unit, param_scale, map_theta,
+        show_batch_mean).
 
     Returns
     -------
@@ -2601,6 +2638,9 @@ def plot_mcmc_corner(
     samples = np.asarray(model.samples, dtype=float)
     if transform is not None:
         samples = np.asarray(transform(samples), dtype=float)
+    if show_map and kwargs.get("map_theta") is None:
+        m = np.asarray(model.find_map(), dtype=float)
+        kwargs["map_theta"] = m if transform is None else np.asarray(transform(m[None, :]))[0]
     prior_arg = None
     if prior:
         kwargs.setdefault("name", "fig_corner_prior")
@@ -2690,13 +2730,14 @@ def rtn_corner_map(x_ref, ndim):
     return A
 
 
-def _mapped_corner_kw(A, true_theta, batch_mean, batch_cov):
+def _mapped_corner_kw(A, true_theta, batch_mean, batch_cov, map_theta=None):
     """plot_mcmc_corner kwargs for displayed coordinates A @ theta."""
     A = np.asarray(A, dtype=float)
     return dict(
         true_theta=None if true_theta is None else A @ np.asarray(true_theta),
         batch_mean=A @ np.asarray(batch_mean),
         batch_cov=None if batch_cov is None else A @ np.asarray(batch_cov) @ A.T,
+        map_theta=None if map_theta is None else A @ np.asarray(map_theta),
         transform=lambda S: np.asarray(S) @ A.T,
     )
 
@@ -2717,6 +2758,9 @@ def plot_mcmc_diagnostics(
     corner_sym=None,
     corner_rtn=None,
     corner_rtn_kw=None,
+    show_map=False,
+    map_theta=None,
+    show_batch_mean=False,
 ):
     """
     The MCMC journal figures: residuals, traces, autocorrelation, corner and (optionally)
@@ -2766,15 +2810,34 @@ def plot_mcmc_diagnostics(
         Further plot_corner kwargs of the RTN corner: param_sym (default RTN_SYM +
         PARAM_SYM[6:]), and e.g. param_unit/param_scale when the display units were sized
         to the x, y, z sigmas (auto_param_scales).
+    show_map : bool
+        Mark the posterior mode on every corner plot (mapped like the truth): map_theta if
+        given, else model.find_map(), computed once. Off by default. If find_map fails, the
+        error is reported and the corners are drawn without it.
+    map_theta : array_like, shape (ndim,), optional
+        Posterior mode in model coordinates, used by show_map instead of model.find_map().
+    show_batch_mean : bool
+        Mark the batch estimate (mapped like the truth) on every corner plot. Off by default.
 
     Returns
     -------
     None
     """
     batch = np.zeros(model.ndim) if batch_theta is None else np.asarray(batch_theta)
-    corner_kw = dict(true_theta=true_theta, batch_mean=batch, batch_cov=batch_cov)
+    if not show_map:
+        map_theta = None
+    elif map_theta is None:
+        try:
+            map_theta = model.find_map()
+        except Exception as err:
+            print(f"[Figure] posterior mode skipped: {type(err).__name__}: {err}")
+    corner_kw = dict(
+        true_theta=true_theta, batch_mean=batch, batch_cov=batch_cov, map_theta=map_theta
+    )
     if corner_map is not None:
-        corner_kw = _mapped_corner_kw(corner_map, true_theta, batch, batch_cov)
+        corner_kw = _mapped_corner_kw(corner_map, true_theta, batch, batch_cov, map_theta)
+    if show_batch_mean:
+        corner_kw["show_batch_mean"] = True
     if corner_sym is not None:
         corner_kw["param_sym"] = corner_sym
     figures = (
@@ -2802,9 +2865,11 @@ def plot_mcmc_diagnostics(
         )
     if corner_rtn is not None:
         rtn_kw = _mapped_corner_kw(
-            rtn_corner_map(corner_rtn, model.ndim), true_theta, batch, batch_cov
+            rtn_corner_map(corner_rtn, model.ndim), true_theta, batch, batch_cov, map_theta
         )
         rtn_kw["param_sym"] = RTN_SYM + list(PARAM_SYM[6:])
+        if show_batch_mean:
+            rtn_kw["show_batch_mean"] = True
         rtn_kw.update(corner_rtn_kw or {})
         figures += (
             ("corner RTN", lambda: plot_mcmc_corner(model, name="fig_corner_rtn", **rtn_kw)),
@@ -2842,21 +2907,21 @@ def plot_gmm_propagation(
     show_components=True,
 ):
     """
-    Position projections (xy, xz, yz): propagated GMM, single Gaussian and Monte Carlo.
+    Position projections (xy, xz, yz): propagated GMM and Monte Carlo.
 
-    One row per panel dict (e.g. row 0 at an epoch, row 1 at the target epoch), drawn in m
-    relative to its center: the MC cloud (grey), every GMM component's ellipse, the GMM
-    highest-density region holding `prob` of the mass (level from mixture draws), the
-    single-Gaussian ellipse with the same mass (dashed vermillion), optionally the batch LSQ
-    Gaussian's ellipse (dash-dot bluish green) and the truth (star). Full text width.
+    One row per panel dict (e.g. only the target epoch, or row 0 at the epoch and row 1 at the
+    target epoch), drawn in m relative to its center: the MC cloud (grey), every GMM
+    component's ellipse, the GMM highest-density region holding `prob` of the mass (level from mixture draws), optionally
+    the batch LSQ Gaussian's ellipse with the same mass (dash-dot bluish green) and the truth
+    (star). Full text width.
 
     Parameters
     ----------
     panels : list of dict
-        At most 2 rows (panels lettered a-f). Keys, in km: "mc" (M, 3) Monte Carlo
-        positions; "gmm" and "single" (GMM.GMM of the position: mixture and single
-        Gaussian); "truth" (3,); "center" (3,), e.g. the MC mean; "title" (str). Optional
-        "batch" (GMM.GMM, K = 1): the propagated batch least-squares Gaussian.
+        1 or 2 rows (panels lettered a-c, a-f). Keys, in km: "mc" (M, 3) Monte Carlo
+        positions; "gmm" (GMM.GMM of the position); "truth" (3,); "center" (3,), e.g. the
+        MC mean; "title" (str). Optional "batch" (GMM.GMM, K = 1): the propagated batch
+        least-squares Gaussian.
     prob : float
         Probability mass of the ellipses and of the GMM region.
     n_draw : int
@@ -2889,18 +2954,18 @@ def plot_gmm_propagation(
     has_batch = any("batch" in pnl for pnl in panels)
     rng = np.random.default_rng(seed)
 
-    fig = plt.figure(figsize=(TXT_W, 4.9), layout="constrained")
+    fig = plt.figure(
+        figsize=(TXT_W, 4.9 if len(panels) > 1 else 2.65), layout="constrained"
+    )
     fig.get_layout_engine().set(h_pad=0.03, hspace=0.04, wspace=0.04)
-    sub = fig.subfigures(len(panels), 1)
-    axes = np.array([sf.subplots(1, 3) for sf in np.atleast_1d(sub)])
+    sub = fig.subfigures(len(panels), 1, squeeze=False)[:, 0]
+    axes = np.array([sf.subplots(1, 3) for sf in sub])
     for row, pnl in enumerate(panels):
         c = np.asarray(pnl["center"], dtype=float)
         mc = (pnl["mc"] - c) * 1e3
         w = pnl["gmm"].weights
         mu = (pnl["gmm"].means - c) * 1e3
         P = pnl["gmm"].covs * 1e6
-        mu1 = (pnl["single"].means[0] - c) * 1e3
-        P1 = pnl["single"].covs[0] * 1e6
         tr = (pnl["truth"] - c) * 1e3
         if "batch" in pnl:
             mub = (pnl["batch"].means[0] - c) * 1e3
@@ -2911,17 +2976,8 @@ def plot_gmm_propagation(
             ax = axes[row, col]
             ix = [i, j]
             g2 = GMM(w, mu[:, ix], P[:, ix][:, :, ix])
-            e1 = _ellipse_2d(mu1[ix], P1[np.ix_(ix, ix)], r_ell)
-            ext_lo = [
-                e1.min(1),
-                np.percentile(draws[:, ix], 0.1, axis=0),
-                tr[ix],
-            ]
-            ext_hi = [
-                e1.max(1),
-                np.percentile(draws[:, ix], 99.9, axis=0),
-                tr[ix],
-            ]
+            ext_lo = [np.percentile(draws[:, ix], 0.1, axis=0), tr[ix]]
+            ext_hi = [np.percentile(draws[:, ix], 99.9, axis=0), tr[ix]]
             if show_mc:
                 ext_lo.insert(0, mc[:, ix].min(0))
                 ext_hi.insert(0, mc[:, ix].max(0))
@@ -2961,7 +3017,6 @@ def plot_gmm_propagation(
                 gx, gy, dens, levels=[level], colors=C_POST, linewidths=1.3, zorder=3
             )
 
-            ax.plot(e1[0], e1[1], color=C_BATCH, lw=1.1, ls="--", zorder=4)
             if "batch" in pnl:
                 ax.plot(eb[0], eb[1], color=C_LSQ, lw=1.1, ls="-.", zorder=4)
             ax.plot(
@@ -2982,7 +3037,7 @@ def plot_gmm_propagation(
             ax.set_xlabel(names[i])
             ax.set_ylabel(names[j])
             ax.set_title(f"({'abcdef'[3 * row + col]})", loc="left")
-        np.atleast_1d(sub)[row].suptitle(pnl["title"], fontsize=8)
+        sub[row].suptitle(pnl["title"], fontsize=8)
 
     handles = [
         Line2D([], [], ls="none", marker="o", ms=3, color=C_MC, label="Monte Carlo"),
@@ -2998,14 +3053,6 @@ def plot_gmm_propagation(
         Line2D(
             [],
             [],
-            color=C_BATCH,
-            lw=1.1,
-            ls="--",
-            label=f"Single Gaussian + STM ({pct} HDR)",
-        ),
-        Line2D(
-            [],
-            [],
             ls="none",
             marker="*",
             ms=7.5,
@@ -3017,7 +3064,7 @@ def plot_gmm_propagation(
     ]
     if has_batch:
         handles.insert(
-            4,
+            3,
             Line2D(
                 [],
                 [],
@@ -3034,7 +3081,7 @@ def plot_gmm_propagation(
     fig.legend(
         handles=handles,
         loc="outside upper center",
-        ncol=3 if len(handles) >= 6 else len(handles),
+        ncol=3 if len(handles) >= 5 else len(handles),
         columnspacing=1.0,
     )
     return save_figure(fig, name)
@@ -3044,14 +3091,13 @@ def plot_prediction_history(
     t_hr, hist, t_obs_end_hr, name="fig_gmm_prediction_history"
 ):
     """
-    Position uncertainty and Monte Carlo log-density vs time: GMM vs single Gaussian.
+    Position uncertainty and Monte Carlo log-density vs time: GMM vs batch LSQ Gaussian.
 
-    (a) sqrt(trace P_rr) [m] on a log scale: Monte Carlo (thick grey), GMM + STMs (blue),
-    single Gaussian (dashed vermillion). (b) Difference of the mean log-density of the MC
-    positions, GMM minus single Gaussian [nats] (> 0: the GMM fits the MC cloud better). The
-    observation arc is shaded. Single column. If hist holds the batch LSQ Gaussian
-    (sig_batch, ll_batch), it is added to both panels (dash-dot bluish green; in (b) batch
-    minus single Gaussian).
+    (a) sqrt(trace P_rr) [m] on a log scale: Monte Carlo (thick grey), GMM + STMs (blue) and,
+    if hist holds the batch LSQ Gaussian (sig_batch, ll_batch), batch LSQ + STM (dash-dot
+    bluish green). (b) Mean log-density of the MC positions [nats], GMM minus batch LSQ
+    Gaussian (> 0: the GMM fits the MC cloud better); without the batch, the GMM's own mean
+    log-density. The observation arc is shaded. Single column.
 
     Parameters
     ----------
@@ -3118,15 +3164,6 @@ def plot_prediction_history(
     ax0.plot(
         t_hr, hist["sig_gmm"] * 1e3, color=C_POST, lw=1.2, label="GMM + STMs", zorder=3
     )
-    ax0.plot(
-        t_hr,
-        hist["sig_1"] * 1e3,
-        color=C_BATCH,
-        lw=1.2,
-        ls="--",
-        label="Single Gaussian + STM",
-        zorder=4,
-    )
     has_batch = "sig_batch" in hist
     if has_batch:
         ax0.plot(
@@ -3145,22 +3182,22 @@ def plot_prediction_history(
     ax0.yaxis.set_minor_formatter(mticker.NullFormatter())
     ax0.set_title("(a) Position Uncertainty", loc="left")
 
-    ax1.axhline(0.0, color="0.45", lw=0.6)
-    ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_1"], color=C_POST, lw=1.2)
     if has_batch:
-        ax1.plot(t_hr, hist["ll_batch"] - hist["ll_1"], color=C_LSQ, lw=1.2, ls="-.")
-    ax1.set_ylabel(r"$\Delta \overline{\log p}$ [nats]")
+        ax1.axhline(0.0, color="0.45", lw=0.6)
+        ax1.plot(t_hr, hist["ll_gmm"] - hist["ll_batch"], color=C_POST, lw=1.2)
+        ax1.set_ylabel(r"$\Delta \overline{\log p}$ [nats]")
+        ax1.set_title(
+            r"(b) Mean Log-Density of MC Positions, GMM $-$ Batch LSQ", loc="left"
+        )
+    else:
+        ax1.plot(t_hr, hist["ll_gmm"], color=C_POST, lw=1.2)
+        ax1.set_ylabel(r"$\overline{\log p}$ [nats]")
+        ax1.set_title(r"(b) Mean Log-Density of MC Positions, GMM", loc="left")
     ax1.set_xlabel("Time since Epoch [h]")
-    ax1.set_title(
-        r"(b) Mean Log-Density of MC Positions $-$ Single"
-        if has_batch
-        else r"(b) Mean Log-Density of MC Positions, GMM $-$ Single",
-        loc="left",
-    )
 
     fig.legend(
         loc="outside upper center",
-        ncol=2 if has_batch else 3,
+        ncol=3 if has_batch else 2,
         columnspacing=0.8,
         handlelength=1.5,
     )
@@ -3177,29 +3214,29 @@ def plot_prediction_history(
 def plot_stt_benchmark(bench, mcmc_order=None, name="fig_stt_benchmark"):
     """
     STT surrogate likelihood vs the full nonlinear one, per STT order, on posterior samples
-    of an MCMC chain (full text width, three panels):
+    of an MCMC chain (full text width, two panels):
       (a) wall-clock time per log-likelihood evaluation, STT (blue) vs full nonlinear (grey),
           with the speedup t_NL / t_STT printed above each STT point;
-      (b) |ln L_STT - ln L_NL| over the chain samples;
-      (c) RMS over the measurements of the predicted-measurement error
-          (y_STT - y_NL) / sigma, over the chain samples.
-    (b) and (c): one box per order (25-75 %, median line, whiskers 5-95 %) over the
-    individual samples (dots). `mcmc_order` shades the order whose surrogate generated the
-    chain.
+      (b) |ln L_STT - ln L_NL| over the chain samples: one box per order (25-75 %, median
+          line, whiskers 5-95 %) over the individual samples (dots).
+    `mcmc_order` shades the order whose surrogate generated the chain.
+
+    The predicted-measurement error dy = (y_STT - y_NL) / sigma is not plotted: with
+    whitened residuals r, Delta ln L ~ -r . dy, so median |Delta ln L| ~ 0.67 sqrt(n_meas)
+    RMS(dy) and a dy panel repeats (b) scaled by a constant; (b) is the error the sampler
+    sees, while RMS(dy) hides its sqrt(n_meas) growth with the data volume.
 
     bench: dict from J1_benchmark_STTs.benchmark_orders_on_chain (or its benchmark.npz):
-      orders (n_o,), stt_ms (n_o,), nl_ms (n_o,), dlogL (n_o, n_s), dy (n_o, n_s, n_meas).
+      orders (n_o,), stt_ms (n_o,), nl_ms (n_o,), dlogL (n_o, n_s).
     """
     orders = np.asarray(bench["orders"], dtype=int)
     stt_ms = np.asarray(bench["stt_ms"], dtype=float)
     nl_ms = float(np.mean(bench["nl_ms"]))  # same computation for every order
     tiny = np.finfo(float).tiny
     dlogl = np.maximum(np.abs(np.asarray(bench["dlogL"], dtype=float)), tiny)
-    dy = np.asarray(bench["dy"], dtype=float)
-    dy_rms = np.maximum(np.sqrt(np.mean(dy * dy, axis=2)), tiny)  # per sample
     n_s = dlogl.shape[1]
 
-    fig, axes = plt.subplots(1, 3, figsize=(TXT_W, 2.2), sharex=True, layout="constrained")
+    fig, axes = plt.subplots(1, 2, figsize=(TXT_W, 2.2), sharex=True, layout="constrained")
     fig.get_layout_engine().set(wspace=0.06)
     for ax in axes:
         if mcmc_order is not None and mcmc_order in orders:
@@ -3236,7 +3273,7 @@ def plot_stt_benchmark(bench, mcmc_order=None, name="fig_stt_benchmark"):
     ax.set_ylabel("Time per Evaluation [ms]")
     ax.set_title("(a) Log-Likelihood Cost", loc="left")
 
-    # (b), (c): error distributions over the chain samples
+    # (b): log-likelihood error distribution over the chain samples
     rng = np.random.default_rng(0)
     box = dict(
         widths=0.46,
@@ -3251,43 +3288,39 @@ def plot_stt_benchmark(bench, mcmc_order=None, name="fig_stt_benchmark"):
         zorder=3,
     )
     dot_c = _tint(C_POST, 0.45)
-    for ax, data, ylabel, title in (
-        (axes[1], dlogl, r"$|\Delta \ln L|$ [-]", "(b) Log-Likelihood Error"),
-        (axes[2], dy_rms, r"$\mathrm{RMS}(\Delta y) / \sigma$ [-]",
-         "(c) Predicted-Measurement Error"),
-    ):
-        for k, v in zip(orders, data):
-            ax.plot(
-                k + rng.uniform(-0.17, 0.17, v.size),
-                v,
-                ls="none",
-                marker="o",
-                ms=1.3,
-                mew=0,
-                color=dot_c,
-                alpha=0.55,
-                rasterized=True,
-                zorder=2,
-            )
-        ax.boxplot(list(data), positions=orders, **box)
-        ax.set_ylabel(ylabel)
-        ax.set_title(title, loc="left")
-        ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, numticks=12))
-        ax.yaxis.set_minor_locator(
-            mticker.LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=12)
+    ax = axes[1]
+    for k, v in zip(orders, dlogl):
+        ax.plot(
+            k + rng.uniform(-0.17, 0.17, v.size),
+            v,
+            ls="none",
+            marker="o",
+            ms=1.3,
+            mew=0,
+            color=dot_c,
+            alpha=0.55,
+            rasterized=True,
+            zorder=2,
         )
-        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
-        lo, hi = np.log10(data.min()), np.log10(data.max())
-        if hi - lo > 8:  # label every other decade
-            ax.yaxis.set_major_formatter(
-                mticker.FuncFormatter(
-                    lambda v, _: rf"$10^{{{round(np.log10(v))}}}$"
-                    if round(np.log10(v)) % 2 == 0
-                    else ""
-                )
+    ax.boxplot(list(dlogl), positions=orders, **box)
+    ax.set_ylabel(r"$|\Delta \ln L|$ [-]")
+    ax.set_title("(b) Log-Likelihood Error", loc="left")
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, numticks=12))
+    ax.yaxis.set_minor_locator(
+        mticker.LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=12)
+    )
+    ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+    lo, hi = np.log10(dlogl.min()), np.log10(dlogl.max())
+    if hi - lo > 8:  # label every other decade
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda v, _: rf"$10^{{{round(np.log10(v))}}}$"
+                if round(np.log10(v)) % 2 == 0
+                else ""
             )
-        pad = 0.06 * (hi - lo)
-        ax.set_ylim(10 ** (lo - pad), 10 ** (hi + pad))
+        )
+    pad = 0.06 * (hi - lo)
+    ax.set_ylim(10 ** (lo - pad), 10 ** (hi + pad))
 
     handles = [
         Line2D([], [], color=C_POST, lw=1.2, marker="o", ms=4.0, mec="white", mew=0.5),

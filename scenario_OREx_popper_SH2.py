@@ -10,9 +10,16 @@ Geometry
 - Observer: OSIRIS-REx from SPICE (OSIRIS-REX w.r.t. BENNU, J2000, no aberration correction)
   during Detailed Survey, north polar station (2019-03-16T18:00 + 24 h: 5.9-6.7 km from Bennu,
   2.4-3.3 deg from the spin axis, azimuth about the axis drifting by 25 deg).
-- Popper: circular polar orbit of radius ORBIT_RADIUS whose plane contains the mean azimuth of
-  OREx about the spin axis (ORBIT_RAAN_DEG = None), ARC_HOURS arc, one-way Doppler (range-rate)
-  every DT_OBS_MIN minutes, occulted by the sphere of radius R_ref. USE_RANGE adds range.
+- Popper: a radio probe without propulsion, released by a spring from a mothercraft hovering at
+  the release point. Planned orbit: circular polar orbit of radius ORBIT_RADIUS whose plane
+  contains the mean azimuth of OREx about the spin axis (ORBIT_RAAN_DEG = None). DELIVERY = True
+  (default) adds the release error, DELIVERY_SIGMA_R / DELIVERY_SIGMA_V per axis (20 m, 1 cm/s),
+  drawn with DELIVERY_SEED; a draw that comes within DELIVERY_R_MIN of the center or beyond
+  DELIVERY_R_MAX within DELIVERY_CHECK_HOURS is a failed deployment and is redrawn (the scenario
+  is conditioned on a probe that survives the arc and the prediction). The delivered orbit is
+  inclined, eccentric and off the OREx meridian by a few degrees. DELIVERY = False keeps the exact
+  planned orbit. ARC_HOURS arc, one-way Doppler (range-rate) every DT_OBS_MIN minutes, occulted
+  by the sphere of radius R_ref. USE_RANGE adds range.
 - Estimated: x0 = [r0, v0, GM, C20, C21, S21, C22, S22] of the popper (12 parameters).
 
 Why this posterior is not Gaussian
@@ -39,7 +46,7 @@ Sampling (as scenario_ISL_SH2.py)
   N_EXACT_CHECK posterior samples) reports the importance-sampling ESS of the surrogate.
 - STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only, and Stage 1 ends with an
   exact trust-region least-squares MAP in chart coordinates (exact_map_chart); 2 adds the
-  second-order STT, and Stage 1 ends with the STT re-centering.
+  second-order STT, and Stage 1 ends with the STT re-centering (results folder suffix _stt2).
 - SH_PRIOR = "uniform" replaces the Gaussian priors of C20, C21, S21, C22, S22 by boxes
   x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder suffix
   _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd of
@@ -58,9 +65,12 @@ Pipeline
      degree-2 pairs, figures: geometry, residuals, traces, autocorrelation, corners
      (deviations, RTN, absolute C/S, derived C20 / J22 / lambda22 / phi0, each with and without
      the prior).
+  7) Posterior split (GMM) + per-component STM propagation to gmm_target_hours (past the
+     arc), checked against an exact Monte Carlo of posterior samples (gmm_prediction, the GMM
+     block of scenario_NGSR.py): fig_gmm_stm_propagation (+ _rtn), fig_gmm_prediction_history.
 
-The degree-2 dynamics, the symmetry chart and the helpers are imported from
-scenario_ISL_SH2.py.
+The degree-2 dynamics, the symmetry chart and the helpers (gmm_prediction included) are
+imported from extra/scenario_ISL_SH2.py.
 
 Units: km, km/s, s.
 """
@@ -72,13 +82,14 @@ from pathlib import Path
 import numpy as np
 import spiceypy as spice
 import trimesh
+from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares, minimize_scalar
 from scipy.stats import norm, uniform
 
 import MCMCPlots
 from BatchLSQ import BatchLSQ
 from get_CS_unnormalized import bennu_10_10
-from scenario_ISL_SH2 import (
+from extra.scenario_ISL_SH2 import (
     Degree2Gravity,
     IdentityChart,
     MCMCModelChart,
@@ -88,6 +99,7 @@ from scenario_ISL_SH2 import (
     _Tee,
     derived_quantities,
     exact_map_chart,
+    gmm_prediction,
     isl_residuals,
     make_bennu_rotation_matrix,
     moments_row,
@@ -187,7 +199,7 @@ if __name__ == "__main__":
     # --------------------------
     # Settings
     # --------------------------
-    STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice)
+    STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice; folder + _stt2)
     USE_SYMMETRY_CHART = True  # False: sample dx with the plain STT (fails along the crescent)
     SH_PRIOR = "gaussian"  # "uniform": boxes on C20, C21, S21, C22, S22 (folder + _uniform)
     UNIFORM_HALF_WIDTH = 3.0  # box half-width in prior sigmas, centered on the a priori x0_ref
@@ -195,6 +207,10 @@ if __name__ == "__main__":
     # a file to skip the sampling and redo the diagnostics and figures from it.
     LOAD_CHAIN = None  # e.g. "results/scenario_OREx_popper_SH2_<stamp>/chain.npz"
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample) and the
+    # batch estimate ref1 on every corner plot.
+    SHOW_MAP = True
+    SHOW_BATCH_MEAN = True
 
     # SPICE (as the J1 scripts)
     KERNEL_ROOT = HERE / "data" / "kernels"
@@ -213,11 +229,21 @@ if __name__ == "__main__":
     omega_true = 2.0 * np.pi / (4.296057 * 3600.0)
     SHAPE_PATH = HERE / "data" / "kernels" / "orex" / "bennu_radar_v20.obj"  # orbit scene figure only
 
-    # Popper: circular (point-mass speed) orbit in the body-equatorial frame at t = 0
+    # Popper: planned release state = circular (point-mass speed) orbit in the body-equatorial
+    # frame at t = 0
     ORBIT_RADIUS = 0.4  # km
     ORBIT_INC_DEG = 90.0
     ORBIT_RAAN_DEG = None  # None: orbit plane through the mean azimuth of OREx about the axis
     ORBIT_U0_DEG = 0.0  # argument of latitude at t = 0
+    # Release error of the probe (no propulsion: the delivered orbit is what the spring gives).
+    # False: the probe starts exactly on the planned orbit (folder without _delivered).
+    DELIVERY = True
+    DELIVERY_SIGMA_R = 0.02  # km per axis (20 m: mothercraft navigation at release)
+    DELIVERY_SIGMA_V = 1e-5  # km/s per axis (1 cm/s: spring separation speed and direction)
+    DELIVERY_SEED = 1
+    DELIVERY_CHECK_HOURS = 48.0  # survival window (arc + GMM prediction)
+    DELIVERY_R_MIN = 1.05 * R_ref  # km: closer = contact with the ridge / field not valid
+    DELIVERY_R_MAX = 2.0  # km: farther = escaping
 
     # Tracking: one-way Doppler (range-rate) from OREx
     ARC_HOURS = 24.0
@@ -250,6 +276,23 @@ if __name__ == "__main__":
     SEED_WALKERS = 7
     N_EXACT_CHECK = 1000  # posterior samples propagated exactly (importance check)
 
+    # Posterior split (GMM) + STM propagation past the arc (as scenario_NGSR.py)
+    GMM_PROPAGATION = True
+    gmm_target_hours = 48.0  # [h since utc0]; the arc ends at ARC_HOURS
+    # K = 8 (as NGSR) puts part of the crescent's sag into the mean-motion direction: ~2.5x the
+    # Monte Carlo spread at 48 h. K = 32 matches it (45 vs 48 m at 48 h), ~40 s.
+    gmm_n_components = 32
+    gmm_select_bic = False  # True: K in 1..12 by BIC
+    GMM_FIT_CHART = False  # True: fit in chart coordinates (see gmm_prediction)
+    n_mc_prop = 1000  # posterior samples propagated exactly (one stacked solve)
+    n_t_prop = 97  # output epochs (every 30 min to 48 h)
+    gmm_prob = 0.99
+    GMM_BATCH = True  # also propagate the batch Gaussian N(0, cov1)
+    GMM_RTN = True  # also save the RTN version of fig_gmm_stm_propagation
+    GMM_SHOW_MC = False
+    GMM_SHOW_COMPONENTS = False
+    GMM_SHOW_EPOCH = False  # True: also the posterior at the epoch (top row) in fig_gmm_stm_propagation(_rtn)
+
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s, km^3/s^2 ->
     # m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1)
     PARAM_SYM = [
@@ -280,8 +323,8 @@ if __name__ == "__main__":
         resid_labels=("Range", "Range-Rate"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
-    # Folder name: <script name>_YYMMDDHHMMSS (+ _plain without the symmetry chart, + _uniform
-    # with the box priors)
+    # Folder name: <script name>_YYMMDDHHMMSS (+ _stt<order> with STT_ORDER > 1, + _plain without
+    # the symmetry chart, + _uniform with the box priors, + _delivered with the release error)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -289,6 +332,8 @@ if __name__ == "__main__":
             Path(__file__).stem
             + "_"
             + datetime.now().strftime("%y%m%d%H%M%S")
+            + ("_delivered" if DELIVERY else "")
+            + (f"_stt{STT_ORDER}" if STT_ORDER > 1 else "")
             + ("" if USE_SYMMETRY_CHART else "_plain")
             + ("_uniform" if SH_PRIOR == "uniform" else "")
         )
@@ -363,6 +408,64 @@ if __name__ == "__main__":
     v0_true = M0.T @ Q_orb @ (v_circ * np.array([-np.sin(u0), np.cos(u0), 0.0]))
     x0_true = np.concatenate([r0_true, v0_true, [GM_true], cs_true])
 
+    def body_elements(x):
+        """Osculating inclination, node [deg] (body-equatorial frame at t = 0), e, a [km] of x."""
+        rb, vb = M0 @ x[:3], M0 @ x[3:6]
+        h = np.cross(rb, vb)
+        e_vec = np.cross(vb, h) / GM_true - rb / np.linalg.norm(rb)
+        a = 1.0 / (2.0 / np.linalg.norm(rb) - vb @ vb / GM_true)
+        inc = np.rad2deg(np.arccos(h[2] / np.linalg.norm(h)))
+        return inc, np.rad2deg(np.arctan2(h[0], -h[1])), np.linalg.norm(e_vec), a
+
+    if DELIVERY:
+        # Spring release without propulsion: draw the release error, redraw failed deployments
+
+        def _contact(t, y):
+            return np.linalg.norm(y[:3]) - DELIVERY_R_MIN
+
+        def _escape(t, y):
+            return np.linalg.norm(y[:3]) - DELIVERY_R_MAX
+
+        _contact.terminal = _escape.terminal = True
+        rng_del = np.random.default_rng(DELIVERY_SEED)
+        x0_plan = x0_true.copy()
+        for n_draw in range(1, 101):
+            dr0 = DELIVERY_SIGMA_R * rng_del.standard_normal(3)
+            dv0 = DELIVERY_SIGMA_V * rng_del.standard_normal(3)
+            x_try = x0_plan.copy()
+            x_try[0:3] += dr0
+            x_try[3:6] += dv0
+            chk = solve_ivp(
+                lambda t, y: gravity1.f_func(*y, t),
+                (0.0, DELIVERY_CHECK_HOURS * 3600.0),
+                x_try,
+                events=(_contact, _escape),
+                **ivp,
+            )
+            if chk.t_events[0].size == 0 and chk.t_events[1].size == 0:
+                break
+            fate = "contact" if chk.t_events[0].size else "escape"
+            print(
+                f"[Delivery] draw {n_draw}: |dr| {np.linalg.norm(dr0) * 1e3:.1f} m, |dv| "
+                f"{np.linalg.norm(dv0) * 1e5:.2f} cm/s -> {fate} at {chk.t[-1] / 3600:.1f} h, redrawn"
+            )
+        else:
+            raise RuntimeError("[Delivery] no surviving release in 100 draws")
+        x0_true = x_try
+        r0_true, v0_true = x0_true[0:3], x0_true[3:6]
+        i_p, n_p, _, _ = body_elements(x0_plan)
+        i_d, n_d, e_d, a_d = body_elements(x0_true)
+        print(
+            f"[Delivery] seed {DELIVERY_SEED}, draw {n_draw} survives {DELIVERY_CHECK_HOURS:g} h: release "
+            f"error dr = {np.round(dr0 * 1e3, 1)} m, dv = {np.round(dv0 * 1e5, 2)} cm/s "
+            f"(sigma {DELIVERY_SIGMA_R * 1e3:g} m, {DELIVERY_SIGMA_V * 1e5:g} cm/s per axis)"
+        )
+        print(
+            f"[Delivery] planned: inclination {i_p:.2f} deg, node {n_p:.2f} deg, e 0 | delivered: "
+            f"inclination {i_d:.2f} deg, node {n_d:.2f} deg ({(n_d - n_p + 180) % 360 - 180:+.2f} deg "
+            f"from the OREx meridian), e {e_d:.3f}, a {a_d:.3f} km (osculating, t = 0)"
+        )
+
     print("\n[Truth] Propagating the popper...")
     sol_true = prop1.propagate_state_only(x0_true, tau, show_progress=False, **ivp)
     x_true = sol_true.y[:12].T
@@ -376,12 +479,19 @@ if __name__ == "__main__":
         f"[Truth] J22 = {J22_true:.4e}, lambda22 = "
         f"{np.rad2deg(0.5 * np.arctan2(cs_true[4], cs_true[3])):.2f} deg"
     )
-    print(
-        f"[Truth] popper: inclination {ORBIT_INC_DEG:g} deg, node {np.rad2deg(raan):.1f} deg "
-        f"({'OREx mean azimuth' if ORBIT_RAAN_DEG is None else 'set'}), radius "
-        f"{r_dense.min():.3f}-{r_dense.max():.3f} km (R_ref {R_ref} km), speed {v_circ * 1e5:.2f} cm/s, "
-        f"period {2 * np.pi * np.sqrt(ORBIT_RADIUS**3 / GM_true) / 3600:.2f} h"
-    )
+    if DELIVERY:
+        print(
+            f"[Truth] popper (delivered): radius {r_dense.min():.3f}-{r_dense.max():.3f} km (R_ref "
+            f"{R_ref} km), speed {np.linalg.norm(v0_true) * 1e5:.2f} cm/s (planned {v_circ * 1e5:.2f}), "
+            f"period {2 * np.pi * np.sqrt(a_d**3 / GM_true) / 3600:.2f} h (osculating)"
+        )
+    else:
+        print(
+            f"[Truth] popper: inclination {ORBIT_INC_DEG:g} deg, node {np.rad2deg(raan):.1f} deg "
+            f"({'OREx mean azimuth' if ORBIT_RAAN_DEG is None else 'set'}), radius "
+            f"{r_dense.min():.3f}-{r_dense.max():.3f} km (R_ref {R_ref} km), speed {v_circ * 1e5:.2f} cm/s, "
+            f"period {2 * np.pi * np.sqrt(ORBIT_RADIUS**3 / GM_true) / 3600:.2f} h"
+        )
     print(f"[Truth] {vis_mask.sum()}/{N} epochs visible from OREx")
     if r_dense.min() < 1.05 * R_ref:
         print("[WARNING] The popper orbit comes within 5 % of R_ref (field not valid inside)")
@@ -711,6 +821,18 @@ if __name__ == "__main__":
     samples_dx = chart.to_deviation(np.asarray(model.samples, dtype=float))
     x_post = x0_ref1 + samples_dx
 
+    # Posterior mode of the plotted density, the one of dx (the log-prior in theta holds the
+    # chart Jacobian, taken out here), mapped to dx; on the SH and derived corners its image.
+    dx_map = None
+    if SHOW_MAP:
+        theta_map = model.find_map(
+            log_target=lambda th: model.log_posterior(th) - float(chart.log_jacobian(th))
+        )
+        dx_map = chart.to_deviation(theta_map)
+
+    def _map(f):
+        return None if dx_map is None else f(dx_map)
+
     # --------------------------
     # Checks
     # --------------------------
@@ -815,7 +937,13 @@ if __name__ == "__main__":
         "autocorrelation",
         lambda: MCMCPlots.plot_mcmc_autocorrelation(model, burn_in, thin, transform=to_dx),
     )
-    corner_kw = dict(true_theta=true_delta, batch_mean=np.zeros(12), batch_cov=cov1)
+    corner_kw = dict(
+        true_theta=true_delta,
+        batch_mean=np.zeros(12),
+        batch_cov=cov1,
+        map_theta=_map(lambda d: d),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner", lambda: MCMCPlots.plot_corner(samples_dx, name="fig_corner", **corner_kw))
     _figure(
         "corner + prior",
@@ -833,6 +961,8 @@ if __name__ == "__main__":
                 true_theta=A_rtn @ true_delta,
                 batch_mean=np.zeros(12),
                 batch_cov=A_rtn @ cov1 @ A_rtn.T,
+                map_theta=_map(lambda d: A_rtn @ d),
+                show_batch_mean=SHOW_BATCH_MEAN,
                 name="fig_corner_rtn",
                 param_sym=MCMCPlots.RTN_SYM + PARAM_SYM[6:],
                 param_unit=rtn_unit,
@@ -844,7 +974,13 @@ if __name__ == "__main__":
     sh_sym = [r"C_{20}", r"C_{21}", r"S_{21}", r"C_{22}", r"S_{22}"]
     sh_scale, sh_unit = MCMCPlots.auto_param_scales(np.ones(5), [""] * 5, sd1[7:12])
     MCMCPlots.configure(sh_sym, sh_unit, sh_scale)
-    sh_kw = dict(true_theta=x0_true[7:12], batch_mean=x0_ref1[7:12], batch_cov=cov1[7:12, 7:12])
+    sh_kw = dict(
+        true_theta=x0_true[7:12],
+        batch_mean=x0_ref1[7:12],
+        batch_cov=cov1[7:12, 7:12],
+        map_theta=_map(lambda d: (x0_ref1 + d)[7:12]),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner SH", lambda: MCMCPlots.plot_corner(x_post[:, 7:12], name="fig_corner_sh2", **sh_kw))
     _figure(
         "corner SH + prior",
@@ -869,12 +1005,52 @@ if __name__ == "__main__":
         np.sqrt(np.diag(cov_der)),
     )
     MCMCPlots.configure(der_sym, der_unit, der_scale)
-    der_kw = dict(true_theta=der_true, batch_mean=ref_der, batch_cov=cov_der)
+    der_kw = dict(
+        true_theta=der_true,
+        batch_mean=ref_der,
+        batch_cov=cov_der,
+        map_theta=_map(lambda d: derived_quantities(x0_ref1 + d, M0, ref=ref_der)),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner derived", lambda: MCMCPlots.plot_corner(der_post, name="fig_corner_derived", **der_kw))
     _figure(
         "corner derived + prior",
         lambda: MCMCPlots.plot_corner(der_post, name="fig_corner_derived_prior", prior=der_prior, **der_kw),
     )
     MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)  # back to the 12 parameters
+
+    # --------------------------
+    # Posterior split (GMM) + STM propagation, checked against an exact Monte Carlo
+    # --------------------------
+    if GMM_PROPAGATION:
+        t_gmm = gmm_target_hours * 3600.0
+        utc_gmm = spice.et2utc(et0 + t_gmm, "ISOC", 0).replace("T", " ")
+        gmm_prediction(
+            samples_dx,
+            x0_ref1,
+            cov1,
+            x0_true,
+            prop1,
+            gravity1.propagate_many,
+            np.linspace(0.0, t_gmm, n_t_prop),
+            tau[-1],
+            ivp,
+            (
+                f"Posterior at Epoch ({utc0.replace('T', ' ')} UTC)",
+                f"Predicted at {utc_gmm} UTC (+{gmm_target_hours:.2f} h)",
+            ),
+            n_components=gmm_n_components,
+            select_bic=gmm_select_bic,
+            n_mc=n_mc_prop,
+            prob=gmm_prob,
+            batch=GMM_BATCH,
+            rtn=GMM_RTN,
+            show_mc=GMM_SHOW_MC,
+            show_components=GMM_SHOW_COMPONENTS,
+            show_epoch=GMM_SHOW_EPOCH,
+            r_ref=R_ref,
+            chart=sym if GMM_FIT_CHART else None,
+            figure=_figure,
+        )
 
     print(f"\n[Done] Results in {fig_dir}")

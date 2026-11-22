@@ -595,6 +595,10 @@ if __name__ == "__main__":
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample theta_hat)
+    # and the batch estimate ref1 (delta = 0) on every corner plot.
+    SHOW_MAP = True
+    SHOW_BATCH_MEAN = True
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
     # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
@@ -1038,6 +1042,8 @@ if __name__ == "__main__":
         components=[1],  # range-rate only (range is unweighted)
         corner_rtn=x0_ref1 if CORNER_RTN else None,
         corner_rtn_kw=dict(param_unit=rtn_unit, param_scale=rtn_scale),
+        show_map=SHOW_MAP,
+        show_batch_mean=SHOW_BATCH_MEAN,
     )
 
     spice.kclear()

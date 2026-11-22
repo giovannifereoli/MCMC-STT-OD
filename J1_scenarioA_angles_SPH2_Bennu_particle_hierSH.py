@@ -726,6 +726,10 @@ if __name__ == "__main__":
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample theta_hat)
+    # and the batch estimate ref1 (delta = 0) on every corner plot.
+    SHOW_MAP = True
+    SHOW_BATCH_MEAN = True
 
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
     # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
@@ -1200,6 +1204,20 @@ if __name__ == "__main__":
         f"\n[MCMC] At theta_hat: chi2_red = {chi2_mcmc/dof:.3f}  (chi2={chi2_mcmc:.2f}, dof={dof})"
     )
 
+    # Posterior mode of the displayed density: the corners show [state, delta_C, ln sigma_g],
+    # whose density is p(theta_s) / |d display / d theta_s| with log-Jacobian
+    # sum_g n_g ln sigma_g (delta_C = -delta_shift + w sigma_g). Found in the sampled
+    # coordinates (residuals_func and samples are still those), then mapped.
+    map_disp = None
+    if SHOW_MAP:
+        theta_map_s = model.find_map(
+            log_target=lambda th: model.log_posterior(th)
+            - sum(len(idxs) * th[group_to_hyper[g]] for g, idxs in group_index_map.items())
+        )
+        map_disp = np.hstack(
+            [physical_delta_from_sampling(theta_map_s), theta_map_s[12:]]
+        )
+
     # Back-transform the chain SH columns (w -> physical delta_C about ref1) so all
     # reporting/plots are in physical deviation space; sigma_g columns left as-is.
     for g, idxs in group_index_map.items():
@@ -1292,6 +1310,9 @@ if __name__ == "__main__":
         # hollow star / dotted line with its own legend entry
         prior_idx=[group_to_hyper[g] for g in group_labels],
         prior_truth_label="Realized Deviation Scale",
+        map_theta=map_disp,
+        # batch marker on the 12 physical deltas only (not on the ln sigma_g panels)
+        show_batch_mean=SHOW_BATCH_MEAN,
     )
     journal_figs = (
         (
@@ -1331,6 +1352,7 @@ if __name__ == "__main__":
             true_theta=A_rtn @ true_theta,
             batch_mean=A_rtn @ batch_mean_full,
             batch_cov=A_rtn @ batch_cov_full @ A_rtn.T,
+            map_theta=None if map_disp is None else A_rtn @ map_disp,
             transform=lambda S: np.asarray(S) @ A_rtn.T,
             name="fig_corner_rtn",
             param_sym=MCMCPlots.RTN_SYM + PARAM_SYM[6:],

@@ -473,6 +473,9 @@ if __name__ == "__main__":
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample) on every
+    # corner plot (no batch estimate in this script, so no batch marker).
+    SHOW_MAP = True
 
     # Parameter symbols and display units (km -> m, km/s -> mm/s; rescaled by powers of ten
     # from the posterior sigmas after the run); one PDF per figure in a timestamped folder.
@@ -643,6 +646,12 @@ if __name__ == "__main__":
         return np.asarray(theta, float) - true_delta
 
     zero = np.zeros_like(true_delta)
+    # posterior mode, in model coordinates (mapped by each corner's transform)
+    theta_map = model.find_map() if SHOW_MAP else None
+
+    def map_in(transform):
+        return None if theta_map is None else transform(theta_map)
+
     disp_scale, disp_unit = MCMCPlots.auto_param_scales(
         PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.std(model.samples, axis=0)
     )
@@ -658,7 +667,9 @@ if __name__ == "__main__":
     def corner_with_prior():
         MCMCPlots.configure(PARAM_SYM, prior_unit, prior_scale)
         try:
-            model.plot_journal_corner(true_theta=zero, transform=to_error, prior=True)
+            model.plot_journal_corner(
+                true_theta=zero, transform=to_error, prior=True, map_theta=map_in(to_error)
+            )
         finally:
             MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
 
@@ -675,6 +686,7 @@ if __name__ == "__main__":
         model.plot_journal_corner(
             true_theta=zero,
             transform=to_rtn,
+            map_theta=map_in(to_rtn),
             name="fig_corner_rtn",
             param_sym=MCMCPlots.RTN_SYM,
             param_unit=rtn_unit,
@@ -691,7 +703,9 @@ if __name__ == "__main__":
         ("autocorrelation", lambda: model.plot_journal_autocorrelation(burn_in, thin)),
         (
             "corner",
-            lambda: model.plot_journal_corner(true_theta=zero, transform=to_error),
+            lambda: model.plot_journal_corner(
+                true_theta=zero, transform=to_error, map_theta=map_in(to_error)
+            ),
         ),
         ("corner + prior", corner_with_prior),
     )

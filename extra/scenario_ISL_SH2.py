@@ -40,7 +40,7 @@ Sampling the ridge
   the plain STT, for comparison.
 - STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only, and Stage 1 ends with an
   exact trust-region least-squares MAP in chart coordinates (exact_map_chart); 2 adds the
-  second-order STT, and Stage 1 ends with the STT re-centering.
+  second-order STT, and Stage 1 ends with the STT re-centering (results folder suffix _stt2).
 - SH_PRIOR = "uniform" replaces the Gaussian priors of C20, C21, S21, C22, S22 by boxes
   x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder suffix
   _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd of
@@ -60,6 +60,9 @@ Pipeline
   6) Checks (arc angle, Gelman-Rubin, exact importance check), summary table and figures:
      residuals, traces, autocorrelation, corners (deviations, RTN, absolute C/S, derived
      C20 / J22 / lambda22 / phi0, each with and without the prior).
+  7) Posterior split (GMM) + per-component STM propagation to gmm_target_hours (past the
+     arc), checked against an exact Monte Carlo of posterior samples (gmm_prediction, the GMM
+     block of scenario_NGSR.py): fig_gmm_stm_propagation (+ _rtn), fig_gmm_prediction_history.
 
 Units: km, km/s, s.
 """
@@ -75,9 +78,13 @@ from scipy.integrate import solve_ivp
 from scipy.optimize import least_squares, minimize_scalar
 from scipy.stats import kurtosis, norm, skew, uniform
 
+# The script lives in extra/: the project modules are in the parent folder
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import MCMCPlots
 from BatchLSQ import BatchLSQ
 from get_CS_unnormalized import bennu_10_10
+from GMM import GMM, position_prediction_history
 from MCMC import MCMCModel
 from STTPropagationND import STTPropagatorND
 
@@ -747,6 +754,256 @@ class _Tee:
 
 
 # ============================================================
+# Posterior split (GMM) + STM propagation (as scenario_NGSR.py)
+# ============================================================
+
+
+def gmm_prediction(
+    samples_dx,
+    x0_ref1,
+    cov1,
+    x0_true,
+    propagator,
+    propagate_many,
+    t_prop,
+    t_obs_end,
+    ivp,
+    titles,
+    n_components=8,
+    select_bic=False,
+    n_mc=1000,
+    prob=0.99,
+    batch=True,
+    rtn=True,
+    show_mc=False,
+    show_components=False,
+    show_epoch=False,
+    r_ref=None,
+    chart=None,
+    seed=2024,
+    figure=None,
+):
+    """
+    Split the posterior at the epoch into a Gaussian mixture, propagate every component with
+    its own STM and check the predicted mixture against a nonlinear Monte Carlo of posterior
+    samples (the GMM block of scenario_NGSR.py, for the 12-D degree-2 state):
+
+        m_k(t) = phi(t; x0_ref1 + mu_k),      P_k(t) = Phi_k(t) P_k Phi_k(t)^T.
+
+    By default the mixture is fit to the Cartesian deviations dx, which the STMs map. The
+    crescent along g_delta then takes many components: a few straight ones put part of its sag
+    into the stiff mean-motion direction, and the prediction comes out too wide (with K = 8 about
+    4x the Monte Carlo spread at 48 h, close with K = 32). With chart, the mixture is fit to the
+    chart coordinates theta instead, where the crescent is straight, and each component is
+    mapped to dx by the chart Jacobian at its mean. The prediction then has the Monte Carlo size
+    even with K = 8, because the STMs carry the symmetry generator exactly, but the thin mapped
+    components do not follow the sag, so the mixture log-density stays poor. With batch, the
+    Stage-1 Gaussian N(0, cov1) (STM about ref1) is propagated the same way. The Monte Carlo
+    propagates n_mc posterior samples exactly in one stacked solve (propagate_many).
+
+    Parameters
+    ----------
+    samples_dx : ndarray, shape (M, 12)
+        Posterior deviations about x0_ref1 at t = 0.
+    x0_ref1, x0_true : ndarray, shape (12,)
+        Batch solution (reference of the deviations) and truth.
+    cov1 : ndarray, shape (12, 12)
+        Batch covariance at x0_ref1.
+    propagator : STTPropagatorND
+        Order-1 propagator (states + STMs), for GMM.propagate_stm.
+    propagate_many : callable
+        propagate_many(X0s (n, 12), t_eval, **ivp) -> (n, N_t, 6): exact r, v
+        (Degree2Gravity.propagate_many).
+    t_prop : ndarray, shape (N_t,)
+        Output epochs [s]; t_prop[0] = 0, the epoch of the samples.
+    t_obs_end : float
+        End of the observation arc [s] (shaded in fig_gmm_prediction_history).
+    ivp : dict
+        solve_ivp options (method, rtol, atol) of all propagations.
+    titles : (str, str)
+        Row titles of the epoch and of the target panels.
+    n_components, select_bic : int, bool
+        GMM.fit settings (fixed K, or K in 1..12 by BIC).
+    n_mc : int
+        Posterior samples propagated exactly.
+    prob : float
+        Probability mass of the plotted regions.
+    batch : bool
+        Also draw the propagated batch Gaussian N(0, cov1) and print its metrics.
+    rtn : bool
+        Also save fig_gmm_stm_propagation_rtn (RTN frame of the propagated batch solution at
+        each row's epoch).
+    show_mc, show_components : bool
+        Draw the MC cloud / every component's ellipse in the propagation figures.
+    show_epoch : bool
+        Also draw the posterior at the epoch (top row) in the propagation figures; default:
+        only the prediction at t_prop[-1].
+    r_ref : float, optional
+        Reference radius of the field: warn if the truth or a MC sample comes within 5 % of it
+        along the prediction.
+    chart : SymmetryChart, optional
+        Fit the mixture in its coordinates theta = chart.from_deviation(dx) (see above);
+        default: fit dx.
+    seed : int
+        Seed of the MC subsample.
+    figure : callable, optional
+        figure(label, draw) wrapping each figure (e.g. the scripts' _figure, which reports and
+        skips a plotting error); default: draw() directly.
+
+    Returns
+    -------
+    dict
+        gmm (GMM at t = 0), gmm_t, batch_t (lists of GMM, one per output epoch; batch_t None
+        without batch and rtn), X_mc (n_mc, N_t, 6), x_true_prop (N_t, 6), hist
+        (GMM.position_prediction_history).
+    """
+    figure = figure or (lambda label, draw: draw())
+    post = np.asarray(samples_dx, dtype=float)
+    x0_ref1 = np.asarray(x0_ref1, dtype=float)
+    t_prop = np.asarray(t_prop, dtype=float)
+    pos = slice(0, 3)
+    print(
+        f"\n[GMM] Splitting {post.shape[0]} posterior samples at the epoch and propagating to "
+        f"+{t_prop[-1] / 3600.0:.2f} h (observation arc 0-{t_obs_end / 3600.0:.2f} h)"
+    )
+    if chart is None:
+        gmm = GMM.fit(post, n_components=n_components, select_bic=select_bic)
+    else:
+        # Fit in chart coordinates; component k -> N(dx(mu_k), J_k P_k J_k^T), J_k = d dx / d theta
+        theta = chart.from_deviation(post)
+        g_th = GMM.fit(theta, n_components=n_components, select_bic=select_bic)
+        h = 1e-4 * theta.std(axis=0)
+        jac = [numeric_jacobian(chart.to_deviation, mu, h) for mu in g_th.means]
+        covs = np.array([J @ P @ J.T for J, P in zip(jac, g_th.covs)])
+        gmm = GMM(g_th.weights, chart.to_deviation(g_th.means), 0.5 * (covs + np.transpose(covs, (0, 2, 1))))
+        print("[GMM] fit in chart coordinates, components mapped to dx by the chart Jacobian")
+    print("[GMM] weights:", np.array2string(gmm.weights, precision=3))
+
+    # One GMM per output epoch (absolute states)
+    gmm_t = gmm.propagate_stm(propagator, x0_ref1, t_prop, **ivp)
+    # Batch LSQ Gaussian: mean ref1 (delta 0) on its nonlinear trajectory, cov1 mapped by the
+    # STM about ref1. Its mean also defines the RTN frame of fig_gmm_stm_propagation_rtn.
+    batch_t = (
+        GMM.gaussian(np.zeros(x0_ref1.size), cov1).propagate_stm(
+            propagator, x0_ref1, t_prop, label="Batch LSQ", **ivp
+        )
+        if batch or rtn
+        else None
+    )
+
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(post.shape[0], size=min(n_mc, post.shape[0]), replace=False)
+    print(f"[MC] Propagating {idx.size} posterior samples exactly (one stacked solve)...")
+    X_mc = propagate_many(x0_ref1 + post[idx], t_prop, **ivp)
+    x_true_prop = propagate_many(np.asarray(x0_true, dtype=float)[None], t_prop, **ivp)[0]
+
+    # The degree-2 field is only valid outside the reference sphere
+    if r_ref is not None:
+        r_tr = float(np.linalg.norm(x_true_prop[:, :3], axis=-1).min())
+        r_mc = float(np.linalg.norm(X_mc[:, :, :3], axis=-1).min())
+        print(
+            f"[GMM] closest approach along the prediction: truth {r_tr:.3f} km, MC samples "
+            f"{r_mc:.3f} km (R_ref {r_ref} km)"
+        )
+        if min(r_tr, r_mc) < 1.05 * r_ref:
+            print("[WARNING] The prediction comes within 5 % of R_ref (field not valid inside)")
+
+    # Metrics at the target epoch (position, meters)
+    pos_mc = X_mc[:, -1, pos]
+    m_mc = pos_mc.mean(axis=0)
+    gmm_T = gmm_t[-1].marginal(pos)
+    mg_T, Pg_T = gmm_T.moments()
+    print(f"\n[GMM] Position at +{t_prop[-1] / 3600.0:.2f} h, per-axis 1-sigma [m]:")
+    print("   MC             :", np.array2string(np.std(pos_mc, axis=0, ddof=1) * 1e3, precision=2))
+    print("   GMM + STMs     :", np.array2string(np.sqrt(np.diag(Pg_T)) * 1e3, precision=2))
+    print("[GMM] Mean offset from the MC mean [m]:")
+    print("   GMM + STMs     :", np.array2string((mg_T - m_mc) * 1e3, precision=2))
+    ll_g = np.mean(gmm_T.logpdf(pos_mc))
+    print(f"[GMM] Mean log-density of the MC positions: GMM {ll_g:.3f}")
+    r_tr_T = x_true_prop[-1, pos]
+    print(f"[GMM] Truth at target: log p GMM {gmm_T.logpdf(r_tr_T)[0]:.3f}")
+    if batch:
+        batch_T = batch_t[-1].marginal(pos)
+        mb_T, Pb_T = batch_T.moments()
+        d_trb = r_tr_T - mb_T
+        print("[GMM] Batch LSQ + STM at target (same metrics):")
+        print("   1-sigma [m]          :", np.array2string(np.sqrt(np.diag(Pb_T)) * 1e3, precision=2))
+        print("   mean - MC mean [m]   :", np.array2string((mb_T - m_mc) * 1e3, precision=2))
+        ll_b = np.mean(batch_T.logpdf(pos_mc))
+        print(
+            f"   mean log-density of the MC positions {ll_b:.3f} (GMM - batch = "
+            f"{ll_g - ll_b:+.3f} nats) | truth log p {batch_T.logpdf(r_tr_T)[0]:.3f} | truth "
+            f"Mahalanobis {float(np.sqrt(d_trb @ np.linalg.solve(Pb_T, d_trb))):.2f}"
+        )
+
+    # Figures
+    def _panel(j, title, C=None):
+        """Position panel at output epoch j; C (3, 3) rotates it (e.g. to RTN)."""
+        p = dict(
+            mc=X_mc[:, j, pos],
+            gmm=gmm_t[j].marginal(pos),
+            truth=x_true_prop[j, pos],
+            center=X_mc[:, j, pos].mean(axis=0),
+            title=title,
+        )
+        if batch:
+            p["batch"] = batch_t[j].marginal(pos)
+        if C is not None:
+            p.update(
+                mc=p["mc"] @ C.T,
+                truth=C @ p["truth"],
+                center=C @ p["center"],
+                **{k: p[k].linear_map(C) for k in ("gmm", "batch") if k in p},
+            )
+        return p
+
+    # Rows: the prediction at the target epoch, after the posterior at the epoch with show_epoch
+    title_0, title_T = titles
+    rows = [(0, title_0), (-1, title_T)] if show_epoch else [(-1, title_T)]
+    rtn_title = {
+        0: ", RTN Frame of the Batch Solution",
+        -1: ", RTN Frame of the Propagated Batch Solution",
+    }
+    figure(
+        "GMM propagation",
+        lambda: MCMCPlots.plot_gmm_propagation(
+            [_panel(j, title) for j, title in rows],
+            prob=prob,
+            show_mc=show_mc,
+            show_components=show_components,
+        ),
+    )
+    if rtn:
+        figure(
+            "GMM propagation RTN",
+            lambda: MCMCPlots.plot_gmm_propagation(
+                [
+                    _panel(j, title + rtn_title[j], C=MCMCPlots.rtn_matrix(batch_t[j].means[0]))
+                    for j, title in rows
+                ],
+                prob=prob,
+                name="fig_gmm_stm_propagation_rtn",
+                axis_names=[r"$\delta r_R$ [m]", r"$\delta r_T$ [m]", r"$\delta r_N$ [m]"],
+                show_mc=show_mc,
+                show_components=show_components,
+            ),
+        )
+    hist = position_prediction_history(X_mc, gmm_t, batch_t=batch_t if batch else None)
+    figure(
+        "GMM prediction history",
+        lambda: MCMCPlots.plot_prediction_history(t_prop / 3600.0, hist, t_obs_end / 3600.0),
+    )
+    return dict(
+        gmm=gmm,
+        gmm_t=gmm_t,
+        batch_t=batch_t,
+        X_mc=X_mc,
+        x_true_prop=x_true_prop,
+        hist=hist,
+    )
+
+
+# ============================================================
 # MAIN SCRIPT
 # ============================================================
 
@@ -756,14 +1013,18 @@ if __name__ == "__main__":
     # --------------------------
     # Settings
     # --------------------------
-    STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice)
+    STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice; folder + _stt2)
     USE_SYMMETRY_CHART = True  # False: sample dx with the plain STT (fails along the arc)
     SH_PRIOR = "gaussian"  # "uniform": boxes on C20, C21, S21, C22, S22 (folder + _uniform)
     UNIFORM_HALF_WIDTH = 3.0  # box half-width in prior sigmas, centered on the a priori x0_ref
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to such
     # a file to skip the sampling and redo the diagnostics and figures from it.
-    LOAD_CHAIN = None  # e.g. "results/scenario_ISL_SH2_<stamp>/chain.npz"
+    LOAD_CHAIN = None  # e.g. "extra/results/scenario_ISL_SH2_<stamp>/chain.npz"
     CORNER_RTN = True
+    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample) and the
+    # batch estimate ref1 on every corner plot.
+    SHOW_MAP = True
+    SHOW_BATCH_MEAN = True
 
     # Bennu (unnormalized degree-2 coefficients of the OSIRIS-REx field)
     R_ref = 0.290  # km
@@ -772,7 +1033,7 @@ if __name__ == "__main__":
     alpha_true = np.deg2rad(85.65)
     delta_true = np.deg2rad(-60.17)
     omega_true = 2.0 * np.pi / (4.296057 * 3600.0)
-    SHAPE_PATH = HERE / "data" / "kernels" / "orex" / "bennu_radar_v20.obj"  # orbit scene figure only
+    SHAPE_PATH = HERE.parent / "data" / "kernels" / "orex" / "bennu_radar_v20.obj"  # orbit scene figure only
 
     # Mothercraft: MC_DIST km from the center, on the spin axis (MC_TILT_DEG = 0) or tilted
     # from it towards body longitude MC_TILT_AZ_DEG (at t = 0); fixed in inertial space.
@@ -819,6 +1080,23 @@ if __name__ == "__main__":
     SEED_WALKERS = 7
     N_EXACT_CHECK = 1000  # posterior samples propagated exactly (importance check)
 
+    # Posterior split (GMM) + STM propagation past the arc (as scenario_NGSR.py)
+    GMM_PROPAGATION = True
+    gmm_target_hours = 48.0  # [h since the epoch]; the arc ends at ARC_HOURS
+    # K = 8 (as NGSR) puts part of the crescent's sag into the mean-motion direction: ~4x the
+    # Monte Carlo spread at 48 h. K = 32 is within 1.5x (128 vs 84 m at 48 h), ~2 min.
+    gmm_n_components = 32
+    gmm_select_bic = False  # True: K in 1..12 by BIC
+    GMM_FIT_CHART = False  # True: fit in chart coordinates (right spread, poor log-density)
+    n_mc_prop = 1000  # posterior samples propagated exactly (one stacked solve)
+    n_t_prop = 97  # output epochs (every 30 min to 48 h)
+    gmm_prob = 0.99
+    GMM_BATCH = True  # also propagate the batch Gaussian N(0, cov1)
+    GMM_RTN = True  # also save the RTN version of fig_gmm_stm_propagation
+    GMM_SHOW_MC = False
+    GMM_SHOW_COMPONENTS = False
+    GMM_SHOW_EPOCH = False  # True: also the posterior at the epoch (top row) in fig_gmm_stm_propagation(_rtn)
+
     # Figures: parameter symbols and display units (km -> m, km/s -> mm/s, km^3/s^2 ->
     # m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1)
     PARAM_SYM = [
@@ -849,8 +1127,8 @@ if __name__ == "__main__":
         resid_labels=("Range", "Range-Rate"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
-    # Folder name: <script name>_YYMMDDHHMMSS (+ _plain without the symmetry chart, + _uniform
-    # with the box priors)
+    # Folder name: <script name>_YYMMDDHHMMSS (+ _stt<order> with STT_ORDER > 1, + _plain without
+    # the symmetry chart, + _uniform with the box priors)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
@@ -858,6 +1136,7 @@ if __name__ == "__main__":
             Path(__file__).stem
             + "_"
             + datetime.now().strftime("%y%m%d%H%M%S")
+            + (f"_stt{STT_ORDER}" if STT_ORDER > 1 else "")
             + ("" if USE_SYMMETRY_CHART else "_plain")
             + ("_uniform" if SH_PRIOR == "uniform" else "")
         )
@@ -1264,6 +1543,18 @@ if __name__ == "__main__":
     samples_dx = chart.to_deviation(np.asarray(model.samples, dtype=float))
     x_post = x0_ref1 + samples_dx
 
+    # Posterior mode of the plotted density, the one of dx (the log-prior in theta holds the
+    # chart Jacobian, taken out here), mapped to dx; on the SH and derived corners its image.
+    dx_map = None
+    if SHOW_MAP:
+        theta_map = model.find_map(
+            log_target=lambda th: model.log_posterior(th) - float(chart.log_jacobian(th))
+        )
+        dx_map = chart.to_deviation(theta_map)
+
+    def _map(f):
+        return None if dx_map is None else f(dx_map)
+
     # --------------------------
     # Checks
     # --------------------------
@@ -1352,7 +1643,13 @@ if __name__ == "__main__":
         "autocorrelation",
         lambda: MCMCPlots.plot_mcmc_autocorrelation(model, burn_in, thin, transform=to_dx),
     )
-    corner_kw = dict(true_theta=true_delta, batch_mean=np.zeros(12), batch_cov=cov1)
+    corner_kw = dict(
+        true_theta=true_delta,
+        batch_mean=np.zeros(12),
+        batch_cov=cov1,
+        map_theta=_map(lambda d: d),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner", lambda: MCMCPlots.plot_corner(samples_dx, name="fig_corner", **corner_kw))
     _figure(
         "corner + prior",
@@ -1370,6 +1667,8 @@ if __name__ == "__main__":
                 true_theta=A_rtn @ true_delta,
                 batch_mean=np.zeros(12),
                 batch_cov=A_rtn @ cov1 @ A_rtn.T,
+                map_theta=_map(lambda d: A_rtn @ d),
+                show_batch_mean=SHOW_BATCH_MEAN,
                 name="fig_corner_rtn",
                 param_sym=MCMCPlots.RTN_SYM + PARAM_SYM[6:],
                 param_unit=rtn_unit,
@@ -1381,7 +1680,13 @@ if __name__ == "__main__":
     sh_sym = [r"C_{20}", r"C_{21}", r"S_{21}", r"C_{22}", r"S_{22}"]
     sh_scale, sh_unit = MCMCPlots.auto_param_scales(np.ones(5), [""] * 5, sd1[7:12])
     MCMCPlots.configure(sh_sym, sh_unit, sh_scale)
-    sh_kw = dict(true_theta=x0_true[7:12], batch_mean=x0_ref1[7:12], batch_cov=cov1[7:12, 7:12])
+    sh_kw = dict(
+        true_theta=x0_true[7:12],
+        batch_mean=x0_ref1[7:12],
+        batch_cov=cov1[7:12, 7:12],
+        map_theta=_map(lambda d: (x0_ref1 + d)[7:12]),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner SH", lambda: MCMCPlots.plot_corner(x_post[:, 7:12], name="fig_corner_sh2", **sh_kw))
     _figure(
         "corner SH + prior",
@@ -1406,12 +1711,47 @@ if __name__ == "__main__":
         np.sqrt(np.diag(cov_der)),
     )
     MCMCPlots.configure(der_sym, der_unit, der_scale)
-    der_kw = dict(true_theta=der_true, batch_mean=ref_der, batch_cov=cov_der)
+    der_kw = dict(
+        true_theta=der_true,
+        batch_mean=ref_der,
+        batch_cov=cov_der,
+        map_theta=_map(lambda d: derived_quantities(x0_ref1 + d, M0, ref=ref_der)),
+        show_batch_mean=SHOW_BATCH_MEAN,
+    )
     _figure("corner derived", lambda: MCMCPlots.plot_corner(der_post, name="fig_corner_derived", **der_kw))
     _figure(
         "corner derived + prior",
         lambda: MCMCPlots.plot_corner(der_post, name="fig_corner_derived_prior", prior=der_prior, **der_kw),
     )
     MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)  # back to the 12 parameters
+
+    # --------------------------
+    # Posterior split (GMM) + STM propagation, checked against an exact Monte Carlo
+    # --------------------------
+    if GMM_PROPAGATION:
+        gmm_prediction(
+            samples_dx,
+            x0_ref1,
+            cov1,
+            x0_true,
+            prop1,
+            gravity1.propagate_many,
+            np.linspace(0.0, gmm_target_hours * 3600.0, n_t_prop),
+            tau[-1],
+            ivp,
+            ("Posterior at Epoch", f"Predicted at Epoch + {gmm_target_hours:g} h"),
+            n_components=gmm_n_components,
+            select_bic=gmm_select_bic,
+            n_mc=n_mc_prop,
+            prob=gmm_prob,
+            batch=GMM_BATCH,
+            rtn=GMM_RTN,
+            show_mc=GMM_SHOW_MC,
+            show_components=GMM_SHOW_COMPONENTS,
+            show_epoch=GMM_SHOW_EPOCH,
+            r_ref=R_ref,
+            chart=sym if GMM_FIT_CHART else None,
+            figure=_figure,
+        )
 
     print(f"\n[Done] Results in {fig_dir}")

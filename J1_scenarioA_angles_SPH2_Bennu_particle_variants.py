@@ -93,6 +93,7 @@ Units:
 
 
 import os
+import shutil
 import sys
 import time
 import argparse
@@ -562,6 +563,13 @@ PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
 # samples are left out of fig_corner_rtn_<variant> and of the summary.
 STRANDED_DLOGP = 100.0
 
+# Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample theta_hat) and
+# the batch estimate ref1 (delta = 0) on every corner plot, fig_corner_rtn_<variant> included.
+# The mode is saved in batch.npz (theta_map), so --post redraws it; folders from runs before
+# it was saved get no mode marker.
+SHOW_MAP = True
+SHOW_BATCH_MEAN = True
+
 
 # ============================================================
 # Post-processing: stranded walkers, clean RTN corner, summary
@@ -635,7 +643,10 @@ def postprocess_run(run_dir, variant):
     rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
         PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(A @ cov1 @ A.T))
     )
-    kw = MCMCPlots._mapped_corner_kw(A, t, np.zeros(12), cov1)
+    theta_map = b["theta_map"] if SHOW_MAP and "theta_map" in b.files else None
+    kw = MCMCPlots._mapped_corner_kw(A, t, np.zeros(12), cov1, theta_map)
+    if SHOW_BATCH_MEAN:
+        kw["show_batch_mean"] = True
     kw["param_sym"] = MCMCPlots.RTN_SYM + PARAM_SYM[6:]
     kw.update(param_unit=rtn_unit, param_scale=rtn_scale)
     out = MCMCPlots.plot_mcmc_corner(
@@ -1152,6 +1163,8 @@ if __name__ == "__main__":
     if LOAD_CHAIN:
         model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
         burn_in, thin = model.burn_in, model.thin
+        # postprocess_run reads chain.npz from fig_dir
+        shutil.copyfile(LOAD_CHAIN, fig_dir / "chain.npz")
     else:
         model.run(
             n_samples=n_samples,
@@ -1175,6 +1188,8 @@ if __name__ == "__main__":
 
     true_delta = x0_true - x0_ref1
     print("\n[Truth] true_delta about ref1:\n", true_delta)
+    # Posterior mode (for the corners and the post-processing)
+    map_kw = dict(theta_map=model.find_map()) if SHOW_MAP else {}
     # Batch solution and truth, for the post-processing (and comparisons across runs)
     np.savez(
         fig_dir / "batch.npz",
@@ -1189,6 +1204,7 @@ if __name__ == "__main__":
         tau=tau,
         prior_sigma=prior_sigma,
         delta_shift=delta_shift,
+        **map_kw,
     )
 
     # --------------------------
@@ -1213,6 +1229,9 @@ if __name__ == "__main__":
         batch_cov=cov1,
         corner_rtn=x0_ref1 if CORNER_RTN else None,
         corner_rtn_kw=dict(param_unit=rtn_unit, param_scale=rtn_scale),
+        show_map=SHOW_MAP,
+        map_theta=map_kw.get("theta_map"),
+        show_batch_mean=SHOW_BATCH_MEAN,
     )
 
     spice.kclear()

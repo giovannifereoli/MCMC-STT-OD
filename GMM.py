@@ -4,7 +4,6 @@ Gaussian mixtures of an MCMC posterior and their propagation with first-order ST
     from GMM import GMM, propagate_samples_mc, position_prediction_history
 
     gmm = GMM.fit(model.samples, n_components=8)            # posterior split (deltas)
-    one = GMM.gaussian(samples.mean(0), np.cov(samples.T))   # single-Gaussian baseline
     gmm_t = gmm.propagate_stm(propagator, x0_ref, t_eval)    # one GMM per output epoch
     m, P = gmm_t[-1].marginal(slice(0, 3)).moments()         # position mean / covariance
 
@@ -406,33 +405,32 @@ def propagate_samples_mc(propagator, x0_ref, deltas, t_eval, **ivp):
     return out
 
 
-def position_prediction_history(X_mc, gmm_t, single_t, batch_t=None):
+def position_prediction_history(X_mc, gmm_t, batch_t=None):
     """
-    Per-epoch position (3D) check of the propagated GMM and Gaussian vs Monte Carlo.
+    Per-epoch position (3D) check of the propagated GMM (and Gaussian) vs Monte Carlo.
 
     Parameters
     ----------
     X_mc : ndarray, shape (M, N_t, n)
         Monte Carlo states (propagate_samples_mc), positions in [:3] [km]. Must hold no
         NaN rows.
-    gmm_t, single_t : list of GMM
-        The per-epoch mixtures returned by GMM.propagate_stm for the GMM and for the single
-        Gaussian.
+    gmm_t : list of GMM
+        The per-epoch mixtures returned by GMM.propagate_stm.
     batch_t : list of GMM, optional
-        A further propagated Gaussian (e.g. the batch least-squares solution and its
-        covariance), checked the same way.
+        A propagated Gaussian (e.g. the batch least-squares solution and its covariance),
+        checked the same way.
 
     Returns
     -------
     dict of ndarray, each shape (N_t,)
-        sig_mc, sig_gmm, sig_1 : sqrt(trace P_rr) [km] of the MC sample covariance, of the
-        moment-matched GMM and of the single Gaussian.
-        ll_gmm, ll_1 : mean log-density of the MC positions under the GMM / the single
-        Gaussian position marginal (higher = better fit of the MC cloud).
+        sig_mc, sig_gmm : sqrt(trace P_rr) [km] of the MC sample covariance and of the
+        moment-matched GMM.
+        ll_gmm : mean log-density of the MC positions under the GMM position marginal
+        (higher = better fit of the MC cloud).
         sig_batch, ll_batch : the same for batch_t (only if given).
     """
     n_t = X_mc.shape[1]
-    keys = ["sig_mc", "sig_gmm", "sig_1", "ll_gmm", "ll_1"]
+    keys = ["sig_mc", "sig_gmm", "ll_gmm"]
     if batch_t is not None:
         keys += ["sig_batch", "ll_batch"]
     out = {k: np.empty(n_t) for k in keys}
@@ -440,12 +438,9 @@ def position_prediction_history(X_mc, gmm_t, single_t, batch_t=None):
     for j in range(n_t):
         pos = X_mc[:, j, pos_idx]
         g = gmm_t[j].marginal(pos_idx)
-        g1 = single_t[j].marginal(pos_idx)
         out["sig_mc"][j] = np.sqrt(np.trace(np.cov(pos, rowvar=False)))
         out["sig_gmm"][j] = np.sqrt(np.trace(g.moments()[1]))
-        out["sig_1"][j] = np.sqrt(np.trace(g1.moments()[1]))
         out["ll_gmm"][j] = np.mean(g.logpdf(pos))
-        out["ll_1"][j] = np.mean(g1.logpdf(pos))
         if batch_t is not None:
             gb = batch_t[j].marginal(pos_idx)
             out["sig_batch"][j] = np.sqrt(np.trace(gb.moments()[1]))
