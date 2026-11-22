@@ -249,7 +249,7 @@ if __name__ == "__main__":
 
     # MCMC
     n_walkers = 96
-    n_samples = 60000
+    n_samples = 180000  # ~80-110 x max(tau) (tau ~1600-2100 steps)
     burn_in = None  # None: 2 x max(tau)
     thin = None  # None: 0.5 x min(tau)
     spherical_spread = 0.5  # walker start, whitened by the batch covariance in theta
@@ -304,7 +304,7 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
     # Folder name: case<CASE>_bennu_popper(_uniform)_YYMMDDHHMMSS, e.g.
-    # results/case2a_bennu_popper_261122091846 (+ _circular without the release error,
+    # results/case2a_bennu_popper_261122133644 (+ _circular without the release error,
     # + _stt<order> with STT_ORDER > 1, + _plain without the symmetry chart, + _ud with the
     # U-D batch)
     fig_dir = MCMCPlots.set_figure_dir(

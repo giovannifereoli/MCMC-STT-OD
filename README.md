@@ -31,8 +31,8 @@ Each paper case has one script at the repository root and one results folder in 
 | --- | --- | --- | --- |
 | 1a | `case1a_bennu_particle.py` | `results/case1a_bennu_particle_261122095204/` | Particle ejected from Bennu, OSIRIS-REx optical angles (RA/Dec, 22 epochs over 1.5 h), first-order STT (STM) likelihood |
 | 1b | `case1b_bennu_particle_stt2.py` | `results/case1b_bennu_particle_stt2_261122095204/` | Case 1a with a second-order STT likelihood |
-| 2a | `case2_bennu_popper.py` (`CASE = "2a"`) | `results/case2a_bennu_popper_261122091846/` | Radio probe released by a spring onto a low polar orbit, one-way Doppler from OSIRIS-REx (24 h), Gaussian priors on the degree-2 coefficients. Shows a non-Gaussian C22–S22 posterior (crescent) and adds the GMM + STM propagation to 48 h |
-| 2b | `case2_bennu_popper.py` (`CASE = "2b"`) | `results/case2b_bennu_popper_uniform_261122085330/` | Case 2a with uniform (box) priors on C20, C21, S21, C22, S22, without the GMM propagation |
+| 2a | `case2_bennu_popper.py` (`CASE = "2a"`) | `results/case2a_bennu_popper_261122133644/` | Radio probe released by a spring onto a low polar orbit, one-way Doppler from OSIRIS-REx (24 h), Gaussian priors on the degree-2 coefficients. Shows a non-Gaussian C22–S22 posterior (crescent) and adds the GMM + STM propagation to 48 h |
+| 2b | `case2_bennu_popper.py` (`CASE = "2b"`) | `results/case2b_bennu_popper_uniform_261122133644/` | Case 2a with uniform (box) priors on C20, C21, S21, C22, S22, without the GMM propagation |
 | 3 | `case3_bennu_particle_hierSH.py` | `results/case3_bennu_particle_hierSH_261122095204/` | Case 1a with hierarchical priors: the prior scale of each SH order (m = 0, 1, 2) is learned from the data |
 | Extra | `extra_ryugu_probe.py` | `results/extra_ryugu_probe_261122091827/` | Ryugu-shaped body (polyhedron, scaled to 289P/Blanpain size, Sun + SRP), ejected particle observed by a nearby spacecraft (angles), GMM + STM propagation |
 | STT benchmark | `stt_benchmark.py` | `results/stt_benchmark_261119213307/` | STT orders 1–3 against the full nonlinear likelihood on the samples of an MCMC chain (two-body, angles) |
