@@ -1,4 +1,46 @@
 """
+Paper Case 1b (Bennu particle, second-order STT likelihood): variants of the Case 1a optical
+script (case1a_bennu_particle.py). This file is a copy of that script with a VARIANT switch;
+everything not listed below is identical to it (geometry, seeds, priors, batch, sampler
+settings). The default variant, stt2, is Case 1b.
+
+Usage
+-----
+    python case1b_bennu_particle_stt2.py              # Case 1b (= stt2)
+    python case1b_bennu_particle_stt2.py nominal      # appendix: 23-epoch arc, first order
+    # redo only the post-processing (corner + summary) of a finished run:
+    python case1b_bennu_particle_stt2.py stt2 --post results/case1b_bennu_particle_stt2_<stamp>
+
+Variants
+--------
+nominal : "nominal" arc, n_obs = 23 candidate epochs (19 visible) instead of 22, first-order
+          STTs. Batch and MCMC agree and contain the truth (Mahalanobis distance ~1.3 over
+          position, velocity and GM). Paper figure: fig_corner_rtn_nominal.pdf.
+          Wall time ~20 min (MCMC ~10 min).
+stt2    : Case 1b = Case 1a (n_obs = 22) with a second-order STT likelihood. The truth, the data and the
+          batch use a first-order propagator (propagator1), so they are identical to the
+          first-order Case 1a run; only the Stage 2 STTs about ref1, hence the MCMC likelihood,
+          are second order. Marginals are unchanged w.r.t. first order; the joint posterior
+          bends and contains the truth (Mahalanobis ~1.9 vs ~41 at first order).
+          Paper figure: fig_corner_rtn_stt2.pdf (stranded walkers excluded, see below).
+          Wall time ~45 min: symbolic B_2 tensors ~17 min, Stage 2 order-2 STTs (1884 states)
+          ~5 min with DOP853 (LSODA switches to its stiff branch and stalls), MCMC ~12 min.
+
+Outputs (stt2: results/case1b_bennu_particle_stt2_<stamp>/, nominal:
+results/bennu_particle_nominal23_<stamp>/)
+---------------------------------------------------------------------------
+- the usual figures of the Case 1a script (scene, geometry, traces, ACF, post-fits, corners);
+- chain.npz (MCMCModel.save_chain) and batch.npz (x0_ref1, cov1, true_delta, x0_true, ...);
+- fig_corner_rtn_<variant>.pdf: RTN corner redrawn without stranded walkers (a walker whose
+  post-burn-in median log-posterior is > STRANDED_DLOGP below the ensemble median; one in the
+  stt2 run, none in the nominal run), plus a printed summary (acceptance, tau, truth
+  Mahalanobis distances under the batch and the sampled covariance).
+
+The MCMC walker start and the emcee moves draw from the unseeded global NumPy state, so a
+rerun reproduces the paper numbers statistically, not bit for bit.
+
+Original Case 1a docstring follows.
+-------------------------------------------------------------------------------------------
 Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 
 - Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
@@ -53,9 +95,13 @@ Units:
 
 
 import os
+import shutil
 import sys
+import time
+import argparse
 from pathlib import Path
 from datetime import datetime
+from types import SimpleNamespace
 
 
 import sympy as sp
@@ -76,7 +122,7 @@ from BatchLSQ import BatchLSQ
 # MCMCPlots.configure() in the main applies the journal style.
 import MCMCPlots
 
-MCMCPlots.SHOW_FIGS = True  # plt.show() after each figure is saved
+MCMCPlots.SHOW_FIGS = False  # long unattended runs: save the PDFs only
 
 # ============================================================
 # Geometry / utility
@@ -491,10 +537,146 @@ def load_kernels(kernel_root: Path):
 
 
 # ============================================================
+# Figure symbols / units (shared by the main run and the post-processing)
+# ============================================================
+
+# Display units: km -> m, km/s -> mm/s, km^3/s^2 -> m^3/s^2 (rescaled by powers of ten from
+# the batch sigmas after Stage 1)
+PARAM_SYM = [
+    r"\delta x_0",
+    r"\delta y_0",
+    r"\delta z_0",
+    r"\delta v_{x,0}",
+    r"\delta v_{y,0}",
+    r"\delta v_{z,0}",
+    r"\delta GM",
+    r"\delta C_{20}",
+    r"\delta C_{21}",
+    r"\delta S_{21}",
+    r"\delta C_{22}",
+    r"\delta S_{22}",
+]
+PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
+PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+
+# A walker is "stranded" if its post-burn-in median log-posterior is more than this below the
+# ensemble median (walker 58 of the stt2 run: median log-posterior -1.7e5 against +123 for
+# the ensemble, ~2.7 prior sigmas off in GM, drawing outlier islands in the corner plot); its
+# samples are left out of fig_corner_rtn_<variant> and of the summary.
+STRANDED_DLOGP = 100.0
+
+# Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample theta_hat) and
+# the batch estimate ref1 (delta = 0) on every corner plot, fig_corner_rtn_<variant> included.
+# The mode is saved in batch.npz (theta_map), so --post redraws it; folders from runs before
+# it was saved get no mode marker.
+SHOW_MAP = True
+SHOW_BATCH_MEAN = True
+
+
+# ============================================================
+# Post-processing: stranded walkers, clean RTN corner, summary
+# ============================================================
+
+
+def _mahalanobis(d, P):
+    return float(np.sqrt(d @ np.linalg.solve(P, d)))
+
+
+def postprocess_run(run_dir, variant):
+    """
+    From chain.npz and batch.npz in run_dir: drop stranded walkers, redraw the RTN corner as
+    fig_corner_rtn_<variant>.pdf, and print the summary quoted in the paper.
+    """
+    run_dir = Path(run_dir)
+    ch = np.load(run_dir / "chain.npz")
+    b = np.load(run_dir / "batch.npz")
+    samples = ch["samples"]
+    lpc = ch["log_prob_chain"]  # (n_steps, n_walkers), post-burn-in thinned
+    nw = lpc.shape[1]
+
+    # Stranded walkers. Flat sample index = step * n_walkers + walker (emcee get_chain(flat))
+    lp_w = np.median(lpc, axis=0)
+    bad = np.where(lp_w < np.median(lp_w) - STRANDED_DLOGP)[0]
+    keep = ~np.isin(np.arange(samples.shape[0]) % nw, bad)
+    print(f"\n[Post] {run_dir.name}")
+    print(
+        f"[Post] stranded walkers: {bad.tolist()} (median log-post "
+        f"{np.round(lp_w[bad], 1).tolist()} vs ensemble {np.median(lp_w):.1f}); "
+        f"kept {keep.sum()}/{keep.size} samples"
+    )
+    # Acceptance and autocorrelation times: as stored by the run (all walkers) and recomputed
+    # on the stored full chain without the stranded walkers (the numbers quoted in the paper)
+    import emcee
+
+    good = np.setdiff1d(np.arange(nw), bad)
+    acc = ch["acceptance_fraction"]
+    tau_all = ch["tau"]
+    tau_good = (
+        emcee.autocorr.integrated_time(ch["full_chain"][:, good, :], quiet=True)
+        * int(ch["full_stride"])
+    )
+    print(
+        f"[Post] n_steps {int(ch['n_steps'])}, burn-in {int(ch['burn_in'])}, thin "
+        f"{int(ch['thin'])}\n"
+        f"[Post] all walkers : acceptance {acc.mean():.3f}, tau {tau_all.min():.0f}-"
+        f"{tau_all.max():.0f} steps\n"
+        f"[Post] kept walkers: acceptance {acc[good].mean():.3f}, tau {tau_good.min():.0f}-"
+        f"{tau_good.max():.0f} steps (n_steps / tau_max = "
+        f"{int(ch['n_steps']) / tau_good.max():.0f})"
+    )
+
+    # Truth Mahalanobis distances over position, velocity, GM (7) and all 12 parameters
+    cov1, t = b["cov1"], b["true_delta"]
+    for k in (7, 12):
+        line = f"[Post] Mahalanobis {k:2d}D: truth|batch = {_mahalanobis(t[:k], cov1[:k, :k]):6.2f}"
+        for lab, X in (("all", samples), ("kept", samples[keep])):
+            mu, S = X.mean(0), np.cov(X.T)
+            line += f"   truth|MCMC({lab}) = {_mahalanobis(t[:k] - mu[:k], S[:k, :k]):6.2f}"
+        print(line)
+
+    # RTN corner without stranded walkers (same layout as fig_corner_rtn of the run)
+    MCMCPlots.configure(PARAM_SYM, PARAM_BASE_UNIT, PARAM_BASE_SCALE, body="Bennu", target="Particle")
+    disp_scale, disp_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(cov1))
+    )
+    MCMCPlots.configure(PARAM_SYM, disp_unit, disp_scale)
+    MCMCPlots.set_figure_dir(run_dir)
+    A = MCMCPlots.rtn_corner_map(b["x0_ref1"], 12)
+    rtn_scale, rtn_unit = MCMCPlots.auto_param_scales(
+        PARAM_BASE_SCALE, PARAM_BASE_UNIT, np.sqrt(np.diag(A @ cov1 @ A.T))
+    )
+    theta_map = b["theta_map"] if SHOW_MAP and "theta_map" in b.files else None
+    kw = MCMCPlots._mapped_corner_kw(A, t, np.zeros(12), cov1, theta_map)
+    if SHOW_BATCH_MEAN:
+        kw["show_batch_mean"] = True
+    kw["param_sym"] = MCMCPlots.RTN_SYM + PARAM_SYM[6:]
+    kw.update(param_unit=rtn_unit, param_scale=rtn_scale)
+    out = MCMCPlots.plot_mcmc_corner(
+        SimpleNamespace(samples=samples[keep], param_priors=None),
+        name=f"fig_corner_rtn_{variant}",
+        **kw,
+    )
+    print(f"[Post] RTN corner -> {out}")
+
+
+# ============================================================
 # MAIN SCRIPT
 # ============================================================
 
 if __name__ == "__main__":
+
+    ap = argparse.ArgumentParser(description=__doc__.split("Variants")[0])
+    ap.add_argument("variant", nargs="?", default="stt2", choices=["nominal", "stt2"])
+    ap.add_argument(
+        "--post",
+        metavar="RUN_DIR",
+        help="only redo the post-processing of a finished run folder",
+    )
+    args = ap.parse_args()
+    VARIANT = args.variant
+    if args.post:
+        postprocess_run(args.post, VARIANT)
+        sys.exit(0)
 
     # --------------------------
     # USER SETTINGS (edit these)
@@ -509,7 +691,9 @@ if __name__ == "__main__":
     # Observation window (must be covered by SPK)
     utc0 = "2019-03-01T00:00:00"
     utc1 = "2019-03-01T01:30:00"
-    n_obs = 22  # NOTE: 22 batch not working, 23 is working!
+    # VARIANT: nominal -> 23 candidate epochs (batch consistent with the truth); stt2 -> the
+    # Case 1a arc (22 epochs, batch excludes the truth jointly)
+    n_obs = 23 if VARIANT == "nominal" else 22
 
     # Bennu physical
     R_bennu = 0.290  # km
@@ -521,8 +705,9 @@ if __name__ == "__main__":
     spin_period = 4.296057 * 3600.0  # s
     omega_true = 2 * np.pi / spin_period  # rad/s
 
-    # Dynamics / STT order
-    stt_order = 1
+    # Dynamics / STT order. VARIANT stt2: order 2 for the Stage 2 STTs (MCMC likelihood) only;
+    # truth, data and batch stay on a first-order propagator (propagator1 below).
+    stt_order = 2 if VARIANT == "stt2" else 1
 
     # Stage-1 batch solve. False: plain Gauss-Newton with an unscaled lstsq solve (the results
     # so far). True: column-scaled GN (solve in prior-sigma units) with step halving on the exact
@@ -582,35 +767,14 @@ if __name__ == "__main__":
     spherical_spread = 1e-1
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
-    LOAD_CHAIN = None  # e.g. "results/bennu_particle_<stamp>/chain.npz"
+    LOAD_CHAIN = None  # e.g. "results/case1b_bennu_particle_stt2_<stamp>/chain.npz"
     # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
     CORNER_RTN = True
-    # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample theta_hat)
-    # and the batch estimate ref1 (delta = 0) on every corner plot.
-    SHOW_MAP = True
-    SHOW_BATCH_MEAN = True
 
-    # Figures: parameter symbols and display units (km -> m, km/s -> mm/s,
-    # km^3/s^2 -> m^3/s^2; rescaled by powers of ten from the batch sigmas after Stage 1),
-    # one PDF per figure in a timestamped folder (MCMCPlots.SHOW_FIGS at the top of the file)
-    PARAM_SYM = [
-        r"\delta x_0",
-        r"\delta y_0",
-        r"\delta z_0",
-        r"\delta v_{x,0}",
-        r"\delta v_{y,0}",
-        r"\delta v_{z,0}",
-        r"\delta GM",
-        r"\delta C_{20}",
-        r"\delta C_{21}",
-        r"\delta S_{21}",
-        r"\delta C_{22}",
-        r"\delta S_{22}",
-    ]
-    PARAM_BASE_SCALE = np.array([1e3] * 3 + [1e6] * 3 + [1e9] + [1.0] * 5)
-    PARAM_BASE_UNIT = ["m"] * 3 + ["mm/s"] * 3 + [r"m$^3$/s$^2$"] + [""] * 5
+    # Figures: parameter symbols and display units are PARAM_SYM / PARAM_BASE_* (module
+    # level), one PDF per figure in a timestamped folder
     MCMCPlots.configure(
         PARAM_SYM,
         PARAM_BASE_UNIT,
@@ -623,11 +787,16 @@ if __name__ == "__main__":
         resid_labels=("RA", "Dec"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
+    # Folder name: case1b_bennu_particle_stt2_YYMMDDHHMMSS (stt2) or
+    # bennu_particle_nominal23_YYMMDDHHMMSS (nominal, not a paper case); + _scaledGN with
+    # SCALED_BATCH
     fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
-        / f"bennu_particle{'_scaledGN' if SCALED_BATCH else ''}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        / f"{'bennu_particle_nominal23' if VARIANT == 'nominal' else 'case1b_bennu_particle_stt2'}"
+        f"_{datetime.now().strftime('%y%m%d%H%M%S')}{'_scaledGN' if SCALED_BATCH else ''}"
     )
+    print(f"[Variant] {VARIANT}: n_obs = {n_obs}, MCMC STT order = {stt_order}")
     print(f"[Figures] -> {fig_dir}")
 
     # --------------------------
@@ -729,12 +898,17 @@ if __name__ == "__main__":
     propagator = STTPropagatorND(
         order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
     )
+    # First-order propagator for the truth and the batch: for stt2 these are then identical
+    # to the first-order Case 1a run (for nominal it is the same as `propagator`)
+    propagator1 = STTPropagatorND(
+        order=1, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
+    )
 
     # --------------------------
     # Propagate particle truth (DYNAMICS on tau_full)
     # --------------------------
     print("\nPropagating particle truth...")
-    sol_true, stts_true = propagator.propagate(
+    sol_true, stts_true = propagator1.propagate(
         x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
     x_true_full = sol_true.y[:12, :].T  # (N,12)
@@ -882,7 +1056,7 @@ if __name__ == "__main__":
     print("\n[Stage 1] Gauss-Newton batch (first-order STMs) to convergence...")
 
     batch = BatchLSQ(
-        propagator=propagator,
+        propagator=propagator1,
         tau=tau,  # seconds since start
         sc_state=sc_state,
         y_obs=y_obs,
@@ -925,9 +1099,20 @@ if __name__ == "__main__":
     # --------------------------
     # Stage 2: relinearize STTs about ref1
     # --------------------------
-    print("\n[Stage 2] Propagating ref1 and computing STTs about ref1...")
+    # Order-2 STTs (1884 states): LSODA switches to its stiff branch and spends hours on
+    # finite-difference Jacobians; the problem is not stiff, so stt2 uses DOP853 (~5 min).
+    print(f"\n[Stage 2] Propagating ref1 and computing order-{stt_order} STTs about ref1...")
+    t_stage2 = time.time()
     sol_ref, stts_ref = propagator.propagate(
-        x0=x0_ref1, t_eval=tau, rtol=1e-8, atol=1e-10, method="LSODA"
+        x0=x0_ref1,
+        t_eval=tau,
+        rtol=1e-8,
+        atol=1e-10,
+        method="DOP853" if stt_order >= 2 else "LSODA",
+    )
+    print(
+        f"[Stage 2] STT propagation wall time {time.time() - t_stage2:.1f} s, "
+        f"nfev = {sol_ref.nfev}"
     )
 
     # --------------------------
@@ -983,6 +1168,8 @@ if __name__ == "__main__":
     if LOAD_CHAIN:
         model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
         burn_in, thin = model.burn_in, model.thin
+        # postprocess_run reads chain.npz from fig_dir
+        shutil.copyfile(LOAD_CHAIN, fig_dir / "chain.npz")
     else:
         model.run(
             n_samples=n_samples,
@@ -1006,6 +1193,24 @@ if __name__ == "__main__":
 
     true_delta = x0_true - x0_ref1
     print("\n[Truth] true_delta about ref1:\n", true_delta)
+    # Posterior mode (for the corners and the post-processing)
+    map_kw = dict(theta_map=model.find_map()) if SHOW_MAP else {}
+    # Batch solution and truth, for the post-processing (and comparisons across runs)
+    np.savez(
+        fig_dir / "batch.npz",
+        x0_ref1=x0_ref1,
+        cov1=cov1,
+        true_delta=true_delta,
+        x0_true=x0_true,
+        x0_ref=x0_ref,
+        theta_hat=theta_hat,
+        P_mcmc=P_mcmc,
+        vis_mask=vis_mask,
+        tau=tau,
+        prior_sigma=prior_sigma,
+        delta_shift=delta_shift,
+        **map_kw,
+    )
 
     # --------------------------
     # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
@@ -1030,7 +1235,11 @@ if __name__ == "__main__":
         corner_rtn=x0_ref1 if CORNER_RTN else None,
         corner_rtn_kw=dict(param_unit=rtn_unit, param_scale=rtn_scale),
         show_map=SHOW_MAP,
+        map_theta=map_kw.get("theta_map"),
         show_batch_mean=SHOW_BATCH_MEAN,
     )
 
     spice.kclear()
+
+    # Paper figure fig_corner_rtn_<variant>.pdf (stranded walkers excluded) + summary
+    postprocess_run(fig_dir, VARIANT)

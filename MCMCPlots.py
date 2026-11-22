@@ -18,7 +18,7 @@ Sections:
     MCMC DIAGNOSTICS       traces, autocorrelation, corner (+ prior, + RTN frame:
                            rtn_corner_map), all-in-one plot_mcmc_diagnostics
     GMM PROPAGATION        figures of GMM.GMM.propagate_stm results
-    STT BENCHMARK          STT surrogate vs full nonlinear likelihood (J1_benchmark_STTs.py)
+    STT BENCHMARK          STT surrogate vs full nonlinear likelihood (stt_benchmark.py)
     QUICK-LOOK (legacy)    the original MCMCModel.plot_* figures (tests/, extra/ scripts)
 
 The quick-look rcParams below are applied on import (as MCMC.py always did); configure()
@@ -3207,7 +3207,7 @@ def plot_prediction_history(
 
 
 # ============================================================
-# STT BENCHMARK (J1_benchmark_STTs.py)
+# STT BENCHMARK (stt_benchmark.py)
 # ============================================================
 
 
@@ -3226,7 +3226,7 @@ def plot_stt_benchmark(bench, mcmc_order=None, name="fig_stt_benchmark"):
     RMS(dy) and a dy panel repeats (b) scaled by a constant; (b) is the error the sampler
     sees, while RMS(dy) hides its sqrt(n_meas) growth with the data volume.
 
-    bench: dict from J1_benchmark_STTs.benchmark_orders_on_chain (or its benchmark.npz):
+    bench: dict from stt_benchmark.benchmark_orders_on_chain (or its benchmark.npz):
       orders (n_o,), stt_ms (n_o,), nl_ms (n_o,), dlogL (n_o, n_s).
     """
     orders = np.asarray(bench["orders"], dtype=int)

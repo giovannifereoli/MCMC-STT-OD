@@ -24,7 +24,7 @@ Assumptions about your API:
 - You can extract chain samples with one of:
     model.get_flat_samples(), or model.samples, or model.chain
 
-Outputs (results/stt_benchmark_<timestamp>/): chain.npz, benchmark.npz and one journal PDF
+Outputs (results/stt_benchmark_<YYMMDDHHMMSS>/): chain.npz, benchmark.npz and one journal PDF
 per figure (fig_stt_benchmark, fig_mcmc_traces, fig_mcmc_autocorrelation, fig_corner,
 fig_corner_prior).
 LOAD_CHAIN / LOAD_BENCHMARK in the main redo the figures from a saved run.
@@ -503,7 +503,7 @@ if __name__ == "__main__":
     fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
-        / f"stt_benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        / f"stt_benchmark_{datetime.now().strftime('%y%m%d%H%M%S')}"
     )
     print(f"[Figures] -> {fig_dir}")
 

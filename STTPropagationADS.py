@@ -52,8 +52,8 @@ harmonic field) keep the patch count modest: restrict `ads_axes` to the
 dynamically relevant components (position/velocity) and choose `ads_tol`
 no tighter than the accuracy you actually need.
 
-Using it in a script (e.g. J1_scenarioA_..._hierSH)
----------------------------------------------------
+Using it in a script (e.g. case3_bennu_particle_hierSH)
+-------------------------------------------------------
     prop = STTPropagatorADS(
         order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs,
         n=12,

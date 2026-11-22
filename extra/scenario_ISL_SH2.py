@@ -5,7 +5,7 @@ so that the degree-2 gravity posterior is both informed by the data and non-Gaus
 Geometry
 - Bennu: unnormalized degree-2 field of get_CS_unnormalized.bennu_10_10 (R_ref = 0.290 km),
   pole (85.65, -60.17) deg, period 4.296057 h, IAU constant spin (frame rotations, body +Z =
-  pole, spin +omega, as in scenario_NGSR.py).
+  pole, spin +omega, as in extra_ryugu_probe.py).
 - Mothercraft (MC): MC_DIST km above the north spin pole, fixed in inertial space (station-kept,
   known ephemeris; it plays the role of the SPICE spacecraft of the J1 scripts). MC_TILT_DEG
   moves it off the spin axis.
@@ -62,7 +62,7 @@ Pipeline
      C20 / J22 / lambda22 / phi0, each with and without the prior).
   7) Posterior split (GMM) + per-component STM propagation to gmm_target_hours (past the
      arc), checked against an exact Monte Carlo of posterior samples (gmm_prediction, the GMM
-     block of scenario_NGSR.py): fig_gmm_stm_propagation (+ _rtn), fig_gmm_prediction_history.
+     block of extra_ryugu_probe.py): fig_gmm_stm_propagation (+ _rtn), fig_gmm_prediction_history.
 
 Units: km, km/s, s.
 """
@@ -754,7 +754,7 @@ class _Tee:
 
 
 # ============================================================
-# Posterior split (GMM) + STM propagation (as scenario_NGSR.py)
+# Posterior split (GMM) + STM propagation (as extra_ryugu_probe.py)
 # ============================================================
 
 
@@ -786,7 +786,7 @@ def gmm_prediction(
     """
     Split the posterior at the epoch into a Gaussian mixture, propagate every component with
     its own STM and check the predicted mixture against a nonlinear Monte Carlo of posterior
-    samples (the GMM block of scenario_NGSR.py, for the 12-D degree-2 state):
+    samples (the GMM block of extra_ryugu_probe.py, for the 12-D degree-2 state):
 
         m_k(t) = phi(t; x0_ref1 + mu_k),      P_k(t) = Phi_k(t) P_k Phi_k(t)^T.
 
@@ -1080,7 +1080,7 @@ if __name__ == "__main__":
     SEED_WALKERS = 7
     N_EXACT_CHECK = 1000  # posterior samples propagated exactly (importance check)
 
-    # Posterior split (GMM) + STM propagation past the arc (as scenario_NGSR.py)
+    # Posterior split (GMM) + STM propagation past the arc (as extra_ryugu_probe.py)
     GMM_PROPAGATION = True
     gmm_target_hours = 48.0  # [h since the epoch]; the arc ends at ARC_HOURS
     # K = 8 (as NGSR) puts part of the crescent's sag into the mean-motion direction: ~4x the

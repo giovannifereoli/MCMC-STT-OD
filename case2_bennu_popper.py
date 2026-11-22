@@ -1,12 +1,18 @@
 """
-Scenario OREx-popper-SH2: OSIRIS-REx (SPICE trajectory, as in the J1 scripts) tracks a radio
-popper on a low polar orbit about Bennu with Doppler only, built so that the degree-2 gravity
+Paper Case 2 (Bennu popper): OSIRIS-REx (SPICE trajectory, as in Case 1) tracks a radio popper
+on a low polar orbit about Bennu with Doppler only, built so that the degree-2 gravity
 posterior is both informed by the data and non-Gaussian (a crescent in C22-S22).
+
+Paper cases (CASE in the settings)
+- "2a": Gaussian priors on C20, C21, S21, C22, S22 + posterior split (GMM) and STM propagation
+  past the arc (step 7). Results in results/case2a_bennu_popper_<stamp>/.
+- "2b": uniform (box) priors on C20, C21, S21, C22, S22 (SH_PRIOR = "uniform"), no GMM
+  propagation. Results in results/case2b_bennu_popper_uniform_<stamp>/.
 
 Geometry
 - Bennu: unnormalized degree-2 field of get_CS_unnormalized.bennu_10_10 (R_ref = 0.290 km),
   pole (85.65, -60.17) deg, period 4.296057 h, IAU constant spin (frame rotations, body +Z =
-  pole, spin +omega, as in scenario_NGSR.py and scenario_ISL_SH2.py).
+  pole, spin +omega, as in extra_ryugu_probe.py and extra/scenario_ISL_SH2.py).
 - Observer: OSIRIS-REx from SPICE (OSIRIS-REX w.r.t. BENNU, J2000, no aberration correction)
   during Detailed Survey, north polar station (2019-03-16T18:00 + 24 h: 5.9-6.7 km from Bennu,
   2.4-3.3 deg from the spin axis, azimuth about the axis drifting by 25 deg).
@@ -18,7 +24,7 @@ Geometry
   DELIVERY_R_MAX within DELIVERY_CHECK_HOURS is a failed deployment and is redrawn (the scenario
   is conditioned on a probe that survives the arc and the prediction). The delivered orbit is
   inclined, eccentric and off the OREx meridian by a few degrees. DELIVERY = False keeps the exact
-  planned orbit. ARC_HOURS arc, one-way Doppler (range-rate) every DT_OBS_MIN minutes, occulted
+  planned orbit (results folder suffix _circular). ARC_HOURS arc, one-way Doppler (range-rate) every DT_OBS_MIN minutes, occulted
   by the sphere of radius R_ref. USE_RANGE adds range.
 - Estimated: x0 = [r0, v0, GM, C20, C21, S21, C22, S22] of the popper (12 parameters).
 
@@ -47,10 +53,10 @@ Sampling (as scenario_ISL_SH2.py)
 - STT_ORDER = 1 (default): the Stage-2 surrogate uses the STMs only, and Stage 1 ends with an
   exact trust-region least-squares MAP in chart coordinates (exact_map_chart); 2 adds the
   second-order STT, and Stage 1 ends with the STT re-centering (results folder suffix _stt2).
-- SH_PRIOR = "uniform" replaces the Gaussian priors of C20, C21, S21, C22, S22 by boxes
-  x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder suffix
-  _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd of
-  the boxes; the MCMC samples the box prior itself.
+- SH_PRIOR = "uniform" (CASE = "2b") replaces the Gaussian priors of C20, C21, S21, C22, S22 by
+  boxes x0_ref +- UNIFORM_HALF_WIDTH prior sigmas (GM, r0, v0 stay Gaussian; results folder
+  suffix _uniform). Stage 1 only needs a reference point: it uses Gaussians with the mean and sd
+  of the boxes; the MCMC samples the box prior itself.
 
 Pipeline
   1) SPICE: OREx states at the epochs; truth popper orbit, noisy Doppler on the visible epochs.
@@ -65,9 +71,10 @@ Pipeline
      degree-2 pairs, figures: geometry, residuals, traces, autocorrelation, corners
      (deviations, RTN, absolute C/S, derived C20 / J22 / lambda22 / phi0, each with and without
      the prior).
-  7) Posterior split (GMM) + per-component STM propagation to gmm_target_hours (past the
-     arc), checked against an exact Monte Carlo of posterior samples (gmm_prediction, the GMM
-     block of scenario_NGSR.py): fig_gmm_stm_propagation (+ _rtn), fig_gmm_prediction_history.
+  7) Case 2a only (GMM_PROPAGATION): posterior split (GMM) + per-component STM propagation to
+     gmm_target_hours (past the arc), checked against an exact Monte Carlo of posterior samples
+     (gmm_prediction, the GMM block of extra_ryugu_probe.py): fig_gmm_stm_propagation (+ _rtn),
+     fig_gmm_prediction_history.
 
 The degree-2 dynamics, the symmetry chart and the helpers (gmm_prediction included) are
 imported from extra/scenario_ISL_SH2.py.
@@ -199,20 +206,24 @@ if __name__ == "__main__":
     # --------------------------
     # Settings
     # --------------------------
+    # Paper case: "2a" = Gaussian SH priors + GMM propagation, "2b" = uniform SH priors (no GMM)
+    CASE = "2a"
     STT_ORDER = 1  # surrogate order: 1 = STMs only, 2 = second-order STTs (on the slice; folder + _stt2)
     USE_SYMMETRY_CHART = True  # False: sample dx with the plain STT (fails along the crescent)
-    SH_PRIOR = "gaussian"  # "uniform": boxes on C20, C21, S21, C22, S22 (folder + _uniform)
+    # "uniform": boxes on C20, C21, S21, C22, S22 (folder + _uniform); set by CASE
+    SH_PRIOR = "uniform" if CASE == "2b" else "gaussian"
     UNIFORM_HALF_WIDTH = 3.0  # box half-width in prior sigmas, centered on the a priori x0_ref
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to such
-    # a file to skip the sampling and redo the diagnostics and figures from it.
-    LOAD_CHAIN = None  # e.g. "results/scenario_OREx_popper_SH2_<stamp>/chain.npz"
+    # a file to skip the sampling and redo the diagnostics and figures from it (set CASE to the
+    # case of that run).
+    LOAD_CHAIN = None  # e.g. "results/case2a_bennu_popper_<stamp>/chain.npz"
     CORNER_RTN = True
     # Mark the posterior mode (MCMCModel.find_map, an optimum, not the best sample) and the
     # batch estimate ref1 on every corner plot.
     SHOW_MAP = True
     SHOW_BATCH_MEAN = True
 
-    # SPICE (as the J1 scripts)
+    # SPICE (as Case 1)
     KERNEL_ROOT = HERE / "data" / "kernels"
     SC_NAME = "OSIRIS-REX"
     CENTER = "BENNU"
@@ -236,7 +247,7 @@ if __name__ == "__main__":
     ORBIT_RAAN_DEG = None  # None: orbit plane through the mean azimuth of OREx about the axis
     ORBIT_U0_DEG = 0.0  # argument of latitude at t = 0
     # Release error of the probe (no propulsion: the delivered orbit is what the spring gives).
-    # False: the probe starts exactly on the planned orbit (folder without _delivered).
+    # False: the probe starts exactly on the planned orbit (folder + _circular).
     DELIVERY = True
     DELIVERY_SIGMA_R = 0.02  # km per axis (20 m: mothercraft navigation at release)
     DELIVERY_SIGMA_V = 1e-5  # km/s per axis (1 cm/s: spring separation speed and direction)
@@ -276,11 +287,11 @@ if __name__ == "__main__":
     SEED_WALKERS = 7
     N_EXACT_CHECK = 1000  # posterior samples propagated exactly (importance check)
 
-    # Posterior split (GMM) + STM propagation past the arc (as scenario_NGSR.py)
-    GMM_PROPAGATION = True
+    # Posterior split (GMM) + STM propagation past the arc (as extra_ryugu_probe.py); Case 2a
+    GMM_PROPAGATION = CASE == "2a"
     gmm_target_hours = 48.0  # [h since utc0]; the arc ends at ARC_HOURS
-    # K = 8 (as NGSR) puts part of the crescent's sag into the mean-motion direction: ~2.5x the
-    # Monte Carlo spread at 48 h. K = 32 matches it (45 vs 48 m at 48 h), ~40 s.
+    # K = 8 (as the Ryugu probe) puts part of the crescent's sag into the mean-motion direction:
+    # ~2.5x the Monte Carlo spread at 48 h. K = 32 matches it (45 vs 48 m at 48 h), ~40 s.
     gmm_n_components = 32
     gmm_select_bic = False  # True: K in 1..12 by BIC
     GMM_FIT_CHART = False  # True: fit in chart coordinates (see gmm_prediction)
@@ -323,19 +334,20 @@ if __name__ == "__main__":
         resid_labels=("Range", "Range-Rate"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
-    # Folder name: <script name>_YYMMDDHHMMSS (+ _stt<order> with STT_ORDER > 1, + _plain without
-    # the symmetry chart, + _uniform with the box priors, + _delivered with the release error)
+    # Folder name: case<CASE>_bennu_popper(_uniform)_YYMMDDHHMMSS, e.g.
+    # results/case2a_bennu_popper_261121202652 (+ _circular without the release error,
+    # + _stt<order> with STT_ORDER > 1, + _plain without the symmetry chart)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
         / "results"
         / (
-            Path(__file__).stem
+            f"case{CASE}_bennu_popper"
+            + ("_uniform" if SH_PRIOR == "uniform" else "")
             + "_"
             + datetime.now().strftime("%y%m%d%H%M%S")
-            + ("_delivered" if DELIVERY else "")
+            + ("" if DELIVERY else "_circular")
             + (f"_stt{STT_ORDER}" if STT_ORDER > 1 else "")
             + ("" if USE_SYMMETRY_CHART else "_plain")
-            + ("_uniform" if SH_PRIOR == "uniform" else "")
         )
     )
     # Screen output also goes to run.log in the results folder

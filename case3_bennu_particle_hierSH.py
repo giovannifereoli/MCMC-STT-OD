@@ -1,4 +1,8 @@
 """
+Paper Case 3 (Bennu particle, hierarchical SH prior): the Case 1a scenario with the prior
+scales of the degree-2 SH coefficients learned from the data (one hyperparameter per order m).
+Results in results/case3_bennu_particle_hierSH_<stamp>/.
+
 ========================================================================
 WHY HIERARCHICAL BAYESIAN ESTIMATION HERE?
 ========================================================================
@@ -721,7 +725,7 @@ if __name__ == "__main__":
     spherical_spread = 1e-1
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
-    LOAD_CHAIN = None  # e.g. "results/bennu_particle_hiersh_<stamp>/chain.npz"
+    LOAD_CHAIN = None  # e.g. "results/case3_bennu_particle_hierSH_<stamp>/chain.npz"
     # Also save fig_corner_rtn: the corner plot with the position and velocity deviations in
     # the RTN frame (radial, along-track, orbit normal) of the batch solution ref1 about the
     # central body (MCMCPlots.rtn_corner_map).
@@ -767,10 +771,11 @@ if __name__ == "__main__":
         resid_labels=("RA", "Dec"),
         fallback_dir=Path.home() / "bennu_figures_fallback",
     )
+    # Folder name: case3_bennu_particle_hierSH_YYMMDDHHMMSS (+ _scaledGN with SCALED_BATCH)
     fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
-        / f"bennu_particle_hiersh{'_scaledGN' if SCALED_BATCH else ''}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        / f"case3_bennu_particle_hierSH_{datetime.now().strftime('%y%m%d%H%M%S')}{'_scaledGN' if SCALED_BATCH else ''}"
     )
     print(f"[Figures] -> {fig_dir}")
 

@@ -1,5 +1,8 @@
 """
-Scenario (Ryugu twin of J1_scenarioA_angles_SPH2_Bennu_particle.py, uses your existing
+Paper extra case (Ryugu-like probe, formerly scenario_NGSR.py). Results in
+results/extra_ryugu_probe_<stamp>/.
+
+Scenario (Ryugu twin of case1a_bennu_particle.py, uses your existing
 STTPropagatorND + MCMCModel):
 
 - Spacecraft (observer): its trajectory is TRUTH and is treated as KNOWN. It starts at rest
@@ -775,7 +778,7 @@ if __name__ == "__main__":
         fallback_dir=Path.home() / "ryugu_figures_fallback",
     )
     # 261110: 実行ごとの結果フォルダ名を YYMMDDHHMMSS にした（results/ は git 管理外）
-    # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/scenario_NGSR_261112142455
+    # Folder name: <script name>_YYMMDDHHMMSS, e.g. results/extra_ryugu_probe_261119221246
     #   (+ _priorx<PRIOR_SCALE> with PRIOR_SCALE != 1, + _scaledGN with SCALED_BATCH)
     fig_dir = MCMCPlots.set_figure_dir(
         HERE
