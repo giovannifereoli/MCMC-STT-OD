@@ -1264,7 +1264,8 @@ def plot_postfit_residuals(
     Normalized post-fit residuals at the used epochs, one panel per measurement component.
 
     Batch SRIF residuals are open vermillion circles, MCMC MAP residuals blue
-    dots, with grey +/-1 sigma and +/-3 sigma bands and the RMS of each set in the panel.
+    dots, with grey +/-1 sigma and +/-3 sigma bands and the RMS of each set above the
+    panel (right). The time axis runs 2 % past the first and last epochs.
 
     Parameters
     ----------
@@ -1307,8 +1308,10 @@ def plot_postfit_residuals(
     axes = axes[:, 0]
     shown = np.r_[rb[vis].ravel(), rm[vis].ravel()] if has_mcmc else rb[vis].ravel()
     lim = max(3.6, 1.15 * float(np.max(np.abs(shown))))
+    # a little room past the first and last epochs, so their markers are not cut
+    t_pad = 0.02 * (t[-1] - t[0])
     for k, (ax, comp) in enumerate(zip(axes, [RESID_LABELS[c] for c in comps])):
-        ax.set_xlim(t[0], t[-1])
+        ax.set_xlim(t[0] - t_pad, t[-1] + t_pad)
         ax.set_ylim(-lim, lim)
         ax.axhspan(-3.0, 3.0, color="0.95", lw=0, zorder=0)
         ax.axhspan(-1.0, 1.0, color="0.89", lw=0, zorder=0)
@@ -1338,18 +1341,8 @@ def plot_postfit_residuals(
             rms_txt = (
                 rf"RMS: {BATCH_LABEL} {rms_b:.2f}, MCMC {np.sqrt(np.mean(rm[vis, k] ** 2)):.2f}"
             )
-        ax.text(
-            0.99,
-            0.04,
-            rms_txt,
-            transform=ax.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=7,
-            color="0.2",
-            zorder=5,
-            bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="none", alpha=0.85),
-        )
+        # above the panel (right-aligned), where it never hides a residual
+        ax.set_title(rms_txt, loc="right", fontsize=7, color="0.2", pad=2)
     axes[-1].set_xlabel("Time since Epoch [h]")
 
     handles = [
@@ -1694,7 +1687,8 @@ def plot_mcmc_autocorrelation(
     Walker-averaged normalized autocorrelation of every parameter after burn-in.
 
     Each curve is labelled with its integrated autocorrelation time tau (emcee,
-    integrated_time with tol=0); a dotted line marks the thinning interval. Lags run to
+    integrated_time with tol=0); a dotted line marks the thinning interval (labelled
+    'Thinning' on its right, below the zero line). Lags run to
     max(6 max tau, 2.5 thin), in steps of the original run (also for a ChainReplay with
     stride > 1). One group of parameters: a single-column panel. More: one panel per group,
     side by side at full text width, lettered (a), (b), ...
@@ -1767,27 +1761,17 @@ def plot_mcmc_autocorrelation(
             )
         ax.axvline(thin, color="0.3", lw=0.7, ls=":")
         if thin_text:
-            # Label left of the line, or right of it when the line hugs the y-axis (no room
-            # in between). Vertically: above the curves, or below them when the curves still
-            # pass the upper half over the label's width (e.g. thin = 10 << tau = 50).
-            k_thin = min(int(round(thin / rs)), n_lag)
-            right = thin < 0.08 * max_lag
-            w = max(1, int(round(0.05 * max_lag / rs)))  # label width ~5 % of the axis
-            win = (
-                acf[idx, k_thin : min(k_thin + w, n_lag) + 1]
-                if right
-                else acf[idx, max(k_thin - w, 0) : k_thin + 1]
-            )
-            y_curve = (np.max(win) + 0.2) / 1.22  # axes fraction, ylim below
+            # Horizontal, right of the line, in the band below zero (ylim -0.2): the ACF
+            # decays from 1 and never reaches that band, and thin <= max_lag / 2.5 leaves
+            # room on the right.
             ax.annotate(
-                " Thinning",
-                xy=(thin, 0.55 if y_curve < 0.5 else 0.19),
-                xycoords=ax.get_xaxis_transform(),
-                xytext=(1.5 if right else -1.5, 0.0),
+                "Thinning",
+                xy=(thin, -0.11),
+                xycoords="data",
+                xytext=(2.0, 0.0),
                 textcoords="offset points",
-                rotation=90,
-                ha="left" if right else "right",
-                va="bottom",
+                ha="left",
+                va="center",
                 fontsize=7,
                 color="0.3",
             )
@@ -1985,9 +1969,9 @@ def _whitened_density(P2, bins, smooth, masses):
     Returns
     -------
     tuple or None
-        (GX, GY, H, lev): grid (bins, bins) in P2 coordinates, density on it, and the
-        density thresholds of `masses` in ascending order (descending in mass). None if the
-        pair covariance is singular.
+        (GX, GY, H, lev): grid (bins x bins or more, past the farthest samples) in P2
+        coordinates, density on it, and the density thresholds of `masses` in ascending
+        order (descending in mass). None if the pair covariance is singular.
     """
     from scipy.ndimage import gaussian_filter
 
@@ -1998,13 +1982,39 @@ def _whitened_density(P2, bins, smooth, masses):
         return None
     U = np.linalg.solve(Lc, (P2 - m2).T).T
     r = max(4.0, float(np.percentile(np.abs(U), 99.95))) * 1.05
-    H, ex, ey = np.histogram2d(U[:, 0], U[:, 1], bins=bins, range=[[-r, r]] * 2)
+    # `bins` bins on [-r, r], extended with bins of the same width past the farthest samples
+    # by 3 smoothing lengths (at most to 3 r): a thin tail then closes inside the grid instead
+    # of being cut flat at its edge
+    w = 2.0 * r / bins
+    edges = []
+    for u in U.T:
+        n_lo, n_hi = (
+            int(np.ceil((min(3.0 * r, max(r, e + 3.0 * smooth * w)) - r) / w))
+            for e in (-u.min(), u.max())
+        )
+        edges.append(-r + w * np.arange(-n_lo, bins + n_hi + 1))
+    H, ex, ey = np.histogram2d(U[:, 0], U[:, 1], bins=edges)
     H = gaussian_filter(H, smooth)
     cu, cv = 0.5 * (ex[1:] + ex[:-1]), 0.5 * (ey[1:] + ey[:-1])
     GU, GV = np.meshgrid(cu, cv, indexing="ij")
     GX = m2[0] + Lc[0, 0] * GU
     GY = m2[1] + Lc[1, 0] * GU + Lc[1, 1] * GV
     return GX, GY, H, np.sort(_hpd_levels(H, masses))
+
+
+def _contour_extent(GX, GY, H, lev):
+    """
+    Bounding box ((x0, y0), (x1, y1)) of the outer contour lev[0] of the density H on the
+    (curvilinear) grid GX, GY, as returned by _whitened_density. None if there is none.
+    """
+    import contourpy
+
+    lines = contourpy.contour_generator(GX, GY, H).lines(lev[0])
+    lines = [ln for ln in lines if len(ln)]
+    if not lines:
+        return None
+    P = np.concatenate(lines)
+    return P.min(0), P.max(0)
 
 
 def _decimals(x, sig=2):
@@ -2095,8 +2105,9 @@ def plot_corner(
     Optional posterior mode (map_theta): white diamond edged in blue (2D) and dashed blue
     line (diagonal). Optional batch estimate (show_batch_mean): vermillion square (2D; on the
     diagonal the batch pdf peaks there). Diagonal titles: posterior median and half-widths of the 16-84 % interval
-    (_summary_title). Axis ranges cover the 0.05-99.95 % percentiles, the batch +/-3.5
-    sigma and the truth.
+    (_summary_title). Axis ranges cover the 0.05-99.95 % percentiles, the outer (98.9 %)
+    posterior contour of every pair (which runs past the percentiles along a curved tail),
+    the batch +/-3.5 sigma and the truth.
 
     Optional prior overlay (`prior`): dashed reddish-purple highest-density contours with
     the same masses and its marginals on the diagonal. The axis ranges then also cover the
@@ -2220,8 +2231,25 @@ def plot_corner(
     has_prior = dists is not None or Ps is not None
     hyper_ref = not has_prior  # draw the prior_idx hyperprior from the batch slot
 
-    # Axis ranges: posterior, batch +/-3.5 sigma, truth (+ prior quantiles)
+    # Posterior 2D densities (x: param j, y: param i), computed once: their outer contour
+    # also sets the axis ranges
+    dens2 = {
+        (i, j): _whitened_density(X[:, [j, i]], bins, smooth, masses)
+        for i in range(n_par)
+        for j in range(i)
+    }
+
+    # Axis ranges: posterior (percentiles and outer 2D contour), batch +/-3.5 sigma, truth
+    # (+ prior quantiles)
     lo, hi = np.percentile(X, [0.05, 99.95], axis=0)
+    for (i, j), dens in dens2.items():
+        # along a narrow curved tail (banana, |rho| ~ 1) the 98.9 % contour runs past the
+        # marginal percentiles
+        ext = _contour_extent(*dens) if dens is not None else None
+        if ext is not None:
+            (x0, y0), (x1, y1) = ext
+            lo[j], hi[j] = min(lo[j], x0), max(hi[j], x1)
+            lo[i], hi[i] = min(lo[i], y0), max(hi[i], y1)
     if bm is not None and bc is not None:
         sb = np.sqrt(np.diag(bc))
         lo, hi = np.minimum(lo, bm - 3.5 * sb), np.maximum(hi, bm + 3.5 * sb)
@@ -2378,7 +2406,7 @@ def plot_corner(
                 ax.set_yticks(ticks[i])
                 ax.yaxis.set_major_formatter(fmts[i])
                 P2 = X[:, [j, i]]
-                dens = _whitened_density(P2, bins, smooth, masses)
+                dens = dens2[i, j]
                 if dens is not None:
                     GX, GY, H, lev = dens
                     # descending in mass -> ascending in density
@@ -2916,7 +2944,9 @@ def plot_gmm_propagation(
     target epoch), drawn in m relative to its center: the MC cloud (grey), every GMM
     component's ellipse, the GMM highest-density region holding `prob` of the mass (level from mixture draws), optionally
     the SRIF Gaussian's ellipse with the same mass (dash-dot bluish green) and the truth
-    (star). Full text width.
+    (star). Full text width. Axis limits cover the MC cloud, the 0.1-99.9 % mixture
+    percentiles, the GMM region (whose thin, dense components may reach past them), the
+    SRIF ellipse and the truth.
 
     Parameters
     ----------
@@ -2988,6 +3018,30 @@ def plot_gmm_propagation(
                 eb = _ellipse_2d(mub[ix], Pb[np.ix_(ix, ix)], r_ell)
                 ext_lo.append(eb.min(1))
                 ext_hi.append(eb.max(1))
+            level = np.quantile(np.exp(g2.logpdf(draws[:, ix])), 1.0 - prob)
+            # a thin, dense component carries the HDR past the draws' percentiles: add the
+            # extent of its contour, on a grid widened until the region closes inside it
+            blo = np.min(ext_lo, axis=0)
+            bhi = np.max(ext_hi, axis=0)
+            for _ in range(10):
+                bx, by = np.meshgrid(
+                    np.linspace(blo[0], bhi[0], 400), np.linspace(blo[1], bhi[1], 400)
+                )
+                bd = np.exp(g2.logpdf(np.column_stack([bx.ravel(), by.ravel()])))
+                bd = bd.reshape(bx.shape)
+                # sides the region touches: left, right (columns), bottom, top (rows)
+                touch = np.array(
+                    [bd[:, 0].max(), bd[:, -1].max(), bd[0].max(), bd[-1].max()]
+                ) >= level
+                if not touch.any():
+                    break
+                span = bhi - blo
+                blo = blo - 0.5 * span * touch[[0, 2]]
+                bhi = bhi + 0.5 * span * touch[[1, 3]]
+            ext = _contour_extent(bx, by, bd, [level])
+            if ext is not None:
+                ext_lo.append(ext[0])
+                ext_hi.append(ext[1])
 
             lo = np.min(ext_lo, axis=0)
             hi = np.max(ext_hi, axis=0)
@@ -3015,7 +3069,6 @@ def plot_gmm_propagation(
             )
             grid = np.column_stack([gx.ravel(), gy.ravel()])
             dens = np.exp(g2.logpdf(grid)).reshape(gx.shape)
-            level = np.quantile(np.exp(g2.logpdf(draws[:, ix])), 1.0 - prob)
             ax.contour(
                 gx, gy, dens, levels=[level], colors=C_POST, linewidths=1.3, zorder=3
             )
@@ -3100,7 +3153,8 @@ def plot_prediction_history(
     if hist holds the SRIF Gaussian (sig_batch, ll_batch), SRIF + STM (dash-dot
     bluish green). (b) Mean log-density of the MC positions [nats], GMM minus SRIF
     Gaussian (> 0: the GMM fits the MC cloud better); without the batch, the GMM's own mean
-    log-density. The observation arc is shaded. Single column.
+    log-density. The observation arc is shaded and labelled; (a) gets headroom so the
+    curves pass under the label. Single column.
 
     Parameters
     ----------
@@ -3129,7 +3183,8 @@ def plot_prediction_history(
     for ax in (ax0, ax1):
         ax.axvspan(t_hr[0], t_obs_end_hr, color=C_SPAN, lw=0, zorder=0)
         ax.set_xlim(t_hr[0], t_hr[-1])
-    if (t_obs_end_hr - t_hr[0]) >= 0.3 * (t_hr[-1] - t_hr[0]):
+    centred = (t_obs_end_hr - t_hr[0]) >= 0.3 * (t_hr[-1] - t_hr[0])
+    if centred:
         ax0.text(
             0.5 * (t_hr[0] + t_obs_end_hr),
             0.96,
@@ -3180,6 +3235,22 @@ def plot_prediction_history(
         )
     ax0.set_ylabel(r"$\sqrt{\mathrm{tr}(P_{rr})}$ [m]")
     ax0.set_yscale("log")
+    # Headroom for the arc label (top ~12 % of the axis): under it, the curves stay below
+    # 80 % of the log axis
+    t = np.asarray(t_hr, dtype=float)
+    span = t[-1] - t[0]
+    if centred:
+        mid = 0.5 * (t[0] + t_obs_end_hr)
+        under = np.abs(t - mid) <= 0.16 * span
+    else:
+        under = (t >= t_obs_end_hr) & (t <= t_obs_end_hr + 0.4 * span)
+    sig = ["sig_mc", "sig_gmm"] + (["sig_batch"] if has_batch else [])
+    if np.any(under):
+        y_top = 1e3 * max(np.max(np.asarray(hist[k])[under]) for k in sig)
+        b, top = ax0.get_ylim()
+        top_need = b * (y_top / b) ** (1.0 / 0.80)
+        if top_need > top:
+            ax0.set_ylim(b, top_need)
     ax0.yaxis.set_major_locator(mticker.LogLocator(base=10.0, subs=(1.0, 2.0, 5.0)))
     ax0.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
     ax0.yaxis.set_minor_formatter(mticker.NullFormatter())
