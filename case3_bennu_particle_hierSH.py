@@ -1,7 +1,15 @@
 """
-Paper Case 3 (Bennu particle, hierarchical SH prior): the Case 1a scenario with the prior
-scales of the degree-2 SH coefficients learned from the data (one hyperparameter per order m).
+Paper Case 3 (Bennu particle, hierarchical SH prior): the Case 2a scenario (the "mirror" design of
+case2_bennu_particle.py, second-order STT likelihood) with the prior scales of the degree-2 SH
+coefficients learned from the data (one hyperparameter per order m).
 Results in results/case3_bennu_particle_hierSH_<stamp>/.
+
+The geometry, data, reference, priors, batch and Stage 2 STTs are those of Case 2a: epoch
+2019-05-20T14:35:00 (+90 min, 22 images, the spacecraft below the south pole), launch from lat 3 /
+lon 110 deg at 160 mm/s (azimuth -8 deg, elevation 12 deg), full-rank SRIF batch (it converges to
+the shallow local minimum 18.5 m from the truth), order-2 STTs about ref1 (DOP853), 100000 steps
+with 25000 burn-in. Stranded walkers (median log-posterior more than STRANDED_DLOGP below the
+ensemble median) are left out of the samples behind the statistics and corners.
 
 ========================================================================
 WHY HIERARCHICAL BAYESIAN ESTIMATION HERE?
@@ -75,7 +83,7 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
     The pooled scale σ_g of a group is set, a priori, by the RMS magnitude of its
     members.  For Bennu in its principal-axis body-fixed frame the order-1 (tesseral)
     terms C21,S21 ~ 1e-14 vanish by construction (the pole is aligned with the
-    maximum-inertia axis), whereas the order-0 (zonal) oblateness C20 ~ 6e-2 and the
+    maximum-inertia axis), whereas the order-0 (zonal) oblateness C20 ~ -4e-2 and the
     order-2 (sectoral) equatorial-ellipticity terms C22,S22 ~ 1e-3 are O(1)-relevant.
     These three families differ by up to ~12 orders of magnitude.  A single
     "non-zonal" group {C21,S21,C22,S22} would let the sectoral terms (1e-3) set a
@@ -148,6 +156,7 @@ Units:
 import os
 import sys
 import math
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -165,6 +174,7 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 from BatchLSQ import BatchLSQ
+from get_CS_unnormalized import bennu_10_10
 
 # Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
 # MCMCPlots.configure() in the main applies the journal style.
@@ -649,9 +659,10 @@ if __name__ == "__main__":
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
-    # Observation window (must be covered by SPK)
-    utc0 = "2019-03-01T00:00:00"
-    utc1 = "2019-03-01T01:30:00"
+    # Observation window (must be covered by SPK): Case 2, the spacecraft ~4.5 km below
+    # Bennu's south pole, looking along the spin axis
+    utc0 = "2019-05-20T14:35:00"
+    utc1 = "2019-05-20T16:05:00"
     n_obs = 22
 
     # Bennu physical
@@ -664,22 +675,28 @@ if __name__ == "__main__":
     spin_period = 4.296057 * 3600.0  # s
     omega_true = 2 * np.pi / spin_period  # rad/s
 
-    # Dynamics / STT order
-    stt_order = 1
+    # Dynamics / STT order: order 2 for the Stage 2 STTs (MCMC likelihood) only, as Case 2a;
+    # truth, data and batch stay on a first-order propagator (propagator1 below).
+    stt_order = 2
 
     # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
-    # (Bierman U-D, one scalar measurement at a time). "srif" keeps the lstsq singular-value
-    # cutoff of the earlier batch (rank_cutoff below), so its results are the same as before;
-    # "ud" keeps every direction (full-rank MAP). "ud" adds "_ud" to the results folder.
+    # (Bierman U-D, one scalar measurement at a time), both full rank here (rank_cutoff=False):
+    # plain Gauss-Newton from the reference converges to the shallow local minimum at
+    # h0 = +18.4 m (cost 36.03; the best fit, cost 33.57, is at h0 = -2.7 m).
+    # "ud" adds "_ud" to the results folder.
     BATCH_SOLVER = "srif"
 
-    # Truth gravity params
-    mu_true = 4.89044967462e-09
-    C20_true = 6.09086686e-02
-    C21_true = -2.81206646e-14
-    S21_true = 3.87423500e-15
-    C22_true = 1.97844553e-03
-    S22_true = -7.06499291e-04
+    # A walker is "stranded" if its post-burn-in median log-posterior is more than this below
+    # the ensemble median; its samples are left out of the statistics and corners (the trace
+    # plot still shows every walker). So are the samples of other walkers that lie this far
+    # below (a walker that reached the posterior only after the burn-in)
+    STRANDED_DLOGP = 100.0
+
+    # Truth gravity params: unnormalized degree-2 field of get_CS_unnormalized.bennu_10_10
+    # (OSIRIS-REx radio science, R_ref = 0.290 km, C20 = -J2 N20 < 0: oblate), as in case 2
+    mu_true, C_unn, S_unn = bennu_10_10()
+    C20_true, C21_true, S21_true = C_unn[2, 0], C_unn[2, 1], S_unn[2, 1]
+    C22_true, S22_true = C_unn[2, 2], S_unn[2, 2]
     params_true = np.array(
         [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
     )
@@ -719,8 +736,8 @@ if __name__ == "__main__":
     # MCMC settings
     # NOTE: always do a run with burn_in and thin not activated
     n_walkers = 128  # 10 *
-    n_samples = 50000  # 5 *
-    burn_in = 5000
+    n_samples = 100000  # the lobe weights converge slowly, as in Case 2a
+    burn_in = 25000
     thin = 100
     spherical_spread = 1e-1
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
@@ -811,8 +828,8 @@ if __name__ == "__main__":
     )
     vertices = np.asarray(bennu_mesh.vertices)
 
-    lat_desired = np.deg2rad(45.0)
-    lon_desired = np.deg2rad(80.0)
+    lat_desired = np.deg2rad(3.0)
+    lon_desired = np.deg2rad(110.0)
     pos_target = np.array(
         [
             R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
@@ -834,23 +851,19 @@ if __name__ == "__main__":
     )
     r0_true = R_ib0.T @ pos_detach_bf  # inertial
 
-    # Outward initial velocity (random hemisphere w.r.t. r0_true)
-    rng = np.random.default_rng(7)
-    vmag = 2e-4  # km/s
-
-    # tangent launch direction (physically plausible: lofting off surface)
-    rhat = r0_true / np.linalg.norm(r0_true)
-
-    # pick random vector not parallel to rhat
-    u = rng.normal(size=3)
-    u -= np.dot(u, rhat) * rhat
-    u /= np.linalg.norm(u)
-
-    # add small radial component (+/-) to create two near-degenerate families
-    rad_frac = 0.10  # 10% radial, rest tangential
-    sign = 1.0  # <-- TRICK: if you set this wrong in the reference, batch may lock on wrong lobe
-    u = np.sqrt(1 - rad_frac**2) * u + sign * rad_frac * rhat
-
+    # Launch velocity: 160 mm/s, azimuth AZ from local east toward north, elevation EL above
+    # the local horizontal, in the local frame of the site (up = radial), then inertial
+    vmag = 1.6e-4  # km/s
+    az_launch = np.deg2rad(-8.0)
+    el_launch = np.deg2rad(12.0)
+    up_bf = pos_detach_bf / np.linalg.norm(pos_detach_bf)
+    east_bf = np.cross([0.0, 0.0, 1.0], up_bf)
+    east_bf /= np.linalg.norm(east_bf)
+    north_bf = np.cross(up_bf, east_bf)
+    u = R_ib0.T @ (
+        np.cos(el_launch) * (np.cos(az_launch) * east_bf + np.sin(az_launch) * north_bf)
+        + np.sin(el_launch) * up_bf
+    )
     v0_true = vmag * u
 
     # Full truth initial state (12)
@@ -871,12 +884,16 @@ if __name__ == "__main__":
     propagator = STTPropagatorND(
         order=stt_order, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
     )
+    # First-order propagator for the truth and the batch (identical to Case 2a)
+    propagator1 = STTPropagatorND(
+        order=1, f_func=f_func, A_func=A_func, B_funcs=B_funcs, n=12
+    )
 
     # --------------------------
     # Propagate particle truth (DYNAMICS on tau_full)
     # --------------------------
     print("\nPropagating particle truth...")
-    sol_true, stts_true = propagator.propagate(
+    sol_true, stts_true = propagator1.propagate(
         x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
     )
     x_true_full = sol_true.y[:12, :].T  # (N,12)
@@ -1017,7 +1034,7 @@ if __name__ == "__main__":
     print("\n[Stage 1] Batch SRIF (first-order STMs, Gauss-Newton iterations) to convergence...")
 
     batch = BatchLSQ(
-        propagator=propagator,
+        propagator=propagator1,
         tau=tau,  # seconds since start
         sc_state=sc_state,
         y_obs=y_obs,
@@ -1035,7 +1052,7 @@ if __name__ == "__main__":
         atol=1e-10,
         verbose=True,
         solver=BATCH_SOLVER,
-        rank_cutoff=BATCH_SOLVER == "srif",  # lstsq singular-value cutoff of the batch before the SRIF: same results
+        rank_cutoff=False,  # full rank, see BATCH_SOLVER
         halving=False,  # full Gauss-Newton steps, as before
     )
 
@@ -1057,9 +1074,16 @@ if __name__ == "__main__":
     # --------------------------
     # Stage 2: relinearize STTs about ref1
     # --------------------------
-    print("\n[Stage 2] Propagating ref1 and computing STTs about ref1...")
+    # Order-2 STTs (1884 states): LSODA switches to its stiff branch and spends hours on
+    # finite-difference Jacobians; the problem is not stiff, so DOP853 (~5 min).
+    print(f"\n[Stage 2] Propagating ref1 and computing order-{stt_order} STTs about ref1...")
+    t_stage2 = time.time()
     sol_ref, stts_ref = propagator.propagate(
-        x0=x0_ref1, t_eval=tau, rtol=1e-8, atol=1e-10, method="LSODA"
+        x0=x0_ref1, t_eval=tau, rtol=1e-8, atol=1e-10, method="DOP853"
+    )
+    print(
+        f"[Stage 2] STT propagation wall time {time.time() - t_stage2:.1f} s, "
+        f"nfev = {sol_ref.nfev}"
     )
 
     # --------------------------
@@ -1204,6 +1228,23 @@ if __name__ == "__main__":
             method_optimize="Powell",
         )
         model.save_chain(fig_dir / "chain.npz")  # before samples are edited in place
+
+    # Stranded walkers: flat sample index = step * n_walkers + walker (emcee get_chain(flat))
+    # Samples of the other walkers below the same threshold belong to a walker that reached the
+    # posterior only after the burn-in; they are dropped too.
+    lp_w = np.median(model.log_prob_chain, axis=0)
+    lp_cut = np.median(lp_w) - STRANDED_DLOGP
+    stranded = np.where(lp_w < lp_cut)[0]
+    keep = ~np.isin(np.arange(model.samples.shape[0]) % lp_w.size, stranded)
+    late = keep & (model.log_probs < lp_cut)
+    keep &= ~late
+    print(
+        f"\n[MCMC] stranded walkers: {stranded.tolist()} (median log-post "
+        f"{np.round(lp_w[stranded], 1).tolist()} vs ensemble {np.median(lp_w):.1f}); "
+        f"late samples of other walkers: {late.sum()}; kept {keep.sum()}/{keep.size} samples"
+    )
+    model.samples = model.samples[keep]
+    model.log_probs = model.log_probs[keep]
 
     theta_hat_s, _ = model.get_estimate_and_covariance()  # sampling-space MAP
     chi2_mcmc = np.sum(residuals_sampling(theta_hat_s) ** 2)

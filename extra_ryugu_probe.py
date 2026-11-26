@@ -2,7 +2,7 @@
 Paper extra case (Ryugu-like probe, formerly scenario_NGSR.py). Results in
 results/extra_ryugu_probe_<stamp>/.
 
-Scenario (Ryugu twin of case1a_bennu_particle.py, uses your existing
+Scenario (Ryugu twin of the Bennu particle case, case2_bennu_particle.py, uses your existing
 STTPropagatorND + MCMCModel):
 
 - Spacecraft (observer): its trajectory is TRUTH and is treated as KNOWN. It starts at rest

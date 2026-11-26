@@ -72,6 +72,7 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from BatchLSQ import srif_solve
 from MCMC import MCMCModel
+from get_CS_unnormalized import bennu_10_10
 
 # Publication-ish defaults
 plt.rcParams.update(
@@ -1160,13 +1161,11 @@ if __name__ == "__main__":
     # Dynamics / STT order
     stt_order = 1
 
-    # Truth gravity params
-    mu_true = 4.89044967462e-09
-    C20_true = 6.09086686e-02
-    C21_true = -2.81206646e-14
-    S21_true = 3.87423500e-15
-    C22_true = 1.97844553e-03
-    S22_true = -7.06499291e-04
+    # Truth gravity params: unnormalized degree-2 field of get_CS_unnormalized.bennu_10_10
+    # (OSIRIS-REx radio science, R_ref = 0.290 km, C20 = -J2 N20 < 0: oblate), as in case 2
+    mu_true, C_unn, S_unn = bennu_10_10()
+    C20_true, C21_true, S21_true = C_unn[2, 0], C_unn[2, 1], S_unn[2, 1]
+    C22_true, S22_true = C_unn[2, 2], S_unn[2, 2]
     params_true = np.array(
         [mu_true, C20_true, C21_true, S21_true, C22_true, S22_true], dtype=float
     )

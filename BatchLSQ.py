@@ -31,8 +31,10 @@ rank_cutoff=True (SRIF only) gives the same solution as the batch before the SRI
 (numpy.linalg.lstsq of the stacked system, LAPACK gelsd): R d = z is solved with the SVD of R
 (the same singular values as the stacked system), dropping those below eps * max(m, n) times the
 largest (m = measurement + prior rows), as the default rcond of lstsq does. In raw units this
-drops the least-informed direction (case 1a: singular values from 3e2 to 3e16), so the solution
-is the minimum-norm one, not the full MAP. The covariance is R^-1 R^-T in both cases.
+drops the least-informed direction (Bennu particle arc of 2019-03-01: singular values from 3e2 to
+3e16), so the solution is the minimum-norm one, not the full MAP. The covariance is R^-1 R^-T in
+both cases.
+rank_cutoff=<float> multiplies that default cutoff (True = 1.0, False = no cutoff).
 
 The step is x0 += d when that lowers the exact MAP cost, else d/2, d/4, ... (Hartley 1961): the
 direction is always the SRIF one. halving=False takes the full step every time (the iterated
@@ -283,7 +285,8 @@ class BatchLSQ:
                     the covariance is mapped back to x. Needs all parameters solved for.
         rank_cutoff True: solve R d = z with the default singular-value cutoff of numpy.linalg.lstsq
                     (eps * max(m, n), m = 2N measurement rows + finite prior rows), as the batch
-                    before the SRIF did (SRIF only)
+                    before the SRIF did (SRIF only); a float: that many times this default cutoff
+                    (True = 1.0); False: no cutoff
         halving     False: always take the full step (no MAP-cost check), as the batch before the
                     SRIF did
 
@@ -304,8 +307,11 @@ class BatchLSQ:
             raise ValueError("solver = 'ud' needs a finite prior sigma on every solve-for parameter")
         if rank_cutoff and solver != "srif":
             raise ValueError("rank_cutoff needs solver = 'srif'")
-        # default rcond of numpy.linalg.lstsq on the stacked [J; prior rows] system
+        # default rcond of numpy.linalg.lstsq on the stacked [J; prior rows] system (times rank_cutoff
+        # when it is a float)
         rcond = np.finfo(float).eps * max(2 * len(self.tau) + int(finite.sum()), len(update_idx)) if rank_cutoff else None
+        if rcond is not None and rank_cutoff is not True:
+            rcond = float(rank_cutoff) * rcond
         R0 = np.diag(np.where(finite, 1.0 / prior_sig, 0.0))
         prop_kw = dict(rtol=rtol, atol=atol, method=method)
         tag = solver.upper()

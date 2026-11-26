@@ -1430,6 +1430,7 @@ def plot_mcmc_traces(
     prior_idx=None,
     prior_label="Hyperprior Mean",
     prior_truth_label=None,
+    walkers=None,
 ):
     """
     Walker traces of every parameter and of the log-posterior over the whole run.
@@ -1478,6 +1479,11 @@ def plot_mcmc_traces(
         If given, true_theta of the prior_idx parameters is not a generative value (e.g. the
         realized RMS of the group deviations): drawn dotted with this legend entry instead
         of as the truth.
+    walkers : array_like of int, optional
+        The walkers drawn and used for the mean, the band and the y-limits; default all.
+        Used to leave out stranded walkers: a few walkers far from the posterior widen the
+        +/-3 sigma band and the y-limits until the other walkers are a flat line under the
+        band. The legend counts only these walkers.
 
     Returns
     -------
@@ -1489,6 +1495,9 @@ def plot_mcmc_traces(
     stride = rs * max(1, round(n_steps / max_points / rs))
     ch = _chain_physical(model, thin=stride, transform=transform) * PARAM_SCALE
     lp = np.asarray(model.sampler.get_log_prob(thin=stride), dtype=float)
+    if walkers is not None:
+        walkers = np.asarray(walkers, dtype=int)
+        ch, lp = ch[:, walkers], lp[:, walkers]
     steps = np.arange(ch.shape[0]) * stride
     n_par = ch.shape[2]
     post = steps >= burn_in
@@ -2792,6 +2801,7 @@ def plot_mcmc_diagnostics(
     show_map=False,
     map_theta=None,
     show_batch_mean=False,
+    trace_walkers=None,
 ):
     """
     The MCMC journal figures: residuals, traces, autocorrelation, corner and (optionally)
@@ -2849,6 +2859,9 @@ def plot_mcmc_diagnostics(
         Posterior mode in model coordinates, used by show_map instead of model.find_map().
     show_batch_mean : bool
         Mark the batch estimate (mapped like the truth) on every corner plot. Off by default.
+    trace_walkers : array_like of int, optional
+        Walkers of the trace figure (plot_mcmc_traces walkers), e.g. without the stranded
+        ones; default all.
 
     Returns
     -------
@@ -2881,7 +2894,11 @@ def plot_mcmc_diagnostics(
         (
             "traces",
             lambda: plot_mcmc_traces(
-                model, burn_in, true_theta=true_theta, batch_theta=batch
+                model,
+                burn_in,
+                true_theta=true_theta,
+                batch_theta=batch,
+                walkers=trace_walkers,
             ),
         ),
         (

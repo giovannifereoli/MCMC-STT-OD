@@ -35,6 +35,7 @@ from scipy.stats import uniform as scipy_uniform
 from STTPropagationND import STTPropagatorND
 from BatchLSQ import srif_solve
 from MCMC import MCMCModel
+from get_CS_unnormalized import bennu_10_10
 
 # Publication-ish defaults
 plt.rcParams.update(
@@ -1088,19 +1089,18 @@ if __name__ == "__main__":
 
     stt_order = 1
 
-    mu_true = 4.89044967462e-09
-    C20_true = 0.060908668621940644
-    C21_true = -2.8120664615284112e-14
-    S21_true = 3.874234999952248e-15
-    C22_true = 0.001978445533807606
-    S22_true = -0.0007064992913094132
-    C30_true = -0.004572082563573552
-    C31_true = 0.0008801840896940344
-    S31_true = -0.0005870017273132463
-    C32_true = -0.0003193368868974497
-    S32_true = -0.000183688614279846
-    C33_true = 0.0001632924069308578
-    S33_true = -4.32290988621995e-05
+    # Unnormalized degree-2 and degree-3 fields of get_CS_unnormalized.bennu_10_10 (OSIRIS-REx
+    # radio science): Cn0 = -Jn Nn0, so C20 < 0 (oblate), as in the paper cases
+    mu_true, C_unn, S_unn = bennu_10_10()  # GM [km^3/s^2], C[n, m], S[n, m]
+
+    # Degree 2
+    C20_true, C21_true, S21_true = C_unn[2, 0], C_unn[2, 1], S_unn[2, 1]
+    C22_true, S22_true = C_unn[2, 2], S_unn[2, 2]
+
+    # Degree 3
+    C30_true, C31_true, S31_true = C_unn[3, 0], C_unn[3, 1], S_unn[3, 1]
+    C32_true, S32_true = C_unn[3, 2], S_unn[3, 2]
+    C33_true, S33_true = C_unn[3, 3], S_unn[3, 3]
 
     params_true = np.array(
         [

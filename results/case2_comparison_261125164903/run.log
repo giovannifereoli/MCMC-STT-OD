@@ -1,0 +1,44 @@
+[Exact] data, priors and ref1 from case2_bennu_particle_stm_261125163700
+[Exact] positions at ref1 vs the run's ref1 trajectory: max |dr| = 2.77e-07 m; chi2 at ref1 = 35.96
+[Exact] 4 seeds x 128 walkers x 100000 steps (burn-in 25000, thin 100), in parallel...
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/moves/red_blue.py:99: RuntimeWarning: invalid value encountered in scalar subtract
+  lnpdiff = f + nlp - state.log_prob[j]
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/moves/red_blue.py:99: RuntimeWarning: invalid value encountered in scalar subtract
+  lnpdiff = f + nlp - state.log_prob[j]
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/moves/red_blue.py:99: RuntimeWarning: invalid value encountered in scalar subtract
+  lnpdiff = f + nlp - state.log_prob[j]
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/moves/red_blue.py:99: RuntimeWarning: invalid value encountered in scalar subtract
+  lnpdiff = f + nlp - state.log_prob[j]
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/autocorr.py:38: RuntimeWarning: invalid value encountered in divide
+  acf /= acf[0]
+The chain is shorter than 50 times the integrated autocorrelation time for 5 parameter(s). Use this estimate with caution and run a longer chain!
+N/50 = 1500;
+tau: [5526.71865002           nan           nan 7150.66759875           nan
+ 7286.96019896 5749.58242681 1378.88729588 1394.06440092 1438.55044411
+ 1544.03021741           nan]
+[Exact] seed 2: 100000 steps in 62.6 min, acceptance 0.091, tau_max nan
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/autocorr.py:38: RuntimeWarning: invalid value encountered in divide
+  acf /= acf[0]
+The chain is shorter than 50 times the integrated autocorrelation time for 5 parameter(s). Use this estimate with caution and run a longer chain!
+N/50 = 1500;
+tau: [5991.0023776  7627.24603717           nan 7514.98525679 7546.66125574
+           nan           nan           nan 1353.73589636 1358.2483852
+           nan 1563.24584071]
+[Exact] seed 4: 100000 steps in 64.4 min, acceptance 0.095, tau_max nan
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/autocorr.py:38: RuntimeWarning: invalid value encountered in divide
+  acf /= acf[0]
+The chain is shorter than 50 times the integrated autocorrelation time for 4 parameter(s). Use this estimate with caution and run a longer chain!
+N/50 = 1500;
+tau: [          nan           nan 7461.92891073 7288.36312358           nan
+ 7330.36071774 5471.72115422 1310.78536498           nan           nan
+           nan 1406.79607955]
+[Exact] seed 3: 100000 steps in 65.2 min, acceptance 0.095, tau_max nan
+/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/emcee/autocorr.py:38: RuntimeWarning: invalid value encountered in divide
+  acf /= acf[0]
+The chain is shorter than 50 times the integrated autocorrelation time for 4 parameter(s). Use this estimate with caution and run a longer chain!
+N/50 = 1500;
+tau: [          nan 7765.1970173            nan           nan 7687.81092815
+           nan 6050.92938511           nan           nan           nan
+ 1635.63822915           nan]
+[Exact] seed 1: 100000 steps in 74.4 min, acceptance 0.090, tau_max nan
+[Exact] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/sh_test/results/case2_comparison_261125164903/exact_reference.npz
