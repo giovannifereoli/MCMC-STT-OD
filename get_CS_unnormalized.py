@@ -369,3 +369,27 @@ if __name__ == "__main__":
     print(f"{'S33':<6} {S[3,3]:>20.12e}")
 
     print("\n" + "=" * 50)
+
+
+def bennu_spin_spice(et0):
+    """
+    Bennu's rotation constants from the loaded PCK (bennu_v17.tpc), for the IAU model about et0.
+
+    Returns alpha, delta [rad] (pole RA/Dec in J2000), omega [rad/s] and w0 [rad] (prime meridian
+    angle W at et0) such that R_ib(t) = R3(w0 + omega t) R1(pi/2 - delta) R3(alpha + pi/2), with
+    t in seconds past et0, is spice.pxform("J2000", "IAU_BENNU", et0 + t). The PM quadratic term
+    (2e-6 deg/day^2) is taken into omega at et0; what is left is below 1e-6 deg over a day.
+    The kernels must be loaded first.
+    """
+    import spiceypy as spice
+
+    ra = spice.bodvcd(2101955, "POLE_RA", 3)[1]
+    dec = spice.bodvcd(2101955, "POLE_DEC", 3)[1]
+    pm = spice.bodvcd(2101955, "PM", 3)[1]
+    d = et0 / 86400.0  # days past J2000 TDB
+    T = d / 36525.0  # Julian centuries
+    alpha = ra[0] + ra[1] * T + ra[2] * T**2
+    delta = dec[0] + dec[1] * T + dec[2] * T**2
+    W = pm[0] + pm[1] * d + pm[2] * d**2
+    Wdot = (pm[1] + 2.0 * pm[2] * d) / 86400.0  # deg/s
+    return np.deg2rad(alpha), np.deg2rad(delta), np.deg2rad(Wdot), np.deg2rad(np.mod(W, 360.0))

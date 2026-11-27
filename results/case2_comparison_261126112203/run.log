@@ -1,0 +1,105 @@
+[Exact] data, priors and ref1 from case2b_bennu_particle_stmbank_261126101730
+[Exact] positions at ref1 vs the run's ref1 trajectory: max |dr| = 1.72e-08 m; chi2 at ref1 = 36.59
+[Exact] 4 seeds x 128 walkers, >= 100000 steps until 50 x max(tau) (at most 1000000), storing every 10, in parallel...
+[Exact] seed 2: 100000 steps (49 min), tau_max 8847, n_steps / tau_max = 11.3, acceptance 0.127, 0 stranded walkers
+[Exact] seed 1: 100000 steps (49 min), tau_max 9001, n_steps / tau_max = 11.1, acceptance 0.127, 0 stranded walkers
+[Exact] seed 3: 100000 steps (49 min), tau_max 8106, n_steps / tau_max = 12.3, acceptance 0.129, 0 stranded walkers
+[Exact] seed 4: 100000 steps (49 min), tau_max 10246, n_steps / tau_max = 9.8, acceptance 0.118, 0 stranded walkers
+[Exact] seed 2: 150000 steps (77 min), tau_max 15063, n_steps / tau_max = 10.0, acceptance 0.113, 0 stranded walkers
+[Exact] seed 1: 150000 steps (77 min), tau_max 14261, n_steps / tau_max = 10.5, acceptance 0.112, 0 stranded walkers
+[Exact] seed 3: 150000 steps (77 min), tau_max 13130, n_steps / tau_max = 11.4, acceptance 0.115, 0 stranded walkers
+[Exact] seed 4: 150000 steps (77 min), tau_max 16143, n_steps / tau_max = 9.3, acceptance 0.104, 0 stranded walkers
+[Exact] seed 2: 200000 steps (105 min), tau_max 20716, n_steps / tau_max = 9.7, acceptance 0.104, 0 stranded walkers
+[Exact] seed 3: 200000 steps (105 min), tau_max 19428, n_steps / tau_max = 10.3, acceptance 0.105, 0 stranded walkers
+[Exact] seed 4: 200000 steps (105 min), tau_max 21479, n_steps / tau_max = 9.3, acceptance 0.099, 0 stranded walkers
+[Exact] seed 1: 200000 steps (105 min), tau_max 19456, n_steps / tau_max = 10.3, acceptance 0.104, 0 stranded walkers
+[Exact] seed 2: 250000 steps (131 min), tau_max 26441, n_steps / tau_max = 9.5, acceptance 0.100, 0 stranded walkers
+[Exact] seed 3: 250000 steps (131 min), tau_max 25307, n_steps / tau_max = 9.9, acceptance 0.100, 0 stranded walkers
+[Exact] seed 4: 250000 steps (131 min), tau_max 25515, n_steps / tau_max = 9.8, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 250000 steps (131 min), tau_max 24521, n_steps / tau_max = 10.2, acceptance 0.099, 0 stranded walkers
+[Exact] seed 3: 300000 steps (157 min), tau_max 31652, n_steps / tau_max = 9.5, acceptance 0.097, 0 stranded walkers
+[Exact] seed 2: 300000 steps (157 min), tau_max 31931, n_steps / tau_max = 9.4, acceptance 0.097, 0 stranded walkers
+[Exact] seed 4: 300000 steps (157 min), tau_max 29895, n_steps / tau_max = 10.0, acceptance 0.094, 0 stranded walkers
+[Exact] seed 1: 300000 steps (157 min), tau_max 29766, n_steps / tau_max = 10.1, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 350000 steps (183 min), tau_max 37030, n_steps / tau_max = 9.5, acceptance 0.096, 0 stranded walkers
+[Exact] seed 2: 350000 steps (183 min), tau_max 37018, n_steps / tau_max = 9.5, acceptance 0.097, 0 stranded walkers
+[Exact] seed 4: 350000 steps (183 min), tau_max 34708, n_steps / tau_max = 10.1, acceptance 0.093, 0 stranded walkers
+[Exact] seed 1: 350000 steps (183 min), tau_max 34507, n_steps / tau_max = 10.1, acceptance 0.094, 0 stranded walkers
+[Exact] seed 3: 400000 steps (210 min), tau_max 41805, n_steps / tau_max = 9.6, acceptance 0.095, 0 stranded walkers
+[Exact] seed 2: 400000 steps (210 min), tau_max 41460, n_steps / tau_max = 9.6, acceptance 0.096, 0 stranded walkers
+[Exact] seed 4: 400000 steps (210 min), tau_max 38743, n_steps / tau_max = 10.3, acceptance 0.092, 0 stranded walkers
+[Exact] seed 1: 400000 steps (211 min), tau_max 39310, n_steps / tau_max = 10.2, acceptance 0.093, 0 stranded walkers
+[Exact] seed 3: 450000 steps (238 min), tau_max 46442, n_steps / tau_max = 9.7, acceptance 0.095, 0 stranded walkers
+[Exact] seed 2: 450000 steps (238 min), tau_max 46062, n_steps / tau_max = 9.8, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 450000 steps (238 min), tau_max 42568, n_steps / tau_max = 10.6, acceptance 0.092, 0 stranded walkers
+[Exact] seed 1: 450000 steps (238 min), tau_max 44459, n_steps / tau_max = 10.1, acceptance 0.093, 0 stranded walkers
+[Exact] seed 3: 500000 steps (262 min), tau_max 50363, n_steps / tau_max = 9.9, acceptance 0.094, 0 stranded walkers
+[Exact] seed 2: 500000 steps (262 min), tau_max 50362, n_steps / tau_max = 9.9, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 500000 steps (262 min), tau_max 47054, n_steps / tau_max = 10.6, acceptance 0.093, 0 stranded walkers
+[Exact] seed 1: 500000 steps (263 min), tau_max 48880, n_steps / tau_max = 10.2, acceptance 0.093, 0 stranded walkers
+[Exact] seed 3: 550000 steps (288 min), tau_max 53693, n_steps / tau_max = 10.2, acceptance 0.094, 0 stranded walkers
+[Exact] seed 2: 550000 steps (288 min), tau_max 54555, n_steps / tau_max = 10.1, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 550000 steps (288 min), tau_max 51677, n_steps / tau_max = 10.6, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 550000 steps (288 min), tau_max 52676, n_steps / tau_max = 10.4, acceptance 0.092, 0 stranded walkers
+[Exact] seed 3: 600000 steps (313 min), tau_max 57204, n_steps / tau_max = 10.5, acceptance 0.094, 0 stranded walkers
+[Exact] seed 4: 600000 steps (313 min), tau_max 56257, n_steps / tau_max = 10.7, acceptance 0.095, 0 stranded walkers
+[Exact] seed 2: 600000 steps (313 min), tau_max 58337, n_steps / tau_max = 10.3, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 600000 steps (313 min), tau_max 56522, n_steps / tau_max = 10.6, acceptance 0.092, 0 stranded walkers
+[Exact] seed 3: 650000 steps (339 min), tau_max 60141, n_steps / tau_max = 10.8, acceptance 0.093, 0 stranded walkers
+[Exact] seed 4: 650000 steps (339 min), tau_max 60726, n_steps / tau_max = 10.7, acceptance 0.095, 0 stranded walkers
+[Exact] seed 2: 650000 steps (339 min), tau_max 61736, n_steps / tau_max = 10.5, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 650000 steps (339 min), tau_max 61010, n_steps / tau_max = 10.7, acceptance 0.092, 0 stranded walkers
+[Exact] seed 4: 700000 steps (366 min), tau_max 65216, n_steps / tau_max = 10.7, acceptance 0.095, 0 stranded walkers
+[Exact] seed 3: 700000 steps (366 min), tau_max 63720, n_steps / tau_max = 11.0, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 700000 steps (366 min), tau_max 64635, n_steps / tau_max = 10.8, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 700000 steps (366 min), tau_max 65661, n_steps / tau_max = 10.7, acceptance 0.093, 0 stranded walkers
+[Exact] seed 4: 750000 steps (392 min), tau_max 69590, n_steps / tau_max = 10.8, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 750000 steps (392 min), tau_max 66916, n_steps / tau_max = 11.2, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 750000 steps (392 min), tau_max 68109, n_steps / tau_max = 11.0, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 750000 steps (392 min), tau_max 70119, n_steps / tau_max = 10.7, acceptance 0.093, 0 stranded walkers
+[Exact] seed 4: 800000 steps (418 min), tau_max 73726, n_steps / tau_max = 10.9, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 800000 steps (418 min), tau_max 70511, n_steps / tau_max = 11.3, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 800000 steps (418 min), tau_max 71700, n_steps / tau_max = 11.2, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: 800000 steps (418 min), tau_max 74440, n_steps / tau_max = 10.7, acceptance 0.094, 0 stranded walkers
+[Exact] seed 4: 850000 steps (444 min), tau_max 77900, n_steps / tau_max = 10.9, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 850000 steps (444 min), tau_max 75419, n_steps / tau_max = 11.3, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 850000 steps (444 min), tau_max 75298, n_steps / tau_max = 11.3, acceptance 0.096, 0 stranded walkers
+[Exact] seed 1: 850000 steps (444 min), tau_max 78676, n_steps / tau_max = 10.8, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 900000 steps (470 min), tau_max 81236, n_steps / tau_max = 11.1, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 900000 steps (470 min), tau_max 80469, n_steps / tau_max = 11.2, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 900000 steps (470 min), tau_max 78825, n_steps / tau_max = 11.4, acceptance 0.096, 0 stranded walkers
+[Exact] seed 1: 900000 steps (470 min), tau_max 82274, n_steps / tau_max = 10.9, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 950000 steps (496 min), tau_max 84432, n_steps / tau_max = 11.3, acceptance 0.096, 0 stranded walkers
+[Exact] seed 3: 950000 steps (496 min), tau_max 84126, n_steps / tau_max = 11.3, acceptance 0.093, 0 stranded walkers
+[Exact] seed 2: 950000 steps (496 min), tau_max 82388, n_steps / tau_max = 11.5, acceptance 0.096, 0 stranded walkers
+[Exact] seed 1: 950000 steps (496 min), tau_max 85929, n_steps / tau_max = 11.1, acceptance 0.095, 0 stranded walkers
+[Exact] seed 4: 1000000 steps (521 min), tau_max 86677, n_steps / tau_max = 11.5, acceptance 0.097, 0 stranded walkers
+[Exact] seed 4: done, 1000000 steps = 11.5 tau_max, burn-in 173353, thin 830, 995 x 128 samples
+[Timing] exact seed 4: sampling 31259 s (8.68 h) on one process, 1000000 steps x 128 walkers; 31.3 ms per step, 0.244 ms per evaluation
+[Exact] seed 3: 1000000 steps (521 min), tau_max 88340, n_steps / tau_max = 11.3, acceptance 0.093, 0 stranded walkers
+[Exact] seed 3: done, 1000000 steps = 11.3 tau_max, burn-in 176679, thin 810, 1016 x 128 samples
+[Timing] exact seed 3: sampling 31262 s (8.68 h) on one process, 1000000 steps x 128 walkers; 31.3 ms per step, 0.244 ms per evaluation
+[Exact] seed 2: 1000000 steps (521 min), tau_max 84736, n_steps / tau_max = 11.8, acceptance 0.096, 0 stranded walkers
+[Exact] seed 2: done, 1000000 steps = 11.8 tau_max, burn-in 169471, thin 820, 1012 x 128 samples
+[Timing] exact seed 2: sampling 31272 s (8.69 h) on one process, 1000000 steps x 128 walkers; 31.3 ms per step, 0.244 ms per evaluation
+[Exact] seed 1: 1000000 steps (521 min), tau_max 90455, n_steps / tau_max = 11.1, acceptance 0.095, 0 stranded walkers
+[Exact] seed 1: done, 1000000 steps = 11.1 tau_max, burn-in 180909, thin 810, 1011 x 128 samples
+[Timing] exact seed 1: sampling 31276 s (8.69 h) on one process, 1000000 steps x 128 walkers; 31.3 ms per step, 0.244 ms per evaluation
+[Exact] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/prod/results/case2_comparison_261126112203/exact_reference.npz
+[Compare] stt2 : case2a_bennu_particle_stt2_261126112204
+[Compare] bank : case2b_bennu_particle_stmbank_261126101730
+[Compare] stm  : case2_bennu_particle_stm_261126101730
+[Exact] reusing /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/prod/results/case2_comparison_261126112203/exact_reference.npz
+[Figure] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/prod/results/case2_comparison_261126112203/fig_case2_comparison.pdf
+
+Case 2 comparison (h0 = launch height above the equator, vh0 = out-of-plane launch speed; truth h0 = -0.0 m, vh0 = -21.8 mm/s; batch h0 = +25.7 m, vh0 = -7.4 mm/s; lobe split at h0 = 11.0 m, the minimum of the exact h0 marginal between them)
+
+likelihood                     n  drop    acc  n/tau          h0 2.5/16/50/84/97.5 % [m]  P(truth lobe)  TV(h0)  truth lvl (h0,vh0)  (h0,GM)
+Exact dynamics            516352     0  0.095   11.1   -12.2   -8.1   -1.3  +23.6  +30.9          0.694   0.000               0.365    0.217
+STT-2 (Case 2a)           146304     0  0.085   14.0    -8.3   -4.2   +9.5  +26.5  +31.9          0.517   0.218               0.503    0.076
+Bank of 21 STMs (Case 2b)  331904     0  0.183   11.8   -20.4  -12.7   -3.2  +22.7  +30.7          0.718   0.170               0.319    0.316
+Single STM                182272     0  0.384  672.2   +16.8  +21.2  +25.8  +30.3  +34.7          0.001   0.718               1.000    1.000
+
+Exact dynamics per seed: P(truth lobe) 0.683, 0.709, 0.669, 0.714 (range 0.669-0.714); steps 1000000, 1000000, 1000000, 1000000
+
+drop: stranded walkers left out; acc: mean acceptance; n/tau: steps per autocorrelation time (max over parameters; exact: the least converged seed); P(truth lobe): posterior share on the truth's side of the split; TV(h0): total variation distance of the h0 marginal from the exact one (60 bins); truth lvl: posterior mass denser than the truth in that plane (0 = mode, 1 = outside).

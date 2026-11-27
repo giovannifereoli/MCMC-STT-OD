@@ -18,6 +18,9 @@ Usage
     python case2_comparison.py --exact-only     # sample the exact reference only (data from the
                                                 # newest case 2 batch.npz), no figure
     python case2_comparison.py --runs DIR_2A DIR_2B DIR_STM     # explicit run folders
+    python case2_comparison.py --valley --runs DIR_2A_VALLEY DIR_2B_VALLEY DIR_STM
+                                                # exact reference in valley coordinates
+                                                # (results/case2_comparison_<stamp>_valley/)
 
 Outputs (results/case2_comparison_<stamp>/)
 -------
@@ -29,17 +32,29 @@ Outputs (results/case2_comparison_<stamp>/)
 
 Exact reference
 ---------------
-emcee (stretch move, 128 walkers per seed, N_SEEDS seeds in parallel processes, 100000 steps,
-25000 burn-in, thin 100), in the prior-whitened coordinates of the case runs and started, as
-they are, 0.1 prior sigmas around ref1. Each half-ensemble proposal integrates its 64 walkers in
-one stacked DOP853 solve (rtol 1e-10, atol 1e-12) of the dynamics of
-generate_stt_functions_bennu_deg2 (inertial frame, degree-2 gravity in the body frame rotated by
-R_ib(t) = Rz(omega t) Rx(pi/2 - delta) Rz(alpha + pi/2)). A walker whose trajectory comes
-within R_IMPACT = 0.2 km of the center has hit Bennu: it gets zero posterior density, and the
-solve goes on without it from the impact time (in the first steps many walkers of the start ball
-hit the body). A failed stacked solve is redone one walker at a time. The constants, data, priors
-and ref1 come from batch.npz of the case 2 runs, and the exact positions at ref1 are checked
-against the saved ref1 trajectory.
+emcee (stretch move, N_SEEDS seeds in parallel processes) with the MCMC settings of the case
+runs: 128 walkers started from N(ref1, batch covariance), at least N_MIN steps, then on in blocks
+of CHECK_EVERY steps until n_steps >= N_TAU x max(tau) (at most MAX_STEPS; tau without the
+stranded walkers), every THIN_BY-th step stored, burn-in 2 x max(tau) and thinning
+0.5 x min(tau) per seed. The walkers move in the prior-whitened coordinates (the stretch move is
+affine invariant: the coordinates only fix the start). Each half-ensemble proposal integrates
+its 64 walkers in one stacked DOP853 solve (rtol 1e-11, atol 1e-14, as the case runs) of the
+dynamics of generate_stt_functions_bennu_deg2 (inertial frame, degree-2 gravity in the body
+frame rotated by R_ib(t) = Rz(w0 + omega t) Rx(pi/2 - delta) Rz(alpha + pi/2), SPICE IAU_BENNU). A walker whose
+trajectory comes within R_IMPACT = 0.2 km of the center has hit Bennu: it gets zero posterior
+density, and the solve goes on without it from the impact time. A failed stacked solve is redone
+one walker at a time. The constants, data, priors and ref1 come from batch.npz of the case 2
+runs, and the exact positions at ref1 are checked against the saved ref1 trajectory.
+
+With --valley the walkers of the exact reference move in valley-straightening coordinates
+(MCMC.build_valley_map / ValleyMap, as case2_bennu_particle.py --valley): z = h e + Q (y*(h) +
+C(h) w) in the batch-whitened coordinates z (theta = mean + L1 z, L1 L1^T = cov1), h along the
+batch's least-determined position direction, with the profile path y*(h) and conditional
+Cholesky factor C(h) fitted on the exact residuals (vectorized central-difference Jacobians).
+The log-posterior gets log |dz/dv| (same posterior); the chains are mapped back to the
+prior-whitened coordinates before tau, burn-in and thinning, and saved as without the map.
+Without --run folders, --valley takes the newest _valley runs of Cases 2a / 2b (the single STM
+posterior is Gaussian: its plain run).
 
 Every posterior drops its stranded walkers (median log-posterior more than STRANDED_DLOGP below
 the ensemble median) and the samples of the other walkers that lie as far below, as
@@ -64,6 +79,7 @@ from scipy.integrate import solve_ivp
 from scipy.ndimage import gaussian_filter
 
 import MCMCPlots
+from MCMC import build_valley_map
 
 RESULTS = Path(__file__).resolve().parent / "results"
 RUN_GLOBS = {
@@ -73,13 +89,15 @@ RUN_GLOBS = {
 }
 STRANDED_DLOGP = 100.0  # as case2_bennu_particle.py
 
-# Exact reference sampler
+# Exact reference sampler: the MCMC settings of the case runs (see the docstring)
 N_SEEDS = 4
 N_WALKERS = 128
-N_STEPS = 100000
-BURN_IN = 25000
-THIN = 100
-SPREAD = 0.1  # walker start: ref1 + SPREAD N(0, I) in prior-whitened coordinates
+N_MIN = 100000  # minimum steps
+N_TAU = 50
+CHECK_EVERY = 50000
+MAX_STEPS = 1000000
+THIN_BY = 10
+SPREAD = 1.0  # walker start: N(ref1, SPREAD^2 batch covariance)
 R_IMPACT = 0.2  # km; a trajectory that comes this close to the center has hit Bennu (minimum
 # radius of the shape model 0.224 km) and gets zero posterior density
 
@@ -95,13 +113,15 @@ LS = {"exact": "-", "stt2": "-", "bank": "-", "stm": "--"}
 
 
 def _rz(th):
+    """Frame (passive) rotation about z, as make_bennu_rotation_matrix."""
     c, s = np.cos(th), np.sin(th)
-    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
 def _rx(th):
+    """Frame (passive) rotation about x."""
     c, s = np.cos(th), np.sin(th)
-    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]])
 
 
 class Degree2Dynamics:
@@ -115,14 +135,16 @@ class Degree2Dynamics:
 
     Parameters
     ----------
-    R_ref, alpha, delta, omega : float
-        Reference radius [km], pole right ascension and declination [rad], spin rate [rad/s]
-        (batch.npz dyn_const).
+    R_ref, alpha, delta, omega, w0 : float
+        Reference radius [km], pole right ascension and declination [rad], spin rate [rad/s],
+        prime meridian angle at t = 0 [rad] (batch.npz dyn_const; runs saved before w0 was
+        added have four entries and w0 = 0)
     """
 
-    def __init__(self, R_ref, alpha, delta, omega):
+    def __init__(self, R_ref, alpha, delta, omega, w0=0.0):
         self.R2 = float(R_ref) ** 2
         self.omega = float(omega)
+        self.w0 = float(w0)
         self.M0 = _rx(np.pi / 2 - delta) @ _rz(alpha + np.pi / 2)  # R_ib(0)
         self.pole = self.M0.T @ np.array([0.0, 0.0, 1.0])  # body +z (spin axis) in J2000
 
@@ -143,7 +165,7 @@ class Degree2Dynamics:
         -------
         ndarray, shape (N, 3)
         """
-        Rm = _rz(self.omega * t) @ self.M0
+        Rm = _rz(self.w0 + self.omega * t) @ self.M0
         rb = r_i @ Rm.T
         x, y, z = rb.T
         mu, C20, C21, S21, C22, S22 = P.T
@@ -174,7 +196,7 @@ class Degree2Dynamics:
 
     def _solve(self, X, tau):
         """
-        One stacked DOP853 solve of N trajectories (rtol 1e-10, atol 1e-12) with an impact
+        One stacked DOP853 solve of N trajectories (rtol 1e-11, atol 1e-14) with an impact
         event: when a trajectory reaches R_IMPACT, it is dropped (NaN) and the others continue
         from the event time. Returns positions (N, T, 3), or None if the integrator fails.
         """
@@ -202,8 +224,8 @@ class Degree2Dynamics:
             impact.terminal = True
             impact.direction = -1
             sol = solve_ivp(
-                rhs, (t0, tau[-1]), y0[active].ravel(), t_eval=tau[k0:], rtol=1e-10,
-                atol=1e-12, method="DOP853", events=impact,
+                rhs, (t0, tau[-1]), y0[active].ravel(), t_eval=tau[k0:], rtol=1e-11,
+                atol=1e-14, method="DOP853", events=impact,
             )
             if sol.status == -1:
                 return None
@@ -301,44 +323,175 @@ class ExactLogPosterior:
         return np.where(np.isfinite(lp), lp, -np.inf)  # impact / failed integration
 
 
+class ValleyExactLogPosterior:
+    """
+    The exact log-posterior in valley coordinates v (--valley). Picklable.
+
+    z = valley.to_white(v) are batch-whitened coordinates (theta = mean + L1 z) and
+    Z = A z, A = L1 / sigma, the prior-whitened ones of ExactLogPosterior:
+    log p(v) = log p(Z(v)) + log |dz/dv| (the constant log |A| dropped).
+
+    Parameters
+    ----------
+    logp : ExactLogPosterior
+    valley : MCMC.ValleyMap
+        Built in the batch-whitened coordinates.
+    L1 : ndarray, shape (12, 12)
+        Cholesky factor of the batch covariance.
+    """
+
+    def __init__(self, logp, valley, L1):
+        self.logp = logp
+        self.valley = valley
+        self.L1 = np.asarray(L1, dtype=float)
+        self.A = self.L1 / logp.sig[:, None]
+
+    def from_Z(self, Z):
+        """Valley coordinates of prior-whitened points Z (n, 12)."""
+        z = np.linalg.solve(self.L1, (np.atleast_2d(Z) * self.logp.sig).T).T
+        return self.valley.from_white(z)
+
+    def chain_to_Z(self, chain):
+        """Prior-whitened chain (n, nw, 12) and log |dz/dv| (n, nw) of a valley chain."""
+        z, logdet = self.valley.to_white_chain(chain)
+        return z @ self.A.T, logdet
+
+    def __call__(self, V):
+        z, logdet = self.valley.to_white(V)
+        return self.logp(z @ self.A.T) + logdet
+
+
+def build_exact_valley(b, logp, L1):
+    """
+    Valley map of the exact posterior (--valley): profile along the batch's least-determined
+    position direction g (top eigenvector of the position block of cov1), from ref1, in the
+    batch-whitened coordinates; residuals = exact data residuals and Z, vectorized.
+
+    Returns
+    -------
+    ValleyExactLogPosterior, float
+        The target, and the build wall time [s].
+    """
+    t0 = time.time()
+    cov1 = np.asarray(b["cov1"], dtype=float)
+    _, evec = np.linalg.eigh(cov1[:3, :3])
+    g = np.zeros(12)
+    g[:3] = evec[:, -1]
+    A = L1 / logp.sig[:, None]
+
+    def residuals_batch(z):
+        Z = np.atleast_2d(z) @ A.T
+        return np.hstack([logp.residuals(logp.theta(Z)), Z])
+
+    z_ref1 = np.linalg.solve(L1, -logp.mean)  # theta = 0
+    print(f"[Exact] valley map along g = {np.round(evec[:, -1], 3)} on the exact residuals...")
+    vm = build_valley_map(
+        lambda z: residuals_batch(z)[0], L1.T @ g, z_ref1, residuals_batch=residuals_batch
+    )
+    wall = time.time() - t0
+    print(f"[Timing] exact valley map {wall:.0f} s ({vm.H.size} profile points)")
+    return ValleyExactLogPosterior(logp, vm, L1), wall
+
+
+def _kept_walkers(lp):
+    """Walkers whose median log-posterior over the second half of lp (n, nw) is at most
+    STRANDED_DLOGP below the ensemble median (MCMCModel._kept_walkers)."""
+    lp_w = np.median(lp[lp.shape[0] // 2 :], axis=0)
+    return lp_w >= np.median(lp_w) - STRANDED_DLOGP
+
+
 def _run_seed(args):
-    """One exact-reference emcee run (worker of sample_exact)."""
+    """
+    One exact-reference emcee run (worker of sample_exact), with the MCMC settings of the
+    case runs: adaptive length (N_MIN, N_TAU, CHECK_EVERY, MAX_STEPS), every THIN_BY-th step
+    stored, burn-in 2 x max(tau), thinning 0.5 x min(tau). tau [steps] leaves out the
+    stranded walkers.
+    """
     import emcee
 
-    logp, seed, n_steps, burn_in, thin = args
+    logp, L1, seed, n_min, demoves, vlp = args
     rng = np.random.default_rng(seed)
     z1 = -logp.mean / logp.sig  # ref1 (theta = 0) in whitened coordinates
-    p0 = z1 + SPREAD * rng.normal(size=(N_WALKERS, z1.size))
+    p0 = z1 + SPREAD * (rng.normal(size=(N_WALKERS, z1.size)) @ L1.T) / logp.sig
+    target = logp
+    if vlp is not None:  # --valley: the same start, in the valley coordinates
+        p0, target = vlp.from_Z(p0), vlp
     np.random.seed(seed)  # emcee's moves draw from the global state
-    smp = emcee.EnsembleSampler(N_WALKERS, z1.size, logp, vectorize=True)
+    # demoves: DEMove / DESnookerMove mixture as MCMCModel.run(use_demoves=True) (a sampler
+    # test, not a paper setting); default: the stretch move
+    moves = (
+        [(emcee.moves.DEMove(), 0.7), (emcee.moves.DESnookerMove(), 0.3)] if demoves else None
+    )
+    smp = emcee.EnsembleSampler(N_WALKERS, z1.size, target, vectorize=True, moves=moves)
     t0 = time.time()
-    smp.run_mcmc(p0, n_steps, progress=False)
-    Z = smp.get_chain(discard=burn_in, thin=thin)  # (n, nw, 12)
-    lp = smp.get_log_prob(discard=burn_in, thin=thin)  # (n, nw)
-    # Autocorrelation times without the stranded walkers: a walker that starts inside the
-    # body (zero density) and never gets out stays constant, and makes the estimate NaN
-    keep_w, _ = _drop_stranded(smp.get_log_prob(discard=burn_in))
-    tau = emcee.autocorr.integrated_time(smp.get_chain(discard=burn_in)[:, keep_w], quiet=True)
+    n_min = THIN_BY * int(np.ceil(n_min / THIN_BY))
+    n_done, state, n_run = 0, p0, n_min
+    while True:
+        smp.run_mcmc(state, n_run // THIN_BY, thin_by=THIN_BY, progress=False)
+        n_done, state = n_done + n_run, None
+        if vlp is None:
+            keep_w = _kept_walkers(smp.get_log_prob())
+            ch = smp.get_chain()[:, keep_w]
+        else:  # tau of the prior-whitened coordinates, stranded walkers from log p(Z)
+            ch, logdet = vlp.chain_to_Z(smp.get_chain())
+            keep_w = _kept_walkers(smp.get_log_prob() - logdet)
+            ch = ch[:, keep_w]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            tau = THIN_BY * emcee.autocorr.integrated_time(ch, tol=0, quiet=True)
+        tau_max = np.max(tau) if np.all(np.isfinite(tau)) else np.inf
+        print(
+            f"[Exact] seed {seed}: {n_done} steps ({(time.time() - t0) / 60:.0f} min), tau_max "
+            f"{tau_max:.0f}, n_steps / tau_max = {n_done / tau_max:.1f}, acceptance "
+            f"{np.mean(smp.acceptance_fraction):.3f}, {(~keep_w).sum()} stranded walkers",
+            flush=True,
+        )
+        if n_done >= N_TAU * tau_max or n_done >= MAX_STEPS:
+            break
+        n_run = min(CHECK_EVERY, MAX_STEPS - n_done)
+    if not np.all(np.isfinite(tau)):
+        raise RuntimeError(f"seed {seed}: tau not finite")
+    burn_in = int(2.0 * np.max(tau))
+    thin = THIN_BY * max(1, int(round(max(1, int(0.5 * np.min(tau))) / THIN_BY)))
+    Z = smp.get_chain(discard=burn_in // THIN_BY, thin=thin // THIN_BY)  # (n, nw, 12)
+    lp = smp.get_log_prob(discard=burn_in // THIN_BY, thin=thin // THIN_BY)  # (n, nw)
+    if vlp is not None:  # back to the prior-whitened coordinates and log p(Z)
+        Z, logdet = vlp.chain_to_Z(Z)
+        lp = lp - logdet
+    wall = time.time() - t0
     print(
-        f"[Exact] seed {seed}: {n_steps} steps in {(time.time() - t0) / 60:.1f} min, "
-        f"acceptance {np.mean(smp.acceptance_fraction):.3f}, tau_max {tau.max():.0f} "
-        f"({(~keep_w).sum()} stranded walkers left out)",
+        f"[Exact] seed {seed}: done, {n_done} steps = {n_done / np.max(tau):.1f} tau_max, "
+        f"burn-in {burn_in}, thin {thin}, {Z.shape[0]} x {N_WALKERS} samples",
         flush=True,
     )
-    return Z, lp, np.asarray(smp.acceptance_fraction), tau
+    print(
+        f"[Timing] exact seed {seed}: sampling {wall:.0f} s ({wall / 3600:.2f} h) on one process, "
+        f"{n_done} steps x {N_WALKERS} walkers; {1e3 * wall / n_done:.1f} ms per step, "
+        f"{1e3 * wall / (n_done * N_WALKERS):.3f} ms per evaluation",
+        flush=True,
+    )
+    return Z, lp, np.asarray(smp.acceptance_fraction), tau, n_done, burn_in, thin, wall
 
 
-def sample_exact(b, n_seeds, n_steps, out_path):
+def sample_exact(b, n_seeds, n_min, out_path, demoves=False, valley=False):
     """
     Sample the exact-dynamics posterior (n_seeds parallel emcee runs) and save it.
 
     Parameters
     ----------
     b : mapping
-        batch.npz of a case 2 run (data, priors, ref1, dynamics constants).
-    n_seeds, n_steps : int
+        batch.npz of a case 2 run (data, priors, ref1, batch covariance, dynamics constants).
+    n_seeds, n_min : int
+        Seeds, and the minimum steps of each run.
+    demoves : bool
+        DEMove / DESnookerMove mixture instead of the stretch move (a sampler test).
+    valley : bool
+        Walkers in valley-straightening coordinates (build_exact_valley); the saved chains are
+        prior-whitened as without it.
     out_path : Path
-        exact_reference.npz.
+        exact_reference.npz: per seed k, Z<k> (n, nw, 12; whitened) and lp<k> (n, nw), the
+        post-burn-in thinned chains; n_steps, burn_in, thin, wall_s (sampling wall time [s])
+        (n_seeds,), tau (n_seeds, 12) and acceptance (n_seeds, nw); with valley also
+        valley_e / _Q / _H / _Y / _C / _cost (the map) and valley_build_s.
 
     Returns
     -------
@@ -356,26 +509,32 @@ def sample_exact(b, n_seeds, n_steps, out_path):
     )
     if dr > 1e-2:
         raise RuntimeError(f"exact dynamics do not reproduce ref1 (max |dr| {dr:.3g} m)")
-    burn_in = min(BURN_IN, n_steps // 4)
+    cov1 = np.asarray(b["cov1"], dtype=float)
+    L1 = np.linalg.cholesky(0.5 * (cov1 + cov1.T))
     print(
-        f"[Exact] {n_seeds} seeds x {N_WALKERS} walkers x {n_steps} steps (burn-in {burn_in}, "
-        f"thin {THIN}), in parallel..."
+        f"[Exact] {n_seeds} seeds x {N_WALKERS} walkers, >= {n_min} steps until "
+        f"{N_TAU} x max(tau) (at most {MAX_STEPS}), storing every {THIN_BY}, in parallel..."
     )
-    jobs = [(logp, s, n_steps, burn_in, THIN) for s in range(1, n_seeds + 1)]
+    vlp, valley_s = build_exact_valley(b, logp, L1) if valley else (None, None)
+    jobs = [(logp, L1, s, n_min, demoves, vlp) for s in range(1, n_seeds + 1)]
     with multiprocessing.get_context("fork").Pool(n_seeds) as pool:
         res = pool.map(_run_seed, jobs)
     out = dict(
-        Z=np.array([r[0] for r in res]),  # (n_seeds, n, nw, 12), whitened
-        lp=np.array([r[1] for r in res]),  # (n_seeds, n, nw)
         acceptance=np.array([r[2] for r in res]),
         tau=np.array([r[3] for r in res]),
+        n_steps=np.array([r[4] for r in res]),
+        burn_in=np.array([r[5] for r in res]),
+        thin=np.array([r[6] for r in res]),
+        wall_s=np.array([r[7] for r in res]),
         mean=logp.mean,
         sig=logp.sig,
         x0_ref1=logp.x1,
-        n_steps=n_steps,
-        burn_in=burn_in,
-        thin=THIN,
     )
+    for k, r in enumerate(res):
+        out[f"Z{k}"], out[f"lp{k}"] = r[0], r[1]
+    if vlp is not None:
+        out.update({f"valley_{k}": v for k, v in vlp.valley.arrays().items()})
+        out["valley_build_s"] = np.asarray(valley_s)
     buf = io.BytesIO()
     np.savez_compressed(buf, **out)
     MCMCPlots.write_output(out_path, buf.getvalue(), tag="Exact")
@@ -436,29 +595,38 @@ def load_run(run_dir):
 
 def load_exact(ex):
     """Physical initial states of the exact reference (all seeds, stranded walkers dropped)."""
-    import emcee
-
-    X, dropped, acc, tau = [], 0, [], np.asarray(ex["tau"], dtype=float)
-    for k, (Z, lp) in enumerate(zip(ex["Z"], ex["lp"])):
+    tau = np.asarray(ex["tau"], dtype=float)
+    n_steps = np.asarray(ex["n_steps"], dtype=float)
+    X, dropped, acc = [], 0, []
+    for k in range(tau.shape[0]):
+        Z, lp = ex[f"Z{k}"], ex[f"lp{k}"]
         keep_w, keep = _drop_stranded(lp)
         dropped += int(keep_w.size - keep_w.sum())
         acc.append(ex["acceptance"][k][keep_w])
         X.append(ex["x0_ref1"] + ex["mean"] + Z[keep] * ex["sig"])
-        if not np.all(np.isfinite(tau[k])):
-            # Saved with the stranded walkers in (NaN): redo on the thinned chain without them
-            tau[k] = emcee.autocorr.integrated_time(Z[:, keep_w], quiet=True) * int(ex["thin"])
     info = dict(
         dropped=dropped,
         acc=float(np.mean(np.concatenate(acc))),
-        n_tau=float(ex["n_steps"]) / float(np.max(tau)),
+        n_tau=float(np.min(n_steps / np.max(tau, axis=1))),  # the least converged seed
+        seeds=X,  # per seed, for the spread of the lobe shares
+        n_steps=n_steps.astype(int),
     )
     return np.vstack(X), info
 
 
-def _latest(pattern):
-    runs = sorted(RESULTS.glob(pattern))
+def _stamp(p):
+    """YYMMDDHHMMSS of a results folder name (suffixes such as _valley or _de after it)."""
+    return next((f for f in p.name.split("_") if len(f) == 12 and f.isdigit()), "")
+
+
+def _latest(pattern, suffix=""):
+    """Newest results/<pattern> folder ending in suffix (no suffix: plain runs only)."""
+    runs = sorted(
+        (p for p in RESULTS.glob(pattern + suffix) if suffix or p.name.split("_")[-1].isdigit()),
+        key=_stamp,
+    )
     if not runs:
-        sys.exit(f"no results/{pattern} folder")
+        sys.exit(f"no results/{pattern + suffix} folder")
     return runs[-1]
 
 
@@ -610,12 +778,26 @@ def compare(post, pole, x0_true, x0_ref1, labels, out_dir):
             f"{info['n_tau']:>7.1f}{pct:>36s}{share:>15.3f}"
             f"{tv:>8.3f}{cl[(m, 1)]:>20.3f}{cl[(m, 2)]:>9.3f}"
         )
+    if "seeds" in post["exact"][1]:
+        info = post["exact"][1]
+        shares = [
+            np.mean(h < split) if tru[0] < split else np.mean(h > split)
+            for h in (proj(Xk)[0] for Xk in info["seeds"])
+        ]
+        lines += [
+            "",
+            "Exact dynamics per seed: P(truth lobe) "
+            + ", ".join(f"{v:.3f}" for v in shares)
+            + f" (range {min(shares):.3f}-{max(shares):.3f}); steps "
+            + ", ".join(str(n) for n in info["n_steps"]),
+        ]
     lines += [
         "",
         "drop: stranded walkers left out; acc: mean acceptance; n/tau: steps per autocorrelation "
-        "time (max over parameters); P(truth lobe): posterior share on the truth's side of the "
-        "split; TV(h0): total variation distance of the h0 marginal from the exact one (60 bins); "
-        "truth lvl: posterior mass denser than the truth in that plane (0 = mode, 1 = outside).",
+        "time (max over parameters; exact: the least converged seed); P(truth lobe): posterior "
+        "share on the truth's side of the split; TV(h0): total variation distance of the h0 "
+        "marginal from the exact one (60 bins); truth lvl: posterior mass denser than the truth "
+        "in that plane (0 = mode, 1 = outside).",
     ]
     table = "\n".join(lines)
     MCMCPlots.write_output(out_dir / "summary.txt", (table + "\n").encode(), tag="Summary")
@@ -635,30 +817,47 @@ def main():
     )
     ap.add_argument("--exact-only", action="store_true", help="sample the exact reference only")
     ap.add_argument("--seeds", type=int, default=N_SEEDS)
-    ap.add_argument("--steps", type=int, default=N_STEPS)
+    ap.add_argument("--steps", type=int, default=N_MIN, help="minimum steps per seed")
+    ap.add_argument(
+        "--demoves",
+        action="store_true",
+        help="DE / snooker moves instead of the stretch move (a sampler test, not a paper setting)",
+    )
+    ap.add_argument(
+        "--valley",
+        action="store_true",
+        help="exact reference in valley-straightening coordinates (same posterior); default runs: "
+        "the newest _valley runs of Cases 2a / 2b; outputs in case2_comparison_<stamp>_valley",
+    )
     args = ap.parse_args()
 
     # A reused exact reference keeps its folder: the figure and the table are written next to it
     if args.exact:
         out_dir = Path(args.exact).resolve().parent
     else:
-        out_dir = RESULTS / f"case2_comparison_{datetime.now().strftime('%y%m%d%H%M%S')}"
+        out_dir = RESULTS / (
+            f"case2_comparison_{datetime.now().strftime('%y%m%d%H%M%S')}"
+            f"{'_de' if args.demoves else ''}{'_valley' if args.valley else ''}"
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.exact_only:
         newest = max(
             (p for g in RUN_GLOBS.values() for p in RESULTS.glob(g) if (p / "batch.npz").exists()),
-            key=lambda p: p.name.rsplit("_", 1)[-1],
+            key=_stamp,
         )
         print(f"[Exact] data, priors and ref1 from {newest.name}")
         sample_exact(np.load(newest / "batch.npz"), args.seeds, args.steps,
-                     out_dir / "exact_reference.npz")
+                     out_dir / "exact_reference.npz", demoves=args.demoves, valley=args.valley)
         return
 
     runs = (
         dict(zip(("stt2", "bank", "stm"), map(Path, args.runs)))
         if args.runs
-        else {k: _latest(g) for k, g in RUN_GLOBS.items()}
+        else {
+            k: _latest(g, "_valley" if args.valley and k != "stm" else "")
+            for k, g in RUN_GLOBS.items()
+        }
     )
     B = {k: np.load(d / "batch.npz") for k, d in runs.items()}
     for k, d in runs.items():
@@ -674,7 +873,10 @@ def main():
         print(f"[Exact] reusing {args.exact}")
         ex = dict(np.load(args.exact))
     else:
-        ex = sample_exact(b, args.seeds, args.steps, out_dir / "exact_reference.npz")
+        ex = sample_exact(
+            b, args.seeds, args.steps, out_dir / "exact_reference.npz", demoves=args.demoves,
+            valley=args.valley,
+        )
     if not np.allclose(ex["x0_ref1"], b["x0_ref1"], rtol=1e-12, atol=0.0):
         sys.exit("the exact reference was sampled about a different ref1")
 

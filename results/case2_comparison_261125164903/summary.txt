@@ -1,9 +1,0 @@
-Case 2 comparison (h0 = launch height above the equator, vh0 = out-of-plane launch speed; truth h0 = +0.0 m, vh0 = -21.8 mm/s; batch h0 = +18.4 m, vh0 = -11.9 mm/s; lobe split at h0 = 13.0 m, the minimum of the exact h0 marginal between them)
-
-likelihood                     n  drop    acc  n/tau          h0 2.5/16/50/84/97.5 % [m]  P(truth lobe)  TV(h0)  truth lvl (h0,vh0)  (h0,GM)
-Exact dynamics            379117     6  0.094   13.3    -8.1   -3.2   +6.6  +20.9  +27.3          0.651   0.000               0.205    0.424
-STT-2 (Case 2a)            94500     2  0.092   10.0    -6.9   -2.8   +6.3  +20.3  +27.1          0.669   0.045               0.308    0.536
-Bank of 21 STMs (Case 2b)   96000     0  0.096   10.7   -11.5   -6.0   +2.7  +17.9  +25.7          0.746   0.116               0.243    0.352
-Single STM                 96000     0  0.384  680.3    +3.4  +10.8  +18.6  +26.4  +33.9          0.235   0.451               0.937    1.000
-
-drop: stranded walkers left out; acc: mean acceptance; n/tau: steps per autocorrelation time (max over parameters); P(truth lobe): posterior share on the truth's side of the split; TV(h0): total variation distance of the h0 marginal from the exact one (60 bins); truth lvl: posterior mass denser than the truth in that plane (0 = mode, 1 = outside).

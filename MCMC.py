@@ -8,10 +8,13 @@ Gaussian-mixture split and its STM propagation live in GMM.py.
 
 import io
 import multiprocessing
+import os
+import time
 from pathlib import Path
 
 import emcee
 import numpy as np
+from scipy.interpolate import CubicSpline, PchipInterpolator
 from scipy.optimize import (
     basinhopping,
     differential_evolution,
@@ -197,6 +200,246 @@ class ChainReplay:
         return self.tau.copy()
 
 
+class ValleyMap:
+    """
+    Valley-straightening coordinates: a triangular (Knothe-Rosenblatt type) transport map of
+    the whitened coordinates z that unbends a curved posterior valley (MCMCModel
+    .setup_valley_map, build_valley_map).
+
+    The sampled coordinates v = (h, w) map to
+
+        z(v) = h e + Q (y*(h) + C(h) w),
+
+    with e the unit valley direction, Q (d, d - 1) an orthonormal basis of its complement, y*(h)
+    the profile path (the best complement coordinates at fixed h) and C(h) the lower Cholesky
+    factor of the conditional covariance there. The map is one-to-one and lower triangular in
+    the basis [e, Q], so log |dz/dv| = sum log |diag C(h)|; the sampled density is
+    p(z(v)) |dz/dv|, the same posterior. Beyond the profile grid, y* and C are held at the end
+    values (a shift: still exact).
+
+    y*(h) is a cubic spline, C(h) is interpolated entry-wise with a PCHIP (no overshoot, so
+    the diagonal stays positive). Picklable.
+
+    Parameters
+    ----------
+    e : array_like, shape (d,)
+    Q : array_like, shape (d, d - 1)
+    H : array_like, shape (n,)
+        Profile grid of h (increasing).
+    Y : array_like, shape (n, d - 1)
+        y*(H).
+    C : array_like, shape (n, d - 1, d - 1)
+        Lower Cholesky factors at H.
+    cost : array_like, shape (n,), optional
+        Profile cost |r|^2 at H (diagnostics only).
+    """
+
+    def __init__(self, e, Q, H, Y, C, cost=None):
+        """Store the profile and build its interpolants; see the class docstring."""
+        self.e = np.asarray(e, dtype=float)
+        self.Q = np.asarray(Q, dtype=float)
+        self.H = np.asarray(H, dtype=float)
+        self.Y = np.asarray(Y, dtype=float)
+        self.C = np.asarray(C, dtype=float)
+        self.cost = None if cost is None else np.asarray(cost, dtype=float)
+        self.ndim = self.e.size
+        self._il = np.tril_indices(self.ndim - 1)
+        self._spY = CubicSpline(self.H, self.Y, axis=0)
+        self._spC = PchipInterpolator(self.H, self.C[:, self._il[0], self._il[1]], axis=0)
+
+    def _parts(self, h):
+        """y*(h) (n, d - 1) and C(h) (n, d - 1, d - 1), held constant beyond the grid."""
+        hc = np.clip(h, self.H[0], self.H[-1])
+        M = np.zeros((hc.size, self.ndim - 1, self.ndim - 1))
+        M[:, self._il[0], self._il[1]] = self._spC(hc)
+        return self._spY(hc), M
+
+    def to_white(self, V):
+        """
+        Whitened coordinates of sampled points.
+
+        Parameters
+        ----------
+        V : array_like, shape (n, d) or (d,)
+
+        Returns
+        -------
+        Z : ndarray, shape (n, d)
+        logdet : ndarray, shape (n,)
+            log |dz/dv|.
+        """
+        V = np.atleast_2d(np.asarray(V, dtype=float))
+        h, w = V[:, 0], V[:, 1:]
+        ys, M = self._parts(h)
+        y = ys + np.einsum("nij,nj->ni", M, w)
+        logdet = np.sum(np.log(np.abs(np.diagonal(M, axis1=1, axis2=2))), axis=1)
+        return h[:, None] * self.e[None, :] + y @ self.Q.T, logdet
+
+    def from_white(self, Z):
+        """
+        Sampled coordinates of whitened points (inverse of to_white).
+
+        Parameters
+        ----------
+        Z : array_like, shape (n, d) or (d,)
+
+        Returns
+        -------
+        ndarray, shape (n, d)
+        """
+        Z = np.atleast_2d(np.asarray(Z, dtype=float))
+        h = Z @ self.e
+        ys, M = self._parts(h)
+        w = np.linalg.solve(M, (Z @ self.Q - ys)[..., None])[..., 0]
+        return np.column_stack([h, w])
+
+    def to_white_chain(self, chain, chunk=50000):
+        """
+        to_white of a chain (n_steps, n_walkers, d), in chunks of rows (memory).
+
+        Returns
+        -------
+        Z : ndarray, shape (n_steps, n_walkers, d)
+        logdet : ndarray, shape (n_steps, n_walkers)
+        """
+        chain = np.asarray(chain, dtype=float)
+        flat = chain.reshape(-1, chain.shape[-1])
+        Z = np.empty_like(flat)
+        ld = np.empty(flat.shape[0])
+        for i in range(0, flat.shape[0], chunk):
+            Z[i : i + chunk], ld[i : i + chunk] = self.to_white(flat[i : i + chunk])
+        return Z.reshape(chain.shape), ld.reshape(chain.shape[:-1])
+
+    def arrays(self):
+        """The defining arrays, for save_chain (keys valley_<name>)."""
+        out = dict(e=self.e, Q=self.Q, H=self.H, Y=self.Y, C=self.C)
+        if self.cost is not None:
+            out["cost"] = self.cost
+        return out
+
+
+def valley_basis(e):
+    """
+    Orthonormal complement Q (d, d - 1) of the unit vector e (QR of [e, I]).
+    """
+    e = np.asarray(e, dtype=float)
+    Qf = np.linalg.qr(np.column_stack([e, np.eye(e.size)]))[0]
+    Q = Qf[:, 1:]
+    return Q - np.outer(e, e @ Q)  # exact orthogonality to e (round-off)
+
+
+def build_valley_map(residuals, e, z_start, dh=0.1, dlogp_stop=25.0, h_max=50.0,
+                     residuals_batch=None, fd_step=1e-4, verbose=True):
+    """
+    Profile the posterior along the direction e of whitened space and build its ValleyMap.
+
+    At each h of a grid of step dh (through the start, both ways), the other d - 1 coordinates
+    are fitted by Levenberg-Marquardt (y*(h), warm-started from the neighbour), and C(h) is the
+    Cholesky factor of the Gauss-Newton conditional covariance inv(J^T J) there. Each side stops
+    once the profile log-posterior is more than dlogp_stop below the best point found so far
+    (no posterior mass beyond), at |h - h_start| > h_max, or when a fit fails. The quality of
+    the map only sets the sampling efficiency: any profile gives an exact sampler.
+
+    Parameters
+    ----------
+    residuals : callable
+        z (d,) -> r (m,), with -log p(z) = 0.5 |r|^2 + const (data and prior residuals).
+    e : array_like, shape (d,)
+        Valley direction in whitened space (normalized here).
+    z_start : array_like, shape (d,)
+        Start of the profile (e.g. the batch or MAP point in whitened coordinates).
+    dh : float
+        Grid step of h [whitened units].
+    dlogp_stop : float
+        Stop a side this far below the best profile log-posterior.
+    h_max : float
+        Maximum |h - h_start|.
+    residuals_batch : callable, optional
+        Z (n, d) -> R (n, m), vectorized residuals; when given, the Jacobian is a central
+        difference of step fd_step evaluated in one call (else least_squares differentiates
+        residuals itself).
+    fd_step : float
+        Step of that central difference [whitened units].
+    verbose : bool
+        Print the profile.
+
+    Returns
+    -------
+    ValleyMap
+    """
+    e = np.asarray(e, dtype=float)
+    e = e / np.linalg.norm(e)
+    Q = valley_basis(e)
+    d1 = Q.shape[1]
+    z_start = np.asarray(z_start, dtype=float)
+
+    def fit(h, y0):
+        base = h * e
+        if residuals_batch is None:
+            fun, jac = (lambda y: np.asarray(residuals(base + Q @ y), dtype=float)), "2-point"
+        else:
+            def fun(y):
+                return np.asarray(residuals_batch((base + Q @ y)[None]), dtype=float)[0]
+
+            def jac(y):
+                Yp = y[None, :] + fd_step * np.vstack([np.eye(d1), -np.eye(d1)])
+                R = np.asarray(residuals_batch(base[None, :] + Yp @ Q.T), dtype=float)
+                return ((R[:d1] - R[d1:]) / (2.0 * fd_step)).T
+        try:
+            sol = least_squares(fun, y0, jac=jac, method="lm", xtol=1e-12, ftol=1e-12,
+                                gtol=1e-12)
+            J = sol.jac if residuals_batch is None else jac(sol.x)
+            cov = np.linalg.inv(J.T @ J)
+            Cf = np.linalg.cholesky(0.5 * (cov + cov.T))
+        except (ValueError, np.linalg.LinAlgError):
+            return None
+        cost = 2.0 * sol.cost
+        if not (np.isfinite(cost) and np.all(np.isfinite(Cf))):
+            return None
+        return sol.x, Cf, cost
+
+    h0 = dh * np.round((e @ z_start) / dh)
+    first = fit(h0, Q.T @ z_start)
+    if first is None:
+        raise RuntimeError("build_valley_map: the profile fit failed at the start point")
+    pts = {0: first}
+    c_best = first[2]
+    for side in (1, -1):
+        y, k = first[0], 0
+        while k * dh < h_max:
+            k += 1
+            res = fit(h0 + side * k * dh, y)
+            if res is None:
+                if verbose:
+                    print(f"[Valley] fit failed at h = {h0 + side * k * dh:+.2f}: side stopped")
+                break
+            pts[side * k] = res
+            y = res[0]
+            c_best = min(c_best, res[2])
+            if 0.5 * (res[2] - c_best) > dlogp_stop:
+                break
+    ks = sorted(pts)
+    H = h0 + dh * np.array(ks, dtype=float)
+    Y = np.array([pts[k][0] for k in ks])
+    C = np.array([pts[k][1] for k in ks])
+    cost = np.array([pts[k][2] for k in ks])
+    if verbose:
+        cmin = cost.min()
+        print(
+            f"[Valley] profile along e: {H.size} points, h = {H[0]:+.2f} ... {H[-1]:+.2f} "
+            f"(step {dh:g}); min cost {cmin:.3f} at h = {H[np.argmin(cost)]:+.2f}"
+        )
+        loc = [i for i in range(1, H.size - 1) if cost[i] < cost[i - 1] and cost[i] <= cost[i + 1]]
+        print(
+            "[Valley] local minima of the profile: "
+            + ", ".join(f"h {H[i]:+.2f} (dlogp {-0.5 * (cost[i] - cmin):.3f})" for i in loc)
+        )
+        step = max(1, int(round(1.0 / dh)))
+        print("[Valley] h, -dlogp: " + ", ".join(
+            f"{H[i]:+.1f} {0.5 * (cost[i] - cmin):.2f}" for i in range(0, H.size, step)))
+    return ValleyMap(e, Q, H, Y, C, cost)
+
+
 class MCMCModel:
     """
     Bayesian parameter estimation with emcee.
@@ -212,7 +455,10 @@ class MCMCModel:
     noise. theta is in model coordinates (physical, unwhitened: the residuals_func input).
     After setup_whitening / setup_whitening_from_priors the walkers move in the whitened
     coordinates z = L^{-1} (theta - mu) instead; the map is linear, so no Jacobian term is
-    needed. run() maps the samples back to model coordinates.
+    needed. run() maps the samples back to model coordinates. setup_valley_map further
+    straightens a curved valley of the whitened posterior (ValleyMap, a triangular transport
+    map with its Jacobian): the walkers then move in its coordinates, and run() maps the
+    chain back to z.
 
     Parameters
     ----------
@@ -251,6 +497,8 @@ class MCMCModel:
         False).
     whiten_mean, whiten_L, whiten_Linv : ndarray
         Whitening map theta = whiten_L @ z + whiten_mean, and inv(whiten_L).
+    valley : ValleyMap or None
+        Valley-straightening coordinates of the walkers (setup_valley_map); None: off.
     """
     def __init__(self, residuals_func, initial_params, param_priors, observed_data):
         """Store the problem; see the class docstring for the parameters."""
@@ -267,6 +515,7 @@ class MCMCModel:
         self.tau = None
         self.burn_in = None
         self.thin = None
+        self.valley = None
 
     def log_prior(self, theta):
         """
@@ -544,6 +793,11 @@ class MCMCModel:
         use_demoves=False,
         stretch_a=2.0,
         use_optimize=True,
+        thin_by=1,
+        n_tau_target=None,
+        max_samples=None,
+        check_every=None,
+        stranded_dlogp=None,
     ):
         """
         Run the emcee ensemble sampler, then set the burn-in and thinning from tau.
@@ -556,7 +810,8 @@ class MCMCModel:
         Parameters
         ----------
         n_samples : int
-            Steps per walker. A warning is printed when n_samples < 100 * max(tau).
+            Steps per walker (the minimum if n_tau_target is set). A warning is printed when
+            n_samples < 50 * max(tau).
         n_walkers : int
             Number of walkers.
         burn_in : int, optional
@@ -578,13 +833,42 @@ class MCMCModel:
             Scale parameter of emcee's StretchMove.
         use_optimize : bool
             If False, the walkers start around initial_params.
+        thin_by : int
+            Store every thin_by-th step only (emcee's thin_by; memory of long runs). The
+            sampler is then a ChainReplay over the stored steps (stride thin_by, the emcee
+            sampler in its attribute `emcee`), so n_samples, tau, burn_in and thin stay in
+            steps of the run; thin is rounded to a multiple of thin_by. Default 1: emcee
+            sampler, every step stored.
+        n_tau_target : float, optional
+            Adaptive length: after n_samples steps (the minimum), sample on in blocks of
+            check_every steps until n_steps >= n_tau_target * max(tau) (tau with tol=0 on the
+            whole run) or max_samples. Default None: exactly n_samples steps.
+        max_samples : int, optional
+            Cap of the adaptive run (default 10 * n_samples).
+        check_every : int, optional
+            Block of the adaptive run (default n_samples // 5), rounded to thin_by.
+        stranded_dlogp : float, optional
+            Leave out of every tau (adaptive check, burn-in / thinning, self.tau) the walkers
+            whose median log-posterior over the second half of the run is more than this
+            below the ensemble median (walkers stranded far from the posterior have a flat
+            or NaN autocorrelation). Default None: all walkers.
+
+        With a valley map (setup_valley_map) the walkers move in its coordinates v (start:
+        the same draws z0 + spread * N(0, I), mapped to v) with log p(z(v)) + log |dz/dv|; the
+        chain is mapped back to z (log-posterior of z) as soon as it is stored, so tau,
+        burn-in, thinning, the sampler (a ChainReplay) and everything downstream refer to the
+        whitened coordinates as without the map.
 
         Returns
         -------
         None
             Sets sampler, tau, burn_in, thin, chain and log_prob_chain (sampled
-            coordinates), samples (model coordinates) and log_probs.
+            coordinates), samples (model coordinates) and log_probs; n_steps (steps run)
+            and tau_walkers (walkers of tau).
         """
+        thin_by = max(1, int(thin_by))
+        t_start = time.perf_counter()
+
         # Use optimization for better initial guess
         if use_optimize:
             optimized_guess = self.optimize_initial_guess(method=method_optimize)
@@ -592,12 +876,17 @@ class MCMCModel:
             print("[Run] Skipping optimization. Using initial parameters.")
             optimized_guess = self.initial_params.copy()
 
+        valley = getattr(self, "valley", None)
+        if valley is not None and not getattr(self, "is_whitened", False):
+            raise RuntimeError("the valley map needs whitening (setup_whitening)")
         if getattr(self, "is_whitened", False):
             # Whiten the optimized guess
             x0_white = self.whiten_Linv @ (optimized_guess - self.whiten_mean)
 
             # Sample walkers in whitened space (identity covariance, scaled)
             pos = x0_white + spherical_spread * np.random.randn(n_walkers, self.ndim)
+            if valley is not None:  # the same start, in the valley coordinates
+                pos = valley.from_white(pos)
         else:
             # Build realistic covariance from priors
             stds = np.array([p.std() for p in self.param_priors])
@@ -612,6 +901,8 @@ class MCMCModel:
         log_prob_name = (
             "log_prob_whitened" if getattr(self, "is_whitened", False) else "log_prob"
         )
+        if valley is not None:
+            log_prob_name = "log_prob_valley"
 
         # Define MCMC moves
         if use_demoves:
@@ -629,8 +920,14 @@ class MCMCModel:
         )
         global _FORK_MODEL
         _FORK_MODEL = self  # inherited by the workers forked below (see _ForkedLogProb)
+        self.map_start_s = time.perf_counter() - t_start  # MAP start (0 without use_optimize)
+        t_sample = time.perf_counter()
         try:
-            with multiprocessing.get_context("fork").Pool() as pool:
+            # Pool size: all CPUs, or the environment variable MCMC_PROCS (to share the
+            # machine between runs without oversubscribing it; the chain does not depend on it)
+            n_procs_env = int(os.environ.get("MCMC_PROCS", "0")) or None
+            with multiprocessing.get_context("fork").Pool(n_procs_env) as pool:
+                self.n_procs = pool._processes
                 print(
                     "[Run] Using multiprocessing with fork context. Number of processes:",
                     pool._processes,
@@ -642,23 +939,74 @@ class MCMCModel:
                     pool=pool,
                     moves=moves,
                 )
-                self.sampler.run_mcmc(pos, n_samples, progress=True)
+                if thin_by == 1 and n_tau_target is None:
+                    self.sampler.run_mcmc(pos, n_samples, progress=True)
+                else:
+                    n_samples = self._run_blocks(
+                        pos, n_samples, thin_by, n_tau_target, max_samples, check_every,
+                        stranded_dlogp,
+                    )
         finally:
             _FORK_MODEL = None
+        self.n_steps = n_samples
+        # Wall time of the sampling (pool start to the last step); one log-posterior evaluation
+        # per walker and step, plus the start
+        self.run_wall_s = time.perf_counter() - t_sample
+        n_evals = n_walkers * (n_samples + 1)
+        print(
+            f"[Timing] MCMC sampling {self.run_wall_s:.0f} s ({self.run_wall_s / 3600:.2f} h): "
+            f"{n_samples} steps x {n_walkers} walkers = {n_evals:.3e} log-posterior evaluations on "
+            f"{self.n_procs} processes; {1e3 * self.run_wall_s / n_samples:.2f} ms per step, "
+            f"{1e3 * self.run_wall_s * self.n_procs / n_evals:.3f} ms per evaluation and process "
+            f"(MAP start {self.map_start_s:.1f} s)"
+        )
+        replay = thin_by > 1 or valley is not None
+        if replay:  # stored steps -> ChainReplay in steps of the run
+            smp = self.sampler
+            full, full_lp = smp.get_chain(), smp.get_log_prob()
+            if valley is not None:  # back to the whitened coordinates z and log p(z)
+                full, logdet = valley.to_white_chain(full)
+                full_lp = full_lp - logdet
+            self.sampler = ChainReplay(
+                full, full_lp, stride=thin_by,
+                n_steps=thin_by * smp.iteration,
+                acceptance_fraction=smp.acceptance_fraction,
+            )
+            self.sampler.emcee = smp
+        self.tau_walkers = self._kept_walkers(self.sampler.get_log_prob(), stranded_dlogp)
+        if self.tau_walkers is not None and self.tau_walkers.size < n_walkers:
+            print(
+                f"[Run] stranded walkers left out of tau: "
+                f"{np.setdiff1d(np.arange(n_walkers), self.tau_walkers).tolist()}"
+            )
 
         # Try to estimate autocorrelation time
         print("[Run] Estimating autocorrelation time...")
-        try:
-            tau = self.sampler.get_autocorr_time()
-        except emcee.autocorr.AutocorrError:
-            try:
-                tau = self.sampler.get_autocorr_time(tol=0)
-                print("[Run] Autocorrelation recovered with tol=0.")
-            except emcee.autocorr.AutocorrError:
+        if replay or self.tau_walkers is not None:
+            tau = self._tau_steps(tol=0)
+            if not np.all(np.isfinite(tau)):
                 tau = None
                 print(
                     "[Run] Warning: Autocorrelation time could not be reliably estimated."
                 )
+            else:
+                print("[Run] Autocorrelation estimated with tol=0"
+                      + ("" if self.tau_walkers is None
+                         else f" on {self.tau_walkers.size}/{n_walkers} walkers") + ".")
+            if replay:
+                self.sampler.tau = tau
+        else:
+            try:
+                tau = self.sampler.get_autocorr_time()
+            except emcee.autocorr.AutocorrError:
+                try:
+                    tau = self.sampler.get_autocorr_time(tol=0)
+                    print("[Run] Autocorrelation recovered with tol=0.")
+                except emcee.autocorr.AutocorrError:
+                    tau = None
+                    print(
+                        "[Run] Warning: Autocorrelation time could not be reliably estimated."
+                    )
         if tau is not None and not np.all(np.isfinite(tau)):  # e.g. walkers that never moved
             tau = None
             print("[Run] Warning: Autocorrelation time is not finite; using the fallbacks.")
@@ -668,12 +1016,13 @@ class MCMCModel:
             min_tau = np.min(tau)
             n_tau = n_samples / max_tau
 
-            # Warn if total steps are insufficient for autocorrelation convergence
-            if n_samples < 100 * max_tau:
+            # Warn if total steps are insufficient for autocorrelation convergence (emcee:
+            # tau is reliable for runs longer than 50 tau)
+            if n_samples < 50 * max_tau:
                 print(
                     f"[Run] Warning: n_samples = {n_samples} corresponds to "
                     f"{n_tau:.1f} autocorrelation times. "
-                    f"Recommended: at least 100 × max(tau) = {100 * max_tau:.1f} steps "
+                    f"Recommended: at least 50 × max(tau) = {50 * max_tau:.1f} steps "
                     f"for reliable sampling."
                 )
             else:
@@ -692,6 +1041,8 @@ class MCMCModel:
             if thin is None:
                 thin = int(thin_frac * min_tau)
                 thin = max(thin, 1)
+                if thin_by > 1:  # a multiple of the stored stride
+                    thin = thin_by * max(1, int(round(thin / thin_by)))
                 print(
                     f"[Run] Auto-selected thinning: every {thin} steps ({thin_frac} x min(tau))"
                 )
@@ -721,6 +1072,104 @@ class MCMCModel:
                 self.whiten_L @ self.samples.T + self.whiten_mean[:, None]
             ).T  # shape (N, ndim)
 
+    @staticmethod
+    def _kept_walkers(log_prob, stranded_dlogp):
+        """
+        Walkers kept for tau: None (all) if stranded_dlogp is None, else the walkers whose
+        median log-posterior over the second half of the run is at most stranded_dlogp below
+        the ensemble median.
+
+        Parameters
+        ----------
+        log_prob : array_like, shape (n_steps, n_walkers)
+            Log-posterior of the whole run (or of its stored steps).
+        stranded_dlogp : float or None
+
+        Returns
+        -------
+        ndarray of int or None
+        """
+        if stranded_dlogp is None:
+            return None
+        lp = np.asarray(log_prob, dtype=float)
+        lp_w = np.median(lp[lp.shape[0] // 2 :], axis=0)
+        return np.where(lp_w >= np.median(lp_w) - float(stranded_dlogp))[0]
+
+    def _tau_steps(self, tol=0):
+        """
+        Integrated autocorrelation time [steps of the run] of the walkers in tau_walkers
+        (all if None), from every stored step (emcee.autocorr.integrated_time, times the
+        stored stride).
+
+        Parameters
+        ----------
+        tol : float
+            Passed to integrated_time (0: no length check).
+
+        Returns
+        -------
+        ndarray, shape (ndim,)
+        """
+        smp = self.sampler
+        stride = int(getattr(smp, "stride", 1))
+        ch = smp.full_chain if isinstance(smp, ChainReplay) else smp.get_chain()
+        w = getattr(self, "tau_walkers", None)
+        if w is not None:
+            ch = ch[:, w]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return stride * emcee.autocorr.integrated_time(ch, tol=tol, quiet=True)
+
+    def _run_blocks(self, pos, n_min, thin_by, n_tau_target, n_max, check_every,
+                    stranded_dlogp):
+        """
+        Sample n_min steps storing every thin_by-th, then (if n_tau_target) blocks of
+        check_every steps until n_steps >= n_tau_target * max(tau) or n_max (see run).
+
+        The emcee random state carries over from block to block (run_mcmc continues the
+        previous state), so the blocks are one run. With a valley map, tau is that of the
+        chain mapped back to the whitened coordinates.
+
+        Returns
+        -------
+        int
+            Steps run (a multiple of thin_by).
+        """
+        smp = self.sampler
+        n_min = thin_by * int(np.ceil(n_min / thin_by))
+        n_max = 10 * n_min if n_max is None else thin_by * int(np.ceil(n_max / thin_by))
+        block = n_min // 5 if check_every is None else int(check_every)
+        block = thin_by * max(1, int(round(block / thin_by)))
+        n_done, state, n_run = 0, pos, n_min
+        while True:
+            print(f"[Run] steps {n_done} -> {n_done + n_run} (storing every {thin_by})")
+            smp.run_mcmc(state, n_run // thin_by, thin_by=thin_by, progress=True)
+            n_done, state = n_done + n_run, None
+            if n_tau_target is None:
+                return n_done
+            valley = getattr(self, "valley", None)
+            if valley is None:
+                keep = self._kept_walkers(smp.get_log_prob(), stranded_dlogp)
+                ch = smp.get_chain() if keep is None else smp.get_chain()[:, keep]
+            else:  # tau of the whitened coordinates z, stranded walkers from log p(z)
+                ch, logdet = valley.to_white_chain(smp.get_chain())
+                keep = self._kept_walkers(smp.get_log_prob() - logdet, stranded_dlogp)
+                ch = ch if keep is None else ch[:, keep]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                tau = thin_by * emcee.autocorr.integrated_time(ch, tol=0, quiet=True)
+            tau_max = np.max(tau) if np.all(np.isfinite(tau)) else np.inf
+            print(
+                f"[Run] {n_done} steps: tau_max {tau_max:.0f} steps, n_steps / tau_max = "
+                f"{n_done / tau_max:.1f} (target {n_tau_target:g}), acceptance "
+                f"{np.mean(smp.acceptance_fraction):.3f}"
+            )
+            if n_done >= n_tau_target * tau_max:
+                return n_done
+            if n_done >= n_max:
+                print(f"[Run] Warning: stopped at max_samples = {n_max} before "
+                      f"{n_tau_target:g} x max(tau).")
+                return n_done
+            n_run = min(block, n_max - n_done)
+
     def summary(self):
         """
         Print tau, suggested burn-in / thinning, acceptance rate and parameter estimates.
@@ -742,8 +1191,12 @@ class MCMCModel:
         print("")
         print("\n=== MCMC Summary ===")
         try:
-            # First try default autocorr calculation (faster)
-            tau = self.sampler.get_autocorr_time()
+            # First try default autocorr calculation (faster); the run's tau if it left
+            # stranded walkers out
+            if getattr(self, "tau_walkers", None) is not None and self.tau is not None:
+                tau = np.asarray(self.tau)
+            else:
+                tau = self.sampler.get_autocorr_time()
         except emcee.autocorr.AutocorrError:
             try:
                 # Retry with tol=0 if the default fails
@@ -907,6 +1360,83 @@ class MCMCModel:
         """
         return self.log_posterior_whitened(theta_white)
 
+    def whitened_residuals(self, z):
+        """
+        Data and prior residuals at theta = whiten_L @ z + whiten_mean (residuals_func, then
+        prior_residuals): -log p = 0.5 |r|^2 + const for Gaussian priors. The default residuals
+        of setup_valley_map.
+        """
+        theta = self.whiten_L @ np.asarray(z, dtype=float) + self.whiten_mean
+        return np.concatenate(
+            [np.atleast_1d(np.asarray(self.residuals_func(theta), dtype=float)),
+             self.prior_residuals(theta)]
+        )
+
+    def setup_valley_map(self, direction, start=None, residuals=None, **kwargs):
+        """
+        Turn on valley-straightening sampling coordinates (ValleyMap) on top of the whitening.
+
+        For a posterior whose high-density region is a long curved valley (e.g. a poorly
+        observed launch height, along which the other parameters follow a bent path), the
+        affine-invariant moves only see the chord. The map z = h e + Q (y*(h) + C(h) w) follows
+        the profile path y*(h) and its conditional scale C(h) along h = e . z; the log-
+        posterior gets the term log |dz/dv| = sum log diag C(h), so the target posterior is
+        unchanged (only the coordinates of the walkers are). See build_valley_map.
+
+        Parameters
+        ----------
+        direction : array_like, shape (ndim,)
+            Valley direction g in model coordinates (e.g. the batch's least-determined position
+            direction); e = whiten_L^T g / |whiten_L^T g|, so h = g . (theta - whiten_mean) /
+            sqrt(g^T cov g), the deviation along g in sigmas of the whitening covariance.
+        start : array_like, shape (ndim,), optional
+            Start of the profile in model coordinates (default initial_params).
+        residuals : callable, optional
+            z (ndim,) -> residual vector with -log p(z) = 0.5 |r|^2 + const. Default
+            whitened_residuals (exact for Gaussian priors; otherwise only the efficiency of
+            the map suffers).
+        **kwargs
+            dh, dlogp_stop, h_max, residuals_batch, fd_step, verbose of build_valley_map.
+
+        Returns
+        -------
+        ValleyMap
+            Also stored as self.valley; the build wall time in self.valley_build_s [s].
+        """
+        if not getattr(self, "is_whitened", False):
+            raise RuntimeError("setup_valley_map needs whitening (setup_whitening first)")
+        t0 = time.perf_counter()
+        g = np.asarray(direction, dtype=float)
+        e = self.whiten_L.T @ g
+        z0 = self.whiten_Linv @ (
+            (self.initial_params if start is None else np.asarray(start, dtype=float))
+            - self.whiten_mean
+        )
+        self.valley = build_valley_map(
+            self.whitened_residuals if residuals is None else residuals, e, z0, **kwargs
+        )
+        self.valley_build_s = time.perf_counter() - t0
+        print(f"[Timing] valley map {self.valley_build_s:.1f} s ({self.valley.H.size} profile "
+              f"points)")
+        return self.valley
+
+    def log_prob_valley(self, v):
+        """
+        Log-probability passed to emcee with a valley map: log p(z(v)) + log |dz/dv|.
+
+        Parameters
+        ----------
+        v : array_like, shape (ndim,)
+            Valley coordinates (h, w).
+
+        Returns
+        -------
+        float
+        """
+        z, logdet = self.valley.to_white(v)
+        lp = self.log_posterior_whitened(z[0]) + logdet[0]
+        return lp if np.isfinite(lp) else -np.inf
+
     def save_chain(self, path=None, max_full_steps=4000, **extra):
         """
         Save the run as a compressed .npz, enough to redo every diagnostic and figure.
@@ -948,6 +1478,11 @@ class MCMCModel:
         - full_chain (float32), full_log_prob: the whole run, burn-in included, every
           full_stride steps (for the trace and autocorrelation figures).
         - n_steps, full_stride, acceptance_fraction, tau, burn_in, thin, whiten_mean / _L.
+        - run_wall_s, map_start_s, n_procs: wall time of the sampling and of the MAP start [s]
+          and the pool size, when the run set them.
+        - valley_e / _Q / _H / _Y / _C / _cost and valley_build_s: the valley map of the walkers
+          (setup_valley_map), when on; the chains are stored in the whitened coordinates
+          anyway.
         - extra_<key>: the **extra arrays.
 
         A re-saved ChainReplay keeps its stored grid. A sampler without get_chain (e.g.
@@ -957,21 +1492,30 @@ class MCMCModel:
             raise ValueError("No samples to save: run the sampler first.")
         path = Path(MCMCPlots.figure_dir() / "chain.npz" if path is None else path)
         data = {"samples": np.asarray(self.samples), "log_probs": np.asarray(self.log_probs)}
-        for key in ("chain", "log_prob_chain", "tau", "burn_in", "thin"):
+        for key in ("chain", "log_prob_chain", "tau", "burn_in", "thin", "run_wall_s", "map_start_s",
+                    "n_procs"):
             val = getattr(self, key, None)
             if val is not None:
                 data[key] = np.asarray(val)
         if getattr(self, "is_whitened", False):
             data["whiten_mean"] = np.asarray(self.whiten_mean)
             data["whiten_L"] = np.asarray(self.whiten_L)
+        if getattr(self, "valley", None) is not None:
+            for key, val in self.valley.arrays().items():
+                data[f"valley_{key}"] = np.asarray(val)
+            if getattr(self, "valley_build_s", None) is not None:
+                data["valley_build_s"] = np.asarray(self.valley_build_s)
         smp = self.sampler
-        if isinstance(smp, ChainReplay):  # re-saving a loaded run: keep its stored grid
+        if isinstance(smp, ChainReplay) and not hasattr(smp, "emcee"):
+            # re-saving a loaded run: keep its stored grid
             stride, full, full_lp = smp.stride, smp.full_chain, smp.full_log_prob
-        elif smp is not None and hasattr(smp, "get_chain"):  # emcee
+        elif smp is not None and hasattr(smp, "get_chain"):  # emcee (or a thin_by run)
             n_steps = int(smp.iteration)
             stride = 1 if not max_full_steps else max(1, n_steps // int(max_full_steps))
             if self.tau is not None and np.all(np.isfinite(self.tau)):
                 stride = max(1, min(stride, int(np.min(self.tau) // 10)))
+            rs = int(getattr(smp, "stride", 1))  # thin_by run: a multiple of its stride
+            stride = rs * max(1, stride // rs)
             full = smp.get_chain(thin=stride).astype(np.float32)
             full_lp = smp.get_log_prob(thin=stride)
         else:  # e.g. nested sampling: no chain
@@ -998,8 +1542,8 @@ class MCMCModel:
         """
         Restore a run saved by save_chain (diagnostics and figures work as after run()).
 
-        Sets samples, log_probs, chain, log_prob_chain, tau, burn_in, thin and the whitening
-        (whiten_Linv recomputed), and a ChainReplay in place of the emcee sampler (same
+        Sets samples, log_probs, chain, log_prob_chain, tau, burn_in, thin, the whitening
+        (whiten_Linv recomputed) and the valley map if the run had one, and a ChainReplay in place of the emcee sampler (same
         interface; None if no full chain was stored).
 
         Parameters
@@ -1026,6 +1570,11 @@ class MCMCModel:
             self.whiten_L = data["whiten_L"]
             self.whiten_Linv = np.linalg.inv(self.whiten_L)
             self.is_whitened = True
+        if "valley_H" in data:  # the run's valley map (its chains are in z already)
+            self.valley = ValleyMap(
+                data["valley_e"], data["valley_Q"], data["valley_H"], data["valley_Y"],
+                data["valley_C"], data.get("valley_cost"),
+            )
         self.sampler = None
         if "full_chain" in data:
             self.sampler = ChainReplay(

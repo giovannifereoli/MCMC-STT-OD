@@ -1,0 +1,47 @@
+[Seed MC] 2000 realizations on 8 processes (noise seeds 100000-101999, reference seeds 200000-201999); geometry from case2b_bennu_particle_stmbank_261126101730
+[Timing] 2000 realizations in 1394 s (23.2 min) on 8 processes
+
+Case 2 seed Monte Carlo: 2000 realizations, noise seeds 100000-101999, reference seeds 200000-201999; geometry, priors and batch settings of case2b_bennu_particle_stmbank_261126101730
+(h0 = launch height along the pole relative to the truth; J = -2 ln p; best fit = lowest minimum; a second minimum counts when its barrier is >= 0.5; +- = 95 % binomial interval; median wall time 5.3 s per realization on one core)
+
+Cost profile along h0
+  two or more minima (any barrier)                               13.5 % +-  1.5  (270/2000)
+  two or more minima (barrier >= 0.5)                             7.1 % +-  1.1  (142/2000)
+    cost gap of the second minimum 10/50/90 %: 0.20/1.92/9.03
+    separation in h0 [m] 10/50/90 %: 25.18/31.47/38.31
+      second minimum 2.0-3.0 above the best fit, >= 20 m away     0.9 % +-  0.4  (17/2000)
+  the truth's lobe holds the best fit                            95.5 % +-  0.9  (1910/2000)
+      given two minima                                           62.7 % +-  8.0  (89/142)
+
+Batch (SRIF, full rank, step halving, max_iter 30, as Case 2)
+  converged at the best fit                                      87.8 % +-  1.4  (1755/2000)
+  converged at another minimum (the wrong one)                    5.1 % +-  1.0  (102/2000)
+      farther from the truth than the best fit (as the paper)     1.8 % +-  0.6  (36/2000)
+      closer to the truth than the best fit                       3.3 % +-  0.8  (66/2000)
+      of these, minimum with a barrier < 0.5 (a shoulder)         2.2 % +-  0.6  (45/2000)
+  stopped short at 30 iterations (still descending)               4.6 % +-  0.9  (92/2000)
+      continuing reaches the best fit                             4.4 % +-  0.9  (88/2000)
+  failed (the reference trajectory falls back to Bennu)           2.5 % +-  0.7  (51/2000)
+
+  wrong minimum, of the batches that converged                    5.5 % +-  1.0  (102/1857)
+  wrong minimum, given two minima (barrier >= 0.5)               40.1 % +-  8.1  (57/142)
+      farther from the truth, given two minima                   14.1 % +-  5.7  (20/142)
+  like the paper (farther, 2.0-3.0 above, >= 20 m away)           0.2 % +-  0.2  (5/2000)
+    cost above the best fit at a wrong minimum 10/50/90 %: 0.18/1.34/4.43
+    stopped short: cost above the best fit 10/50/90 %: 0.20/4.18/67.69
+  batch h0 more than 3 batch sigmas from the best fit             4.7 % +-  0.9  (93/2000)
+  batch h0 more than 20 m from the best fit                       4.7 % +-  0.9  (93/2000)
+  batch sigma of h0: median 5.98 m
+
+By the reference's offset along the pole (std 26.9 m): wrong minimum (farther) / stopped short
+  [ -inf,   -50) m  n =   63:   1.6 % ( 0.0 %) /  3.2 %
+  [  -50,   -25) m  n =  269:   4.5 % ( 0.4 %) /  3.0 %
+  [  -25,    +0) m  n =  678:   5.0 % ( 1.0 %) /  4.3 %
+  [   +0,   +25) m  n =  638:   4.7 % ( 2.2 %) /  5.0 %
+  [  +25,   +50) m  n =  274:   6.9 % ( 3.3 %) /  6.9 %
+  [  +50,  +inf) m  n =   78:   7.7 % ( 6.4 %) /  2.6 %
+
+Paper realization (noise 395, reference 239): reference offset +80.4 m (3.0 std; 0 of 2000 Monte Carlo references are as far); batch h0 +25.72 m, best fit -6.18 m, cost gap 2.50; outcome: far
+
+Outcome: converged = continuing the Gauss-Newton 300 more iterations lowers the cost by at most 0.01; two minima are the same within 3.0 m and 0.05 in cost; minima = refined local minima of the profile (h0 in [-60, 80] m) and the continued batch; farther / closer: |batch h0| larger / smaller than |best-fit h0|.
+[Figure] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/seed_mc/case2_seed_mc_261127000315/fig_case2_seed_mc.pdf

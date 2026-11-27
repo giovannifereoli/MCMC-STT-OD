@@ -1,7 +1,7 @@
 """
 Paper Case 2 (Bennu particle, "mirror" design): OSIRIS-REx optical angles (RA/Dec, 22 images over
 1.5 h) of a particle launched from Bennu's equator while the spacecraft looks along the spin axis.
-The full-rank SRIF batch converges to a shallow local minimum 18.5 m from the truth; the MCMC
+The full-rank SRIF batch converges to a shallow local minimum 26 m from the truth; the MCMC
 likelihood decides whether the posterior shows the second lobe that holds the truth.
 
 Usage
@@ -11,11 +11,13 @@ Usage
     python case2_bennu_particle.py stm    # single STM about the batch (for case2_comparison.py)
     # redo only the post-processing (clean RTN corner + summary) of a finished run:
     python case2_bennu_particle.py 2a --post results/case2a_bennu_particle_stt2_<stamp>
+    # walkers in valley-straightening coordinates (same posterior; folder suffix _valley):
+    python case2_bennu_particle.py 2a --valley
 
 Cases
 -----
-2a  : the Stage 2 STTs about the batch solution ref1 are second order (DOP853, ~5 min for the
-      1884 states; the symbolic B_2 tensors take ~17 min). The posterior is a curved, two-lobed
+2a  : the Stage 2 STTs about the batch solution ref1 are second order (DOP853; the symbolic
+      B_2 tensors take ~17 min). The posterior is a curved, two-lobed
       valley in launch height and out-of-plane speed (h0, vh0): one lobe at the batch, one at
       the truth. Results in results/case2a_bennu_particle_stt2_<stamp>/.
 2b  : STMs only. One STM about ref1 gives positions affine in the deviation, hence a single
@@ -28,21 +30,43 @@ stm : the single STM about ref1 (first-order Stage 2), not a paper case on its o
       is the "single STM" curve of case2_comparison.py.
       Results in results/case2_bennu_particle_stm_<stamp>/.
 
-Design (what differs from the earlier particle arc of 2019-03-01)
------------------------------------------------------------------
-- Epoch 2019-05-20T14:35:00 UTC (+90 min, 22 images); the spacecraft is ~4.5 km below the south
-  pole, looking along the spin axis, so the camera barely sees the height above the equator.
-- Launch site: nearest mesh vertex to lat 3 deg / lon 110 deg (body-fixed).
-- Launch velocity 160 mm/s, azimuth -8 deg (from local east toward north), elevation 12 deg,
+Valley coordinates (--valley)
+-----------------------------
+The two lobes lie along a bent valley in launch height; the affine-invariant stretch move only
+sees its chord, so the autocorrelation time grows with the run and the lobe shares stay biased
+toward the start (the batch lobe). With --valley the walkers move in the coordinates of a
+triangular transport map of the whitened coordinates z (MCMCModel.setup_valley_map, ValleyMap):
+z = h e + Q (y*(h) + C(h) w), h the deviation along the batch's least-determined position
+direction in batch sigmas, y*(h) the profile path (the best other coordinates at fixed h,
+Levenberg-Marquardt on the likelihood and prior residuals, step 0.1, until the profile is 25
+below its best) and C(h) the Cholesky factor of the Gauss-Newton conditional covariance there.
+The log-posterior gets log |dz/dv| = sum log diag C(h): the posterior is the same, only the
+walkers' coordinates change; the chain is mapped back to z before tau, burn-in and thinning.
+
+Design (redone 2026-11-26 in the SPICE frame IAU_BENNU)
+--------------------------------------------------------
+- Epoch 2019-04-29T18:35:00 UTC (+90 min, 22 images); the spacecraft is 4.1-4.3 km from Bennu,
+  within 2.5 deg of the south pole axis, looking along the spin axis, so the camera barely sees
+  the height h0 of the launch point along the pole.
+- Launch site: nearest mesh vertex to lat 3 deg / lon -60.76 deg (body-fixed, IAU_BENNU).
+- Launch velocity 160 mm/s, azimuth 188 deg (from local east toward north), elevation 12 deg,
   built in the local frame of the site: v0 = vmag R_ib0^T (cos EL (cos AZ e + sin AZ n) + sin EL u).
-- Batch: full rank (rank_cutoff=False), plain Gauss-Newton steps. With C21 = S21 = 0 the
-  degree-2 field is symmetric about the equator; the cost along h0 is a flat valley from
-  about -10 to +27 m with the best fit at h0 = -2.7 m and a shallow minimum at +18.4 m, where
-  the batch lands (cost 36.03 against 33.57 at the best fit).
-- MCMC: 100000 steps, 25000 burn-in (the lobe weights converge slowly: ~10 autocorrelation
-  times per run).
-Everything else (noise 0.1 px, priors 0.25 km / 0.3 m/s / 1 %, reference seed 42 with 20 % / 20 %
-/ 1 % / 1 % offsets, noise seed 123, 128 walkers, thin 100) is the setting of the earlier particle arc.
+- Reference seed 239 (20 % / 20 % / 1 % / 1 % offsets; the reference starts ~80 m from the truth
+  along the pole) and noise seed 395. They were picked, among the seeds whose linearized cost
+  profile along h0 has two minima about 2.5 apart, so that the batch stops in the far one.
+- Batch: full rank (rank_cutoff=False), Gauss-Newton with step halving (the BatchLSQ default,
+  as in Case 1). With C21 = S21 = 0 the degree-2 field is symmetric about the equator; the cost
+  along h0 is a valley with the best fit at h0 = -6.2 m (cost 34.30) and a shallow minimum at
+  h0 = +25.7 m, where the batch lands (cost 36.80, 2.50 above; the linearized profile puts it
+  2.45 above).
+- Earlier designs: lon 110 deg, AZ -8 deg, 2019-05-20T14:35, seeds 42 / 123 (in the frame with
+  the pole at RA -85.65 deg, before the fix of make_bennu_rotation_matrix), then lon -129.65 deg,
+  seeds 3 / 631 (pole fixed, but a rounded pole and W(et0) = 0 instead of the IAU model). In
+  IAU_BENNU, W(et0) = 291.11 deg; lon -60.76 = -129.65 - 291.11 deg puts the site where the
+  second design had it in inertial space at et0, which keeps the flat cost valley.
+- MCMC: the settings shared by all the paper cases (see "MCMC settings" in the main).
+Everything else (noise 0.1 px, priors 0.25 km / 0.3 m/s / 1 %) is the setting of the earlier
+particle arc.
 
 Outputs
 -------
@@ -56,8 +80,8 @@ Outputs
   ensemble median), plus a printed summary (acceptance, tau, truth Mahalanobis distances under
   the batch and the sampled covariance).
 
-The MCMC walker start and the emcee moves draw from the unseeded global NumPy state, so a
-rerun reproduces the paper numbers statistically, not bit for bit.
+The MCMC walker start and the emcee moves draw from the global NumPy state, seeded with
+SEED_WALKERS before the run, so a rerun on the same machine reproduces the chain.
 
 Original scenario docstring follows.
 -------------------------------------------------------------------------------------------
@@ -65,7 +89,9 @@ Scenario (from scratch, but uses your existing STTPropagator + MCMCModel):
 
 - Spacecraft (OSIRIS-REx) trajectory is TRUTH from SPICE SPK (Bennu-centered, J2000).
 - Particle detaches from Bennu surface (point in body-fixed), then propagates in J2000 (Bennu-centered).
-- Bennu rotates with constant spin about its pole (truth alpha/delta). No tau state.
+- Bennu rotates with constant spin about its pole: the IAU model of bennu_v17.tpc (pole, rate and
+  prime meridian at utc0, get_CS_unnormalized.bennu_spin_spice), so the body-fixed frame is SPICE
+  IAU_BENNU. No tau state.
 - Particle dynamics uses degree-2 gravity potential in body-fixed:
     U = mu/r * (1 + (R_ref/r)^2 * sum_{m=0..2} P2m(sinφ)*(C2m cos mλ + S2m sin mλ))
   Acceleration is computed as a = ∇U in body-fixed, then rotated to inertial.
@@ -137,7 +163,7 @@ from scipy.stats import norm
 from STTPropagationND import STTPropagatorND
 from MCMC import MCMCModel
 from BatchLSQ import BatchLSQ
-from get_CS_unnormalized import bennu_10_10
+from get_CS_unnormalized import bennu_10_10, bennu_spin_spice
 
 # Journal figures (Okabe-Ito colors, LaTeX text, one vector PDF per figure) live in MCMCPlots.py;
 # MCMCPlots.configure() in the main applies the journal style.
@@ -182,21 +208,19 @@ def make_bennu_rotation_matrix(alpha, delta, omega, t, w0=0.0):
 
     Returns R_ib (3,3) mapping r_i -> r_b.
     """
-    ca, sa = np.cos(alpha), np.sin(alpha)
-    cd, sd = np.cos(delta), np.sin(delta)
     W = w0 + omega * t
-    cW, sW = np.cos(W), np.sin(W)
 
-    # Using common IAU convention-like build:
-    # R_ib = Rz(W) * Rx(pi/2 - delta) * Rz(alpha + pi/2)
-    # (sign conventions differ between references; this is consistent internally if used everywhere.)
+    # IAU build from frame (passive) rotations, R3(th) = [[c, s, 0], [-s, c, 0], [0, 0, 1]]:
+    # R_ib = R3(W) R1(pi/2 - delta) R3(alpha + pi/2). Body +Z is then the pole
+    # (cos d cos a, cos d sin a, sin d) and the body spins at +omega about it. (Active rotations
+    # here put the pole at RA = -alpha and reversed the spin: fixed 2026-11-25.)
     def Rz(th):
         c, s = np.cos(th), np.sin(th)
-        return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        return np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
 
     def Rx(th):
         c, s = np.cos(th), np.sin(th)
-        return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+        return np.array([[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]])
 
     return Rz(W) @ Rx(np.pi / 2 - delta) @ Rz(alpha + np.pi / 2)
 
@@ -323,13 +347,14 @@ def generate_stt_functions_bennu_deg2(
     w0 = sp.Float(w0_rad)
     W = w0 + omega * t
 
+    # frame (passive) rotations, as make_bennu_rotation_matrix
     def Rz(th):
         c, s = sp.cos(th), sp.sin(th)
-        return sp.Matrix([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+        return sp.Matrix([[c, s, 0], [-s, c, 0], [0, 0, 1]])
 
     def Rx(th):
         c, s = sp.cos(th), sp.sin(th)
-        return sp.Matrix([[1, 0, 0], [0, c, -s], [0, s, c]])
+        return sp.Matrix([[1, 0, 0], [0, c, s], [0, -s, c]])
 
     R_ib = Rz(W) * Rx(sp.pi / 2 - delta) * Rz(alpha + sp.pi / 2)
     R_bi = R_ib.T
@@ -754,7 +779,21 @@ if __name__ == "__main__":
         metavar="RUN_DIR",
         help="only redo the post-processing of a finished run folder",
     )
+    ap.add_argument(
+        "--demoves",
+        action="store_true",
+        help="sample with emcee's DE + DE-snooker moves (MCMCModel.run use_demoves) instead of "
+        "the stretch move; adds _de to the results folder (a sampler test, not a paper setting)",
+    )
+    ap.add_argument(
+        "--valley",
+        action="store_true",
+        help="walkers in valley-straightening coordinates (MCMCModel.setup_valley_map along the "
+        "batch's least-determined position direction; same posterior, stretch move); adds "
+        "_valley to the results folder",
+    )
     args = ap.parse_args()
+    T0_SCRIPT = time.perf_counter()  # [Timing] summary at the end (run.log)
     CASE = args.case
     # results folder and fig_corner_rtn_<TAG>
     TAG = {"2a": "stt2", "2b": "stmbank", "stm": "stm"}[CASE]
@@ -776,21 +815,18 @@ if __name__ == "__main__":
     FRAME_I = "J2000"
     ABCORR = "NONE"
 
-    # Observation window (must be covered by SPK): the spacecraft is ~4.5 km below Bennu's
-    # south pole, looking along the spin axis
-    utc0 = "2019-05-20T14:35:00"
-    utc1 = "2019-05-20T16:05:00"
+    # Observation window (must be covered by SPK): the spacecraft is 4.1-4.3 km from Bennu,
+    # within 2.5 deg of the south pole axis, looking along the spin axis
+    utc0 = "2019-04-29T18:35:00"
+    utc1 = "2019-04-29T20:05:00"
     n_obs = 22
 
     # Bennu physical
     R_bennu = 0.290  # km
     R_ref = R_bennu
 
-    # Bennu spin + pole truth
-    alpha_true = np.deg2rad(85.65)  # rad
-    delta_true = np.deg2rad(-60.17)  # rad
-    spin_period = 4.296057 * 3600.0  # s
-    omega_true = 2 * np.pi / spin_period  # rad/s
+    # Bennu spin + pole truth: the IAU model of the PCK (bennu_v17.tpc) about et0, set after the
+    # kernels are loaded (alpha_true, delta_true, omega_true, w0_true)
 
     # Dynamics / STT order. Case 2a: order 2 for the Stage 2 STTs (MCMC likelihood) only;
     # truth, data and batch stay on a first-order propagator (propagator1 below). Cases 2b and
@@ -804,8 +840,8 @@ if __name__ == "__main__":
 
     # Stage-1 batch solver: "srif" (square-root information filter, Householder) or "ud"
     # (Bierman U-D, one scalar measurement at a time), both full rank here (rank_cutoff=False):
-    # plain Gauss-Newton from the reference converges to the shallow local minimum at
-    # h0 = +18.4 m (cost 36.03; the best fit, cost 33.57, is at h0 = -2.7 m).
+    # Gauss-Newton with step halving from the reference converges to the shallow local
+    # minimum at h0 = +25.7 m (cost 36.80; the best fit is at h0 = -6.2 m, cost 34.30).
     # "ud" adds "_ud" to the results folder.
     BATCH_SOLVER = "srif"
 
@@ -828,7 +864,7 @@ if __name__ == "__main__":
     sigma_dec = sigma_angle
 
     # reference is perturbed by these fractions of |truth|
-    rng_ref = np.random.default_rng(42)
+    rng_ref = np.random.default_rng(239)
     ref_pct_r = 0.2  # 20% of each position component
     ref_pct_v = 0.2  # 20% of each velocity component
     ref_pct_mu = 0.01  # 1% of mu
@@ -850,13 +886,25 @@ if __name__ == "__main__":
     sig_prior_c = np.abs(params_true[1:]) * 1e-2  # 1% on C/S terms
     prior_looseness = 1  # 1.1 * 1e2
 
-    # MCMC settings
-    # NOTE: always do a run with burn_in and thin not activated
-    n_walkers = 128  # 10 *
-    n_samples = 100000  # the lobe weights converge slowly (~10 autocorrelation times)
-    burn_in = 25000
-    thin = 100
-    spherical_spread = 1e-1
+    # Integration of every propagation (truth, batch, Stage 2 STTs / STM bank), as in all the
+    # paper cases
+    ivp = dict(method="DOP853", rtol=1e-11, atol=1e-14)
+
+    # MCMC settings (the same in all the paper cases): walkers start from N(MAP, batch
+    # covariance) (whitened by cov1, spread 1); at least n_samples steps, then on in blocks of
+    # CHECK_EVERY steps until n_steps >= N_TAU x max(tau) (at most MAX_SAMPLES; tau without
+    # the stranded walkers); every THIN_BY-th step stored; burn-in 2 x max(tau), thinning
+    # 0.5 x min(tau)
+    n_walkers = 128
+    n_samples = 100000  # minimum
+    N_TAU = 50
+    CHECK_EVERY = 50000
+    MAX_SAMPLES = 1000000
+    THIN_BY = 10
+    burn_in = None  # None: 2 x max(tau)
+    thin = None  # None: 0.5 x min(tau)
+    spherical_spread = 1.0  # walker start, whitened by the batch covariance
+    SEED_WALKERS = 7
     # Saved chain: every run writes chain.npz into its results folder. Set LOAD_CHAIN to
     # such a file to skip the sampling and redo the diagnostics and figures from it.
     LOAD_CHAIN = None  # e.g. "results/case2a_bennu_particle_stt2_<stamp>/chain.npz"
@@ -885,7 +933,7 @@ if __name__ == "__main__":
     fig_dir = MCMCPlots.set_figure_dir(
         Path(__file__).resolve().parent
         / "results"
-        / f"{RUN_NAME}_{datetime.now().strftime('%y%m%d%H%M%S')}{'_ud' if BATCH_SOLVER == 'ud' else ''}"
+        / f"{RUN_NAME}_{datetime.now().strftime('%y%m%d%H%M%S')}{'_ud' if BATCH_SOLVER == 'ud' else ''}{'_de' if args.demoves else ''}{'_valley' if args.valley else ''}"
     )
     print(
         f"[Case] {CASE}: n_obs = {n_obs}, MCMC likelihood = "
@@ -899,6 +947,13 @@ if __name__ == "__main__":
     _ = load_kernels(KERNEL_ROOT)
 
     et0 = spice.utc2et(utc0)
+    # Bennu pole, spin rate and prime meridian at et0 (R_ib(tau) = spice.pxform("J2000",
+    # "IAU_BENNU", et0 + tau))
+    alpha_true, delta_true, omega_true, w0_true = bennu_spin_spice(et0)
+    print(
+        f"[SPICE] Bennu pole RA {np.rad2deg(alpha_true):.5f} deg, Dec {np.rad2deg(delta_true):.5f} deg, "
+        f"period {2 * np.pi / omega_true / 3600:.6f} h, W(et0) {np.rad2deg(w0_true):.4f} deg"
+    )
     et1 = spice.utc2et(utc1)
     ets_full = np.linspace(et0, et1, n_obs)  # ET (for SPICE)
     tau_full = ets_full - ets_full[0]  # seconds since start (for dynamics)
@@ -926,7 +981,7 @@ if __name__ == "__main__":
     vertices = np.asarray(bennu_mesh.vertices)
 
     lat_desired = np.deg2rad(3.0)
-    lon_desired = np.deg2rad(110.0)
+    lon_desired = np.deg2rad(-60.76)
     pos_target = np.array(
         [
             R_bennu * np.cos(lat_desired) * np.cos(lon_desired),
@@ -944,14 +999,14 @@ if __name__ == "__main__":
 
     # Convert detach position to inertial at start time using rotation at tau=0
     R_ib0 = make_bennu_rotation_matrix(
-        alpha_true, delta_true, omega_true, t=0.0, w0=0.0
+        alpha_true, delta_true, omega_true, t=0.0, w0=w0_true
     )
     r0_true = R_ib0.T @ pos_detach_bf  # inertial
 
     # Launch velocity: 160 mm/s, azimuth AZ from local east toward north, elevation EL above
     # the local horizontal, in the local frame of the site (up = radial), then inertial
     vmag = 1.6e-4  # km/s
-    az_launch = np.deg2rad(-8.0)
+    az_launch = np.deg2rad(188.0)
     el_launch = np.deg2rad(12.0)
     up_bf = pos_detach_bf / np.linalg.norm(pos_detach_bf)
     east_bf = np.cross([0.0, 0.0, 1.0], up_bf)
@@ -975,7 +1030,7 @@ if __name__ == "__main__":
         alpha_rad=alpha_true,
         delta_rad=delta_true,
         omega_rad_s=omega_true,
-        w0_rad=0.0,
+        w0_rad=w0_true,
     )
 
     propagator = STTPropagatorND(
@@ -991,9 +1046,7 @@ if __name__ == "__main__":
     # Propagate particle truth (DYNAMICS on tau_full)
     # --------------------------
     print("\nPropagating particle truth...")
-    sol_true, stts_true = propagator1.propagate(
-        x0_true, tau_full, rtol=1e-8, atol=1e-10, method="LSODA"
-    )
+    sol_true, stts_true = propagator1.propagate(x0_true, tau_full, **ivp)
     x_true_full = sol_true.y[:12, :].T  # (N,12)
 
     # --------------------------
@@ -1023,7 +1076,7 @@ if __name__ == "__main__":
     # --------------------------
     tau_dense = np.linspace(tau_full[0], tau_full[-1], 400)
     sol_dense = propagator.propagate_state_only(
-        x0_true, tau_dense, show_progress=False, rtol=1e-8, atol=1e-10, method="LSODA"
+        x0_true, tau_dense, show_progress=False, **ivp
     )
     pt_dense = sol_dense.y[:3, :].T
     r_dense = np.linalg.norm(pt_dense, axis=1)
@@ -1032,7 +1085,7 @@ if __name__ == "__main__":
     n_in_dense = int(
         np.sum(
             MCMCPlots.points_inside_mesh(
-                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true
+                bennu_mesh, pt_dense[1:], tau_dense[1:], alpha_true, delta_true, omega_true, w0_true
             )
         )
     )
@@ -1061,6 +1114,7 @@ if __name__ == "__main__":
         alpha=alpha_true,
         delta=delta_true,
         omega=omega_true,
+        w0=w0_true,
         detach_bf=pos_detach_bf,
     )
     MCMCPlots.plot_observation_geometry(
@@ -1078,7 +1132,7 @@ if __name__ == "__main__":
     # --------------------------
     # Generate measurements for ALL epochs (including occulted ones)
     # We'll handle visibility in the residual weighting
-    rng_meas = np.random.default_rng(123)
+    rng_meas = np.random.default_rng(395)
     y_obs_full = generate_opnav_measurements_from_sc(
         x_part=x_true,
         sc_state=sc_state,
@@ -1148,18 +1202,20 @@ if __name__ == "__main__":
         measurement=radec_and_partials_from_los,
         wrap=wrap_to_pi,
     )
+    t_batch = time.perf_counter()
     x0_ref1, delta_hat1, cov1 = batch.gn_with_stm(
         x0_ref=x0_ref,
         priors=priors,  # match update_idx length
         max_iter=30,
         tol=1e-8,
-        rtol=1e-8,
-        atol=1e-10,
+        **ivp,
         verbose=True,
         solver=BATCH_SOLVER,
         rank_cutoff=False,  # full rank, see BATCH_SOLVER
-        halving=False,  # full Gauss-Newton steps, as before
+        halving=True,  # step halving (the default), as in Case 1
     )
+    dt_batch = time.perf_counter() - t_batch
+    print(f"[Timing] batch (Stage 1) wall time {dt_batch:.1f} s")
 
     print("\n[Stage 1] Covariance diagonal (stdev):")
     print(np.sqrt(np.diag(cov1)))
@@ -1194,17 +1250,13 @@ if __name__ == "__main__":
         r_bank, phi_bank = [], []
         for d_k in delta_bank:
             sol_k, stts_k = propagator1.propagate(
-                x0=x0_ref1 + d_k,
-                t_eval=tau,
-                show_progress=False,
-                rtol=1e-8,
-                atol=1e-10,
-                method="LSODA",
+                x0=x0_ref1 + d_k, t_eval=tau, show_progress=False, **ivp
             )
             r_bank.append(sol_k.y[:3, :].T)
             phi_bank.append(stts_k[1][:, :3, :])
         r_bank, phi_bank = np.array(r_bank), np.array(phi_bank)
-        print(f"[Stage 2] bank propagation wall time {time.time() - t_stage2:.1f} s")
+        dt_stage2 = time.time() - t_stage2
+        print(f"[Stage 2] bank propagation wall time {dt_stage2:.1f} s")
         r_ref1 = r_bank[np.argmin(np.abs(s_bank))]  # the s = 0 anchor is ref1
         residuals_normalized = StmBankResiduals(
             s_bank,
@@ -1222,19 +1274,12 @@ if __name__ == "__main__":
             bank_s=s_bank, bank_g=g_bank, bank_sl=sl_bank, bank_v=v_bank, bank_r=r_bank
         )
     else:
-        # Order-2 STTs (1884 states): LSODA switches to its stiff branch and spends hours on
-        # finite-difference Jacobians; the problem is not stiff, so 2a uses DOP853 (~5 min).
         print(f"\n[Stage 2] Propagating ref1 and computing order-{stt_order} STTs about ref1...")
         t_stage2 = time.time()
-        sol_ref, stts_ref = propagator.propagate(
-            x0=x0_ref1,
-            t_eval=tau,
-            rtol=1e-8,
-            atol=1e-10,
-            method="DOP853" if stt_order >= 2 else "LSODA",
-        )
+        sol_ref, stts_ref = propagator.propagate(x0=x0_ref1, t_eval=tau, **ivp)
+        dt_stage2 = time.time() - t_stage2
         print(
-            f"[Stage 2] STT propagation wall time {time.time() - t_stage2:.1f} s, "
+            f"[Stage 2] STT propagation wall time {dt_stage2:.1f} s, "
             f"nfev = {sol_ref.nfev}"
         )
         r_ref1 = sol_ref.y[:3, :].T
@@ -1289,13 +1334,50 @@ if __name__ == "__main__":
         param_priors=priors_ref1,
         observed_data=y_obs,
     )
-    model.setup_whitening_from_priors()
+    model.setup_whitening(cov=0.5 * (cov1 + cov1.T))  # walker start N(MAP, cov1)
+    # Batch solution, truth, data, ref1 trajectory and dynamics constants (case2_comparison.py
+    # can sample the exact reference from this file while the MCMC runs); written again with
+    # the MCMC estimate after the run
+    batch_kw = dict(
+        x0_ref1=x0_ref1,
+        cov1=cov1,
+        t_batch_s=dt_batch,
+        t_stage2_s=dt_stage2,
+        true_delta=x0_true - x0_ref1,
+        x0_true=x0_true,
+        x0_ref=x0_ref,
+        vis_mask=vis_mask,
+        tau=tau,
+        prior_sigma=prior_sigma,
+        delta_shift=delta_shift,
+        case=CASE,
+        y_obs=y_obs,
+        obs_weights=obs_weights,
+        sc_pos=sc_state[:, :3],
+        sigma=np.array([sigma_ra, sigma_dec]),
+        r_ref1=r_ref1,
+        dyn_const=np.array([R_ref, alpha_true, delta_true, omega_true, w0_true]),
+        **bank_kw,
+    )
+    if not LOAD_CHAIN:
+        np.savez(fig_dir / "batch.npz", **batch_kw)
+    if args.valley and not LOAD_CHAIN:
+        # Valley-straightening coordinates (--valley): profile of the posterior along the
+        # batch's least-determined position direction g (largest eigenvalue of the position
+        # block of cov1, the launch height), h = g . (theta - prior mean) / sqrt(g' cov1 g);
+        # the walkers follow the profile path and its conditional scale (same posterior)
+        _, evec_v = np.linalg.eigh(cov1[:3, :3])
+        g_valley = np.zeros(12)
+        g_valley[:3] = evec_v[:, -1]
+        print(f"\n[Valley] direction g = {np.round(evec_v[:, -1], 3)} (position block of cov1)")
+        model.setup_valley_map(g_valley)
     if LOAD_CHAIN:
         model.load_chain(LOAD_CHAIN)  # figures from a saved run (no sampling)
         burn_in, thin = model.burn_in, model.thin
         # postprocess_run reads chain.npz from fig_dir
         shutil.copyfile(LOAD_CHAIN, fig_dir / "chain.npz")
     else:
+        np.random.seed(SEED_WALKERS)  # walker start (MCMCModel.run draws from np.random)
         model.run(
             n_samples=n_samples,
             n_walkers=n_walkers,
@@ -1303,7 +1385,14 @@ if __name__ == "__main__":
             thin=thin,
             spherical_spread=spherical_spread,
             method_optimize="Powell",
+            thin_by=THIN_BY,
+            n_tau_target=N_TAU,
+            max_samples=MAX_SAMPLES,
+            check_every=CHECK_EVERY,
+            stranded_dlogp=STRANDED_DLOGP,
+            use_demoves=args.demoves,
         )
+        burn_in, thin = model.burn_in, model.thin
         model.save_chain(fig_dir / "chain.npz")
 
     theta_hat, P_mcmc = model.get_estimate_and_covariance()
@@ -1320,31 +1409,9 @@ if __name__ == "__main__":
     print("\n[Truth] true_delta about ref1:\n", true_delta)
     # Posterior mode (for the corners and the post-processing)
     map_kw = dict(theta_map=model.find_map()) if SHOW_MAP else {}
-    # Batch solution and truth, for the post-processing (and comparisons across runs)
-    np.savez(
-        fig_dir / "batch.npz",
-        x0_ref1=x0_ref1,
-        cov1=cov1,
-        true_delta=true_delta,
-        x0_true=x0_true,
-        x0_ref=x0_ref,
-        theta_hat=theta_hat,
-        P_mcmc=P_mcmc,
-        vis_mask=vis_mask,
-        tau=tau,
-        prior_sigma=prior_sigma,
-        delta_shift=delta_shift,
-        # data, ref1 trajectory and dynamics constants (case2_comparison.py)
-        case=CASE,
-        y_obs=y_obs,
-        obs_weights=obs_weights,
-        sc_pos=sc_state[:, :3],
-        sigma=np.array([sigma_ra, sigma_dec]),
-        r_ref1=r_ref1,
-        dyn_const=np.array([R_ref, alpha_true, delta_true, omega_true]),
-        **bank_kw,
-        **map_kw,
-    )
+    # Batch solution and truth, for the post-processing (and comparisons across runs); first
+    # written before the MCMC (above), for case2_comparison.py --exact-only
+    np.savez(fig_dir / "batch.npz", **batch_kw, theta_hat=theta_hat, P_mcmc=P_mcmc, **map_kw)
 
     # --------------------------
     # Diagnostics + journal figures (residuals, traces, autocorrelation, corner)
@@ -1382,3 +1449,17 @@ if __name__ == "__main__":
 
     # Paper figure fig_corner_rtn_<tag>.pdf (stranded walkers excluded) + summary
     postprocess_run(fig_dir, TAG)
+
+    # Wall times of the stages (the MCMC one is also in chain.npz, run_wall_s); the rest is the
+    # setup (symbolic derivatives, truth, data), the posterior mode and the figures
+    dt_total = time.perf_counter() - T0_SCRIPT
+    dt_mcmc = getattr(model, "run_wall_s", None)
+    dt_valley = getattr(model, "valley_build_s", None) if args.valley else None
+    print(
+        f"\n[Timing] total {dt_total:.0f} s ({dt_total / 3600:.2f} h): batch {dt_batch:.0f} s, "
+        f"Stage 2 {dt_stage2:.0f} s, "
+        + (f"valley map {dt_valley:.0f} s, " if dt_valley is not None else "")
+        + "MCMC sampling "
+        + (f"{dt_mcmc:.0f} s" if dt_mcmc is not None else "- (LOAD_CHAIN)")
+        + f", rest {dt_total - dt_batch - dt_stage2 - (dt_valley or 0.0) - (dt_mcmc or 0.0):.0f} s"
+    )

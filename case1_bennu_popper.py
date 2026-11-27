@@ -11,8 +11,9 @@ Paper cases (CASE in the settings)
 
 Geometry
 - Bennu: unnormalized degree-2 field of get_CS_unnormalized.bennu_10_10 (R_ref = 0.290 km),
-  pole (85.65, -60.17) deg, period 4.296057 h, IAU constant spin (frame rotations, body +Z =
-  pole, spin +omega, as in extra_ryugu_probe.py and extra/scenario_ISL_SH2.py).
+  IAU constant spin of bennu_v17.tpc about utc0 (pole RA 85.459, Dec -60.365 deg, period
+  4.296 h, prime meridian W(et0); get_CS_unnormalized.bennu_spin_spice): the body-fixed frame is
+  SPICE IAU_BENNU (frame rotations, body +Z = pole, spin +omega).
 - Observer: OSIRIS-REx from SPICE (OSIRIS-REX w.r.t. BENNU, J2000, no aberration correction)
   during Detailed Survey, north polar station (2019-03-16T18:00 + 24 h: 5.9-6.7 km from Bennu,
   2.4-3.3 deg from the spin axis, azimuth about the axis drifting by 25 deg).
@@ -82,6 +83,7 @@ Units: km, km/s, s.
 """
 
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -93,7 +95,7 @@ from scipy.stats import norm, uniform
 
 import MCMCPlots
 from BatchLSQ import BatchLSQ
-from get_CS_unnormalized import bennu_10_10
+from get_CS_unnormalized import bennu_10_10, bennu_spin_spice
 from extra.scenario_ISL_SH2 import (
     Degree2Gravity,
     IdentityChart,
@@ -169,6 +171,7 @@ def curvature_metric(a, b):
 
 if __name__ == "__main__":
     HERE = Path(__file__).resolve().parent
+    T0_SCRIPT = time.perf_counter()  # [Timing] summary at the end (run.log)
 
     # --------------------------
     # Settings
@@ -206,9 +209,8 @@ if __name__ == "__main__":
     R_ref = 0.290  # km
     GM_true, C_unn, S_unn = bennu_10_10()
     cs_true = np.array([C_unn[2, 0], C_unn[2, 1], S_unn[2, 1], C_unn[2, 2], S_unn[2, 2]])
-    alpha_true = np.deg2rad(85.65)
-    delta_true = np.deg2rad(-60.17)
-    omega_true = 2.0 * np.pi / (4.296057 * 3600.0)
+    # Pole, spin rate and prime meridian: the IAU model of bennu_v17.tpc about utc0, set after the
+    # kernels are loaded (alpha_true, delta_true, omega_true, w0_true)
     SHAPE_PATH = HERE / "data" / "kernels" / "orex" / "bennu_radar_v20.obj"  # orbit scene figure only
 
     # Popper: planned release state = circular (point-mass speed) orbit in the body-equatorial
@@ -241,19 +243,28 @@ if __name__ == "__main__":
     sig_prior_c20 = 0.5 * abs(cs_true[0])  # 50 %
     sig_prior_c2m = 3e-3  # C21, S21, C22, S22 (J22 = 2.1e-3: not known a priori)
 
-    # Integration (truth, batch, STTs)
+    # Integration (truth, batch, STTs), as in all the paper cases
     ivp = dict(method="DOP853", rtol=1e-11, atol=1e-14)
     STAGE1_ARCS_H = [2.0, 4.0, 8.0, 16.0, ARC_HOURS]  # batch continuation (see Stage 1)
     STAGE1_ITERS = 40  # max SRIF iterations per arc
     STAGE1_TOL = 1e-6  # stop when the step is shorter (norm in km, km/s, ...; 1 mm)
 
-    # MCMC
-    n_walkers = 96
-    n_samples = 180000  # ~80-110 x max(tau) (tau ~1600-2100 steps)
+    # MCMC settings (the same in all the paper cases): walkers start from N(MAP, batch
+    # covariance) (whitened by the batch covariance in theta, spread 1); at least n_samples
+    # steps, then on in blocks of CHECK_EVERY steps until n_steps >= N_TAU x max(tau) (at most
+    # MAX_SAMPLES; tau without the stranded walkers); every THIN_BY-th step stored; burn-in
+    # 2 x max(tau), thinning 0.5 x min(tau)
+    n_walkers = 128
+    n_samples = 100000  # minimum
+    N_TAU = 50
+    CHECK_EVERY = 50000
+    MAX_SAMPLES = 1000000
+    THIN_BY = 10
     burn_in = None  # None: 2 x max(tau)
     thin = None  # None: 0.5 x min(tau)
-    spherical_spread = 0.5  # walker start, whitened by the batch covariance in theta
+    spherical_spread = 1.0  # walker start, whitened by the batch covariance in theta
     SEED_WALKERS = 7
+    STRANDED_DLOGP = 100.0  # walkers this far below the ensemble median are left out of tau
     N_EXACT_CHECK = 1000  # posterior samples propagated exactly (importance check)
 
     # Posterior split (GMM) + STM propagation past the arc (as extra_ryugu_probe.py); Case 1a
@@ -335,14 +346,26 @@ if __name__ == "__main__":
             print(f"[Figure] {label} skipped: {type(err).__name__}: {err}")
 
     # --------------------------
+    # SPICE kernels; Bennu's rotation (R_ib(t) = spice.pxform("J2000", "IAU_BENNU", et0 + t))
+    # --------------------------
+    print("\n[SPICE] Loading kernels...")
+    load_orex_kernels(KERNEL_ROOT)
+    et0 = spice.str2et(utc0)
+    alpha_true, delta_true, omega_true, w0_true = bennu_spin_spice(et0)
+    print(
+        f"[SPICE] Bennu pole RA {np.rad2deg(alpha_true):.5f} deg, Dec {np.rad2deg(delta_true):.5f} deg, "
+        f"period {2 * np.pi / omega_true / 3600:.6f} h, W(et0) {np.rad2deg(w0_true):.4f} deg"
+    )
+
+    # --------------------------
     # Dynamics and propagators
     # --------------------------
     print("\n[Setup] Building the degree-2 field derivatives (sympy)...")
-    gravity1 = Degree2Gravity(R_ref, alpha_true, delta_true, omega_true, max_order=1)
+    gravity1 = Degree2Gravity(R_ref, alpha_true, delta_true, omega_true, w0=w0_true, max_order=1)
     gravity2 = (
         gravity1
         if STT_ORDER == 1
-        else Degree2Gravity(R_ref, alpha_true, delta_true, omega_true, max_order=STT_ORDER)
+        else Degree2Gravity(R_ref, alpha_true, delta_true, omega_true, w0=w0_true, max_order=STT_ORDER)
     )
     prop1 = STTPropagatorND(order=1, f_func=gravity1.f_func, A_func=gravity1.A_func, n=12)
     prop2 = STTPropagatorND(
@@ -352,15 +375,14 @@ if __name__ == "__main__":
         B_funcs={k: gravity2.B(k) for k in range(2, STT_ORDER + 1)},
         n=12,
     )
-    M0 = gravity1.M0  # R_ib(0)
+    M0 = gravity1.M0  # body-equatorial frame (R_ib(0) without the prime meridian angle)
+    Rb0 = gravity1.R_ib(0.0)  # R_ib(0): body-fixed frame at t = 0 (for the body longitude phi0)
     pole_i = gravity1.pole
 
     # --------------------------
     # SPICE: OREx states
     # --------------------------
-    print("\n[SPICE] Loading kernels and OREx states...")
-    load_orex_kernels(KERNEL_ROOT)
-    et0 = spice.str2et(utc0)
+    print("\n[SPICE] OREx states...")
     tau = np.arange(0.0, ARC_HOURS * 3600.0 + 1e-6, DT_OBS_MIN * 60.0)
     N = tau.size
     tau_dense = np.linspace(0.0, tau[-1], 2001)
@@ -512,6 +534,7 @@ if __name__ == "__main__":
             alpha=alpha_true,
             delta=delta_true,
             omega=omega_true,
+            w0=w0_true,
             observer="OSIRIS-REx",
         ),
     )
@@ -571,6 +594,7 @@ if __name__ == "__main__":
     # USE_SYMMETRY_CHART (only a parametrization of the step: same MAP and covariance).
     print(f"\n[Stage 1] Batch {BATCH_SOLVER.upper()} (first-order STMs, Gauss-Newton iterations) on growing arcs...")
     x0_ref1 = x0_ref.copy()
+    t_batch = time.perf_counter()
     for T_arc in STAGE1_ARCS_H:
         k = int(np.searchsorted(tau, T_arc * 3600.0 + 1e-6))
         print(f"\n[Stage 1] arc 0-{tau[k - 1] / 3600:.1f} h ({int(vis_mask[:k].sum())} visible)")
@@ -598,6 +622,8 @@ if __name__ == "__main__":
         )
         print(f"[Stage 1] exact MAP cost on the arc: {exact_map_cost_many(x0_ref1, k)[0]:.6f}")
 
+    dt_batch = time.perf_counter() - t_batch
+    print(f"[Timing] batch (Stage 1, all arcs) wall time {dt_batch:.1f} s")
     print(f"[Stage 1] exact MAP cost at ref1: {exact_map_cost(x0_ref1):.6f}")
     sd1 = np.sqrt(np.diag(cov1))
     print("\n[Stage 1] batch sigma:", sd1)
@@ -612,7 +638,10 @@ if __name__ == "__main__":
     # Stage 2: STTs about ref1, symmetry chart
     # --------------------------
     print(f"\n[Stage 2] Propagating ref1 with {'STMs' if STT_ORDER == 1 else f'STTs of order {STT_ORDER}'}...")
+    t_stage2 = time.perf_counter()
     sol_ref, stts_ref = prop2.propagate(x0=x0_ref1, t_eval=tau, **ivp)
+    dt_stage2 = time.perf_counter() - t_stage2
+    print(f"[Stage 2] propagation wall time {dt_stage2:.1f} s")
     stts_ref6 = {k: np.asarray(v)[:, :6] for k, v in stts_ref.items()}  # r, v rows only
 
     sym = SymmetryChart(x0_ref1, pole_i)  # always used for the diagnostics
@@ -695,6 +724,11 @@ if __name__ == "__main__":
             thin=thin,
             spherical_spread=spherical_spread,
             method_optimize="Powell",
+            thin_by=THIN_BY,
+            n_tau_target=N_TAU,
+            max_samples=MAX_SAMPLES,
+            check_every=CHECK_EVERY,
+            stranded_dlogp=STRANDED_DLOGP,
         )
         burn_in, thin = model.burn_in, model.thin
         model.save_chain(
@@ -771,16 +805,16 @@ if __name__ == "__main__":
     for i, nm in enumerate(names):
         print(moments_row(nm, samples_dx[:, i], prior_sigma[i], sd1[i]))
 
-    ref_der = derived_quantities(x0_ref1, M0)
-    der_post = derived_quantities(x_post, M0, ref=ref_der)
+    ref_der = derived_quantities(x0_ref1, Rb0)
+    der_post = derived_quantities(x_post, Rb0, ref=ref_der)
     rng_pr = np.random.default_rng(1)
     x_prior = x0_ref + prior_sigma * rng_pr.standard_normal((200_000, 12))
     if is_unif.any():
         x_prior[:, is_unif] = rng_pr.uniform(unif_lo[is_unif], unif_hi[is_unif], (200_000, int(is_unif.sum())))
-    der_prior = derived_quantities(x_prior, M0, ref=ref_der)
-    J_der = numeric_jacobian(lambda x: derived_quantities(x, M0, ref=ref_der), x0_ref1, 1e-4 * sd1)
+    der_prior = derived_quantities(x_prior, Rb0, ref=ref_der)
+    J_der = numeric_jacobian(lambda x: derived_quantities(x, Rb0, ref=ref_der), x0_ref1, 1e-4 * sd1)
     cov_der = J_der @ cov1 @ J_der.T
-    der_true = derived_quantities(x0_true, M0, ref=ref_der)
+    der_true = derived_quantities(x0_true, Rb0, ref=ref_der)
     print("[Summary] derived quantities (angles in rad):")
     for i, nm in enumerate(["C20", "J22", "lambda22", "phi0"]):
         print(moments_row(nm, der_post[:, i], np.std(der_prior[:, i]), np.sqrt(cov_der[i, i])))
@@ -910,7 +944,7 @@ if __name__ == "__main__":
         true_theta=der_true,
         batch_mean=ref_der,
         batch_cov=cov_der,
-        map_theta=_map(lambda d: derived_quantities(x0_ref1 + d, M0, ref=ref_der)),
+        map_theta=_map(lambda d: derived_quantities(x0_ref1 + d, Rb0, ref=ref_der)),
         show_batch_mean=SHOW_BATCH_MEAN,
     )
     _figure("corner derived", lambda: MCMCPlots.plot_corner(der_post, name="fig_corner_derived", **der_kw))
@@ -954,4 +988,15 @@ if __name__ == "__main__":
             figure=_figure,
         )
 
+    # Wall times of the stages (the MCMC one is also in chain.npz, run_wall_s); the rest is the
+    # setup (symbolic derivatives, truth, data), the exact check, the GMM propagation and the
+    # figures
+    dt_total = time.perf_counter() - T0_SCRIPT
+    dt_mcmc = getattr(model, "run_wall_s", None)
+    print(
+        f"\n[Timing] total {dt_total:.0f} s ({dt_total / 3600:.2f} h): batch {dt_batch:.0f} s, "
+        f"Stage 2 {dt_stage2:.0f} s, MCMC sampling "
+        + (f"{dt_mcmc:.0f} s" if dt_mcmc is not None else "- (LOAD_CHAIN)")
+        + f", rest {dt_total - dt_batch - dt_stage2 - (dt_mcmc or 0.0):.0f} s"
+    )
     print(f"\n[Done] Results in {fig_dir}")

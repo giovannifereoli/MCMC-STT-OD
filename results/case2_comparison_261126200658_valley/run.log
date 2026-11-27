@@ -1,0 +1,38 @@
+[Exact] data, priors and ref1 from case2b_bennu_particle_stmbank_261126193440_valley
+[Exact] positions at ref1 vs the run's ref1 trajectory: max |dr| = 1.72e-08 m; chi2 at ref1 = 36.59
+[Exact] 4 seeds x 128 walkers, >= 100000 steps until 50 x max(tau) (at most 1000000), storing every 10, in parallel...
+[Exact] valley map along g = [-0.044 -0.432  0.901] on the exact residuals...
+[Valley] profile along e: 162 points, h = +6.30 ... +22.40 (step 0.1); min cost 34.304 at h = +17.90
+[Valley] local minima of the profile: h +10.90 (dlogp -1.250), h +17.90 (dlogp -0.000)
+[Valley] h, -dlogp: +6.3 25.10, +7.3 13.51, +8.3 6.51, +9.3 2.86, +10.3 1.43, +11.3 1.30, +12.3 1.68, +13.3 2.04, +14.3 2.05, +15.3 1.61, +16.3 0.86, +17.3 0.16, +18.3 0.10, +19.3 1.48, +20.3 5.29, +21.3 12.65, +22.3 24.84
+[Timing] exact valley map 22 s (162 profile points)
+[Exact] seed 3: 100000 steps (53 min), tau_max 337, n_steps / tau_max = 296.9, acceptance 0.338, 0 stranded walkers
+[Exact] seed 3: done, 100000 steps = 296.9 tau_max, burn-in 673, thin 80, 1241 x 128 samples
+[Timing] exact seed 3: sampling 3208 s (0.89 h) on one process, 100000 steps x 128 walkers; 32.1 ms per step, 0.251 ms per evaluation
+[Exact] seed 4: 100000 steps (53 min), tau_max 332, n_steps / tau_max = 301.4, acceptance 0.338, 0 stranded walkers
+[Exact] seed 4: done, 100000 steps = 301.4 tau_max, burn-in 663, thin 80, 1241 x 128 samples
+[Timing] exact seed 4: sampling 3208 s (0.89 h) on one process, 100000 steps x 128 walkers; 32.1 ms per step, 0.251 ms per evaluation
+[Exact] seed 1: 100000 steps (54 min), tau_max 341, n_steps / tau_max = 293.6, acceptance 0.338, 0 stranded walkers
+[Exact] seed 1: done, 100000 steps = 293.6 tau_max, burn-in 681, thin 80, 1241 x 128 samples
+[Timing] exact seed 1: sampling 3211 s (0.89 h) on one process, 100000 steps x 128 walkers; 32.1 ms per step, 0.251 ms per evaluation
+[Exact] seed 2: 100000 steps (54 min), tau_max 329, n_steps / tau_max = 304.2, acceptance 0.338, 0 stranded walkers
+[Exact] seed 2: done, 100000 steps = 304.2 tau_max, burn-in 657, thin 80, 1241 x 128 samples
+[Timing] exact seed 2: sampling 3211 s (0.89 h) on one process, 100000 steps x 128 walkers; 32.1 ms per step, 0.251 ms per evaluation
+[Exact] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/valley/results/case2_comparison_261126200658_valley/exact_reference.npz
+[Compare] stt2 : case2a_bennu_particle_stt2_261126201332_valley
+[Compare] bank : case2b_bennu_particle_stmbank_261126193440_valley
+[Compare] stm  : case2_bennu_particle_stm_261126101730
+[Exact] reusing results/case2_comparison_261126200658_valley/exact_reference.npz
+[Figure] saved /private/tmp/claude-502/-Users-gife3672-Library-CloudStorage-OneDrive-UCB-O365-Academia-CU-PhD-Research-Codes-MCMC/176c50db-53bd-4d45-a849-1edc3c18f644/scratchpad/valley/results/case2_comparison_261126200658_valley/fig_case2_comparison.pdf
+
+Case 2 comparison (h0 = launch height above the equator, vh0 = out-of-plane launch speed; truth h0 = -0.0 m, vh0 = -21.8 mm/s; batch h0 = +25.7 m, vh0 = -7.4 mm/s; lobe split at h0 = 12.0 m, the minimum of the exact h0 marginal between them)
+
+likelihood                     n  drop    acc  n/tau          h0 2.5/16/50/84/97.5 % [m]  P(truth lobe)  TV(h0)  truth lvl (h0,vh0)  (h0,GM)
+Exact dynamics            635392     0  0.338  293.6   -12.3   -8.4   -2.0  +22.1  +30.5          0.741   0.000               0.386    0.234
+STT-2 (Case 2a)           127232     0  0.330  334.9    -8.5   -4.7   +4.9  +25.6  +31.4          0.592   0.216               0.452    0.090
+Bank of 21 STMs (Case 2b)  181888     0  0.361  391.6   -20.6  -12.9   -3.6  +21.8  +30.3          0.747   0.170               0.330    0.324
+Single STM                182272     0  0.384  672.2   +16.8  +21.2  +25.8  +30.3  +34.7          0.001   0.755               1.000    1.000
+
+Exact dynamics per seed: P(truth lobe) 0.741, 0.743, 0.739, 0.741 (range 0.739-0.743); steps 100000, 100000, 100000, 100000
+
+drop: stranded walkers left out; acc: mean acceptance; n/tau: steps per autocorrelation time (max over parameters; exact: the least converged seed); P(truth lobe): posterior share on the truth's side of the split; TV(h0): total variation distance of the h0 marginal from the exact one (60 bins); truth lvl: posterior mass denser than the truth in that plane (0 = mode, 1 = outside).
